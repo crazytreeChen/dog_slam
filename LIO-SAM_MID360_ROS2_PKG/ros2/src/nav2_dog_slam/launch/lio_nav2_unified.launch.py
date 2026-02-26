@@ -83,8 +83,8 @@ LIO_TOPIC_CONFIGS = {
         'pointcloud_topic': '/lio/body/cloud',
         'odom_topic': '/lio/odom',
         'octomap_topic': '/lio/cloud_world',
-        'target_frame': 'base_footprint'
-        # 'target_frame': 'base_link'
+        # 'target_frame': 'base_footprint'
+        'target_frame': 'base_link'
     }
 }
 
@@ -215,7 +215,7 @@ def generate_launch_description():
         ],
         parameters=[{
             'transform_tolerance': 0.1,
-            'min_height': -0.1,
+            'min_height': 0.1,
             'max_height': 1.0,
             'angle_min': -3.1,
             'angle_max': 3.1,

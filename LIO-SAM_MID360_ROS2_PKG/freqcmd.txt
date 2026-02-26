@@ -50,7 +50,7 @@ ros2 service call /slam_toolbox/save_map slam_toolbox/srv/SaveMap "{name: {data:
 
 
 # 保存lio-sam点云 （不使用）
-source ros2/install/setup.bash 
+source ros2/install/setup.bash
 ros2 service call /lio_sam/save_map lio_sam/srv/SaveMap "{}"
 
 # 从pcd点云截取2d栅格地图

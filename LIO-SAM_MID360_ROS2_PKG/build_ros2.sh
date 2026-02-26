@@ -15,5 +15,5 @@ colcon build --symlink-install --packages-select fast_lio
 colcon build --symlink-install --packages-select point_lio
 colcon build --symlink-install --packages-select faster_lio
 colcon build --symlink-install --packages-select direct_lidar_inertial_odometry
-colcon build --symlink-install --parallel-workers 8 --packages-skip livox_gazebo_ros2_gpu_simulation
+colcon build --symlink-install --parallel-workers 1 --packages-skip livox_gazebo_ros2_gpu_simulation
 source install/setup.bash

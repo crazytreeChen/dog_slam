@@ -114,12 +114,7 @@
 <xacro:my_robot_ros2_control_planar />   <!-- 如果gazebo_control更改名字，请修改此处 -->
 <xacro:gazebo_sensor_plugin />
 
-<!-- gazebo_ros2_control plugin -->
-<gazebo>
-  <plugin name="gazebo_ros2_control" filename="libgazebo_ros2_control.so">
-    <parameters>/home/ywj/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/install/livox_gazebo_ros2_gpu_simulation/share/livox_gazebo_ros2_gpu_simulation/config/myrobot_ros2_controller.yaml</parameters>
-  </plugin>
-</gazebo>
+<!-- gazebo_ros2_control plugin - removed to avoid crashes -->
 
 
 
