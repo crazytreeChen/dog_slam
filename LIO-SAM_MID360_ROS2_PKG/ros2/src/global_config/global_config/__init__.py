@@ -135,6 +135,32 @@ config_by_machine = {
         # DESKTOP-ypat主机配置 - Livox MID360
         'LIVOX_MID360_CONFIG': '/home/ywj/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/livox_ros_driver2/config/MID360_config_gazebo.json',
         'LIVOX_MID360_CONFIG_NO_TILT': '/home/ywj/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/livox_ros_driver2/config/MID360_config_gazebo.json',
+    },
+    'CrazyTreeChen': {
+        # CrazyTreeChen主机配置 - LIO-SAM
+        'ONLINE_LIDAR': False,
+        'LIO_SAM_BASE_CODE_PATH': '/home/crazytree/ros_ws/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/LIO-SAM_MID360_ROS2_DOG/',
+        'DEFAULT_BAG_PATH': '/mnt/d/work/robot/livox_record_tilt_test2/',
+        'DEFAULT_RELIABILITY_OVERRIDE': '/home/crazytree/ros_ws/dog_slam/LIO-SAM_MID360_ROS2_PKG/scripts/reliability_override.yaml',
+        'LIO_SAM_DEFAULT_LOAM_SAVE_DIR': '/mnt/d/work/LOAM/',
+        
+        # CrazyTreeChen主机配置 - Nav2
+        'NAV2_BASE_CODE_PATH': '/home/crazytree/ros_ws/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/nav2_dog_slam/',
+        'NAV2_DEFAULT_MAP_FILE': "/home/crazytree/ros_ws/dog_slam/LIO-SAM_MID360_ROS2_PKG/map_sample/map.yaml",
+        'NAV2_DEFAULT_WEB_SCRIPT_PATH': '/home/crazytree/ros_ws/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/nav2_dog_slam/web/run_web.sh',
+        'NAV2_DEFAULT_BT_XML_PATH': '/home/crazytree/ros_ws/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/nav2_dog_slam/config/navigate_to_pose_w_replanning_and_recovery.xml',
+        'NAV2_DEFAULT_PARAMS_FILE': '/home/crazytree/ros_ws/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/nav2_dog_slam/config/nav2_params_sim.yaml',
+        
+        # CrazyTreeChen主机配置 - FAST-LIO
+        'FAST_LIO_BASE_CODE_PATH': '/home/crazytree/ros_ws/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/FAST_LIO_ROS2_edit/',
+        'FAST_LIO_LIDAR_TYPE': 1,  # 其他主机lidar_type为1
+        'FAST_LIO_MAP_FILE_PATH': '/home/crazytree/pcd/test.pcd',  # 添加的地图文件路径
+        'DEFAULT_RELIABILITY_OVERRIDE': '/home/crazytree/ros_ws/dog_slam/LIO-SAM_MID360_ROS2_PKG/scripts/reliability_override.yaml',
+        'DEFAULT_USE_SIM_TIME': True,
+        
+        # CrazyTreeChen主机配置 - Livox MID360
+        'LIVOX_MID360_CONFIG': '/home/crazytree/ros_ws/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/livox_ros_driver2/config/MID360_config_gazebo.json',
+        'LIVOX_MID360_CONFIG_NO_TILT': '/home/crazytree/ros_ws/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/livox_ros_driver2/config/MID360_config_gazebo.json',
     }
 }
 
