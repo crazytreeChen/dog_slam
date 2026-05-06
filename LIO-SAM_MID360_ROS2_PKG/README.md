@@ -28,6 +28,31 @@ sudo apt install curl gnupg2 lsb-release
 sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
 ```
 
+### TinyProxy 网络代理配置
+
+为 192.168.168.100 提供网络代理服务：
+
+```bash
+# 安装 tinyproxy
+sudo apt update
+sudo apt install -y tinyproxy
+
+# 配置 tinyproxy 允许访问的客户端 IP 和端口
+sudo sed -i 's/^Port 8888/Port 7890/' /etc/tinyproxy/tinyproxy.conf
+sudo sed -i '/^Allow 127.0.0.1$/a Allow 10.0.0.0/8\nAllow 192.168.0.0/16' /etc/tinyproxy/tinyproxy.conf
+
+# 重启 tinyproxy 服务
+sudo systemctl restart tinyproxy
+sudo systemctl enable tinyproxy
+
+# 验证服务状态
+sudo systemctl status tinyproxy
+
+# 在客户端上使用代理
+export http_proxy=http://<本机IP>:7890
+export https_proxy=http://<本机IP>:7890
+```
+
 ## 依赖项安装
 
 ### Livox-SDK2 安装
