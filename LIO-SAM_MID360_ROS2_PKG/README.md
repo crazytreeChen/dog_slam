@@ -51,6 +51,19 @@ sudo systemctl status tinyproxy
 # 在客户端上使用代理
 export http_proxy=http://<本机IP>:7890
 export https_proxy=http://<本机IP>:7890
+
+
+
+# 链式代理
+# conf添加：Upstream http 10.0.4.185:10811
+# 服务端前台启动
+sudo tinyproxy -d -c /etc/tinyproxy/tinyproxy-chain.conf
+
+# 内网机git代理配置
+git config --global http.proxy "http://192.168.168.151:7890"
+git config --global https.proxy "http://192.168.168.151:7890"
+git config --global http.sslVerify false
+
 ```
 
 ## 依赖项安装
