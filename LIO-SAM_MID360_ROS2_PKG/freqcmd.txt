@@ -285,3 +285,7 @@ ln -sd /home/robot/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/zsi_tools/fast_lio_
 ln -sd /home/robot/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/global_config/ global_config
 ln -sd /home/robot/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/Super-LIO/ Super-LIO
 ln -sd /home/robot/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/zsi_tools/zg_double_lidar/ zg_double_lidar
+
+
+
+sudo systemctl start zg_pointcloud.service 
