@@ -49,8 +49,8 @@ sudo systemctl enable tinyproxy
 sudo systemctl status tinyproxy
 
 # 在客户端上使用代理
-export http_proxy=http://<本机IP>:7890
-export https_proxy=http://<本机IP>:7890
+export http_proxy=http://<本机IP>:7889
+export https_proxy=http://<本机IP>:7889
 
 
 

@@ -273,6 +273,10 @@ ros2 launch fast_lio mapping.launch.py
 
 nohup ros2 launch fast_lio mapping.launch.py > recordlio.log & && nohup ros2 launch sc_pgo_ros2 sc_pgo.launch.py > recordsc.log &
 
+
+
+git submodule update --init --recursive --remote
+
 ros2 launch zg_double_lidar double_lidar.launch.py
 ros2 launch super_lio Robosense_airy.py
 
