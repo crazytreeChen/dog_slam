@@ -104,7 +104,14 @@ LIO_TOPIC_CONFIGS = {
         'octomap_topic': 'livox/lidar',
         'target_frame': 'base_footprint',
         'map_frame': 'map'
-    }
+    },
+    'no_lio': {
+        'pointcloud_topic': 'front_lidar/cloud_world',
+        'odom_topic': 'front_lidar/odom',
+        'octomap_topic': 'front_lidar/cloud_world',
+        'target_frame': 'base_footprint',
+        'map_frame': 'map'
+    },
 }
 
 
@@ -309,6 +316,7 @@ def generate_launch_description():
         }],
         output='screen',
         prefix=['taskset -c 5'],
+        condition=IfCondition(PythonExpression(["'", SLAM_ALGORITHM, "' != 'no_lio'"]))
     )
     
     # rosbridge_websocket节点
