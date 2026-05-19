@@ -35,13 +35,14 @@ struct CellData
   bool ray_cleared = false;
 };
 
-class TraversabilityLayer : public nav2_costmap_2d::CostmapLayer
+class TraversabilityLayer : public nav2_costmap_2d::Layer, public nav2_costmap_2d::Costmap2D
 {
 public:
   TraversabilityLayer();
   virtual ~TraversabilityLayer();
 
   void onInitialize() override;
+  void matchSize() override;
   void updateBounds(
     double robot_x, double robot_y, double robot_yaw,
     double * min_x, double * min_y, double * max_x, double * max_y) override;
@@ -86,6 +87,7 @@ private:
   int cloud_buffer_size_;
   bool enabled_;
   bool publish_slope_map_;
+  bool enable_raycast_clear_;
 
   std::vector<CellData> height_map_;
   unsigned int height_map_size_x_;
