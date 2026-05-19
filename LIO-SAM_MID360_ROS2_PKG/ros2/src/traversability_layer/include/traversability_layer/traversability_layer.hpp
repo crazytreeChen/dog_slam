@@ -2,7 +2,6 @@
 
 #include <mutex>
 #include <vector>
-#include <unordered_map>
 #include <memory>
 #include <string>
 #include <cstdint>
@@ -22,39 +21,24 @@
 namespace traversability_layer
 {
 
+struct Point3D
+{
+  double x;
+  double y;
+  double z;
+};
+
 struct CellData
 {
   float min_z = std::numeric_limits<float>::max();
   float max_z = std::numeric_limits<float>::lowest();
-  float mean_z = 0.0f;
+  float representative_z = 0.0f;
   unsigned int point_count = 0;
   float height_diff = 0.0f;
   float slope_x = 0.0f;
   float slope_y = 0.0f;
   float slope_magnitude = 0.0f;
   bool has_data = false;
-  rclcpp::Time last_seen_time{0, 0, RCL_ROS_TIME};
-  bool ray_cleared = false;
-};
-
-struct GridKey
-{
-  int32_t gx;
-  int32_t gy;
-
-  bool operator==(const GridKey & other) const
-  {
-    return gx == other.gx && gy == other.gy;
-  }
-};
-
-struct GridKeyHasher
-{
-  size_t operator()(const GridKey & k) const
-  {
-    return (static_cast<uint64_t>(static_cast<uint32_t>(k.gx)) << 32) ^
-           static_cast<uint32_t>(k.gy);
-  }
 };
 
 class TraversabilityLayer : public nav2_costmap_2d::Layer, public nav2_costmap_2d::Costmap2D
@@ -80,16 +64,9 @@ public:
 
 private:
   void pointCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
-  void processCloud(
-    const pcl::PointCloud<pcl::PointXYZ>::Ptr & cloud,
-    const rclcpp::Time & stamp);
-  void raycastClear(
-    double sensor_x, double sensor_y,
-    const std::vector<std::pair<int, int>> & marked_cells);
   void computeSlope();
   unsigned char computeCost(const CellData & cell) const;
   void resetMaps();
-  void decayOldObservations(const rclcpp::Time & now);
 
   std::mutex mutex_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
@@ -111,14 +88,19 @@ private:
   bool publish_slope_map_;
   bool enable_raycast_clear_;
   bool clear_each_frame_;
+  double cell_resolution_;
 
-  std::unordered_map<GridKey, CellData, GridKeyHasher> global_height_map_;
+  std::vector<CellData> grid_map_;
+  unsigned int grid_size_x_ = 0;
+  unsigned int grid_size_y_ = 0;
 
-  inline void worldToGrid(double wx, double wy, int32_t & gx, int32_t & gy) const
+  std::vector<Point3D> latest_cloud_;
+  rclcpp::Time latest_cloud_stamp_{0, 0, RCL_ROS_TIME};
+  bool cloud_updated_ = false;
+
+  inline size_t gridIndex(unsigned int cx, unsigned int cy) const
   {
-    const double res = getResolution();
-    gx = static_cast<int32_t>(std::floor(wx / res));
-    gy = static_cast<int32_t>(std::floor(wy / res));
+    return static_cast<size_t>(cy) * grid_size_x_ + static_cast<size_t>(cx);
   }
 
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr slope_pub_;
