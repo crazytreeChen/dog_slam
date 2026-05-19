@@ -32,7 +32,7 @@ void TraversabilityLayer::onInitialize()
 
   declareParameter("enabled", rclcpp::ParameterValue(true));
   declareParameter("pointcloud_topic", rclcpp::ParameterValue(std::string("/lio/body/cloud")));
-  declareParameter("sensor_frame", rclcpp::ParameterValue(std::string("body")));
+  declareParameter("sensor_frame", rclcpp::ParameterValue(std::string("")));
   declareParameter("max_obstacle_height", rclcpp::ParameterValue(2.0));
   declareParameter("min_obstacle_height", rclcpp::ParameterValue(-0.5));
   declareParameter("max_slope_traversable", rclcpp::ParameterValue(45.0));
@@ -129,7 +129,7 @@ void TraversabilityLayer::pointCloudCallback(const sensor_msgs::msg::PointCloud2
   std::string target_frame = layered_costmap_->getGlobalFrameID();
   std::string source_frame = msg->header.frame_id;
 
-  if (!sensor_frame_.empty()) {
+  if (!sensor_frame_.empty() && sensor_frame_ != "") {
     source_frame = sensor_frame_;
   }
 

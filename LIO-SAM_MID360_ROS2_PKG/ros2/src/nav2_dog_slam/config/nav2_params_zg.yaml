@@ -341,9 +341,9 @@ local_costmap:
       # footprint_padding: 0.01  # 新增参数
       # lethal_cost_threshold: 100  # 新增参数
       map_topic: "map"  # 新增参数
-      # observation_sources: "scan"  # 新增参数
-      # origin_x: 0.0  # 新增参数
-      # origin_y: 0.0  # 新增参数
+      observation_sources: "scan"  # 新增参数
+      origin_x: -5.0  # 新增参数
+      origin_y: -5.0  # 新增参数
       track_unknown_space: true  # 新增参数
       # trinary_costmap: true  # 新增参数
       # unknown_cost_value: 255  # 新增参数
@@ -353,7 +353,7 @@ local_costmap:
       # filters: []  # 新增参数 - 无过滤器
       
       # 插件配置
-      plugins: ["traversability_layer_local",  "inflation_layer_local"] # "voxel_layer", "stvl_layer","obstacle_layer_local",
+      plugins: ["traversability_layer_local", "obstacle_layer_local", "inflation_layer_local"] # "voxel_layer", "stvl_layer",
       
 
       # # STVL (Spatio-Temporal Voxel Layer) - 3D点云障碍物层
@@ -419,9 +419,9 @@ local_costmap:
       # 可通行性层参数 - 基于点云的高度差和坡度分析
       traversability_layer_local:
         plugin: "traversability_layer::TraversabilityLayer"
-        enabled: true
+        enabled: false
         pointcloud_topic: /rkbot/front_lidar/body/cloud
-        sensor_frame: rkbot/imu
+        # sensor_frame: rkbot/imu
         max_obstacle_height: 5.0
         min_obstacle_height: -1.0
         max_slope_traversable: 45.0
@@ -436,30 +436,30 @@ local_costmap:
         publish_slope_map: true
         enable_raycast_clear: false
 
-      # # 障碍物层参数
-      # obstacle_layer_local:
-      #   plugin: "nav2_costmap_2d::ObstacleLayer"
-      #   enabled: true
-      #   observation_sources: scan
-      #   combination_method: 1  # 取最大值组合方法
-      #   footprint_clearing_enabled: true  # 启用footprint清理
-      #   max_obstacle_height: 100.0
-      #   min_obstacle_height: -100.0
-      #   scan:
-      #     topic: /rkbot/scan
-      #     max_obstacle_height: 100.0
-      #     min_obstacle_height: -100.0
-      #     clearing: true
-      #     marking: true
-      #     data_type: "LaserScan"
-      #     raytrace_max_range: 15.0
-      #     raytrace_min_range: 0.0
-      #     obstacle_max_range: 15.0
-      #     obstacle_min_range: 0.0
-      #     # expected_update_rate: 0.0  # 新增参数
-      #     # inf_is_valid: false  # 新增参数
-      #     # observation_persistence: 0.0  # 新增参数
-      #     # sensor_frame: ""  # 新增参数 - 空表示使用数据帧
+      # 障碍物层参数
+      obstacle_layer_local:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        observation_sources: scan
+        combination_method: 1  # 取最大值组合方法
+        footprint_clearing_enabled: true  # 启用footprint清理
+        max_obstacle_height: 100.0
+        min_obstacle_height: -100.0
+        scan:
+          topic: /rkbot/scan_rear
+          max_obstacle_height: 100.0
+          min_obstacle_height: -100.0
+          clearing: true
+          marking: true
+          data_type: "LaserScan"
+          raytrace_max_range: 7.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 7.0
+          obstacle_min_range: 0.0
+          # expected_update_rate: 0.0  # 新增参数
+          # inf_is_valid: false  # 新增参数
+          # observation_persistence: 0.0  # 新增参数
+          # sensor_frame: ""  # 新增参数 - 空表示使用数据帧
       
       # 膨胀层参数 - 大幅增加膨胀半径和成本缩放，增强避障能力
       inflation_layer_local:
