@@ -39,7 +39,6 @@ struct CellData
   float slope_y = 0.0f;
   float slope_magnitude = 0.0f;
   bool has_data = false;
-  bool is_observed = false;
 };
 
 struct TimedPoint
@@ -71,7 +70,7 @@ public:
 
 private:
   void pointCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
-  void computeSlope();
+  void computeSlope(double origin_x, double origin_y);
   unsigned char computeCost(const CellData & cell) const;
   void resetMaps();
 
@@ -103,6 +102,8 @@ private:
   unsigned int grid_size_y_ = 0;
 
   std::vector<TimedPoint> accumulated_cloud_;
+  double sensor_global_x_ = 0.0;
+  double sensor_global_y_ = 0.0;
   bool cloud_updated_ = false;
 
   inline size_t gridIndex(unsigned int cx, unsigned int cy) const

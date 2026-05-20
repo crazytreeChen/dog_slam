@@ -437,7 +437,7 @@ local_costmap:
         slope_cost_scale: 3.0         # 坡度 cost 指数增长系数
 
         # 高度差参数
-        step_height_threshold: 0.4    # 台阶高度阈值(m)，超过此值进入坡度检测
+        step_height_threshold: 0.9    # 台阶高度阈值(m)，超过此值进入坡度检测
         height_cost_start: 0.05        # 产生 cost 的最小高度(m)，低于此值 cost=0
 
         # 高度差 cost 缩放（仅在旧版 computeCost 中使用，当前版本由三段逻辑取代
@@ -462,7 +462,7 @@ local_costmap:
         clear_each_frame: true        # 每帧是否清除网格数据
 
         # 网格分辨率
-        cell_resolution: 0.05          # 可通行性分析网格分辨率(m)
+        cell_resolution: 0.1          # 可通行性分析网格分辨率(m)
 
       # 障碍物层参数
       obstacle_layer_local:

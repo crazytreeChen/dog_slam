@@ -170,6 +170,9 @@ void TraversabilityLayer::pointCloudCallback(const sensor_msgs::msg::PointCloud2
   double tx = transform.transform.translation.x;
   double ty = transform.transform.translation.y;
   double tz = transform.transform.translation.z;
+
+  sensor_global_x_ = tx;
+  sensor_global_y_ = ty;
   double qx = transform.transform.rotation.x;
   double qy = transform.transform.rotation.y;
   double qz = transform.transform.rotation.z;
@@ -227,16 +230,18 @@ void TraversabilityLayer::pointCloudCallback(const sensor_msgs::msg::PointCloud2
   cloud_updated_ = true;
 }
 
-void TraversabilityLayer::computeSlope()
+void TraversabilityLayer::computeSlope(double origin_x, double origin_y)
 {
   static auto clock = std::make_shared<rclcpp::Clock>(RCL_ROS_TIME);
   int cells_with_slope = 0;
   float max_slope_mag = 0.0f;
   float max_height_diff = 0.0f;
-  float inv_2res = 1.0f / static_cast<float>(2.0 * cell_resolution_);
 
-  for (unsigned int cy = 1; cy < grid_size_y_ - 1; cy++) {
-    for (unsigned int cx = 1; cx < grid_size_x_ - 1; cx++) {
+  float sensor_gx = static_cast<float>((sensor_global_x_ - origin_x) / cell_resolution_);
+  float sensor_gy = static_cast<float>((sensor_global_y_ - origin_y) / cell_resolution_);
+
+  for (unsigned int cy = 0; cy < grid_size_y_; cy++) {
+    for (unsigned int cx = 0; cx < grid_size_x_; cx++) {
       size_t idx = gridIndex(cx, cy);
       auto & cell = grid_map_[idx];
 
@@ -244,34 +249,75 @@ void TraversabilityLayer::computeSlope()
         continue;
       }
 
-      const auto & xm = grid_map_[gridIndex(cx - 1, cy)];
-      const auto & xp = grid_map_[gridIndex(cx + 1, cy)];
-      const auto & ym = grid_map_[gridIndex(cx, cy - 1)];
-      const auto & yp = grid_map_[gridIndex(cx, cy + 1)];
+      cell.slope_magnitude = 0.0f;
 
-      float dz_dx = 0.0f;
-      float dz_dy = 0.0f;
+      float dx = sensor_gx - static_cast<float>(cx);
+      float dy = sensor_gy - static_cast<float>(cy);
+      float dist = std::sqrt(dx * dx + dy * dy);
 
-      if (xm.has_data && xp.has_data) {
-        dz_dx = (xp.representative_z - xm.representative_z) * inv_2res;
+      if (dist < 1.0f) {
+        continue;
       }
 
-      if (ym.has_data && yp.has_data) {
-        dz_dy = (yp.representative_z - ym.representative_z) * inv_2res;
+      int n_steps = static_cast<int>(std::ceil(dist / 0.5f));
+      float step_x = dx / static_cast<float>(n_steps);
+      float step_y = dy / static_cast<float>(n_steps);
+
+      float cur_x = static_cast<float>(cx) + 0.5f;
+      float cur_y = static_cast<float>(cy) + 0.5f;
+
+      float ref_z = cell.representative_z;
+      float ref_dist = 0.0f;
+      bool found_ref = false;
+
+      for (int i = 1; i <= n_steps; i++) {
+        cur_x += step_x;
+        cur_y += step_y;
+
+        int check_cx = static_cast<int>(std::floor(cur_x));
+        int check_cy = static_cast<int>(std::floor(cur_y));
+
+        if (check_cx == static_cast<int>(cx) && check_cy == static_cast<int>(cy)) {
+          continue;
+        }
+
+        if (check_cx < 0 || check_cx >= static_cast<int>(grid_size_x_) ||
+            check_cy < 0 || check_cy >= static_cast<int>(grid_size_y_)) {
+          break;
+        }
+
+        size_t ref_idx = gridIndex(
+          static_cast<unsigned int>(check_cx), static_cast<unsigned int>(check_cy));
+        const auto & ref_cell = grid_map_[ref_idx];
+
+        if (ref_cell.has_data) {
+          ref_z = ref_cell.representative_z;
+          float ddx = cur_x - (static_cast<float>(cx) + 0.5f);
+          float ddy = cur_y - (static_cast<float>(cy) + 0.5f);
+          ref_dist = std::sqrt(ddx * ddx + ddy * ddy) * static_cast<float>(cell_resolution_);
+          found_ref = true;
+          break;
+        }
       }
 
-      cell.slope_x = dz_dx;
-      cell.slope_y = dz_dy;
-      cell.slope_magnitude = std::sqrt(dz_dx * dz_dx + dz_dy * dz_dy);
+      if (found_ref && ref_dist > 1e-6f) {
+        float dz = std::abs(cell.representative_z - ref_z);
 
-      if (cell.slope_magnitude > max_slope_mag) {
-        max_slope_mag = cell.slope_magnitude;
-      }
-      if (cell.height_diff > max_height_diff) {
-        max_height_diff = cell.height_diff;
-      }
-      if (dz_dx != 0.0f || dz_dy != 0.0f) {
-        cells_with_slope++;
+        if (dz > static_cast<float>(step_height_threshold_)) {
+          cell.slope_magnitude = 100.0f;
+        } else {
+          cell.slope_magnitude = dz / ref_dist;
+        }
+
+        if (cell.slope_magnitude > max_slope_mag) {
+          max_slope_mag = cell.slope_magnitude;
+        }
+        if (dz > max_height_diff) {
+          max_height_diff = dz;
+        }
+        if (cell.slope_magnitude > 0.0f) {
+          cells_with_slope++;
+        }
       }
     }
   }
@@ -288,25 +334,27 @@ unsigned char TraversabilityLayer::computeCost(const CellData & cell) const
     return nav2_costmap_2d::NO_INFORMATION;
   }
 
-  unsigned char height_cost = 0;
   float height_above_ground = cell.height_diff;
 
-  if (height_above_ground > static_cast<float>(height_cost_start_)) {
-    if (height_above_ground <= static_cast<float>(step_height_threshold_)) {
-      float range = static_cast<float>(step_height_threshold_) - static_cast<float>(height_cost_start_);
-      if (range <= 1e-6f) {
-        height_cost = static_cast<unsigned char>(std::min(253.0f, (height_above_ground / static_cast<float>(step_height_threshold_)) * 253.0f));
-      } else {
-        float ratio = (height_above_ground - static_cast<float>(height_cost_start_)) / range;
-        float cost_f = 1.0f + ratio * 252.0f;
-        height_cost = static_cast<unsigned char>(std::min(253.0f, cost_f));
-      }
-    } else {
-      float excess = height_above_ground - static_cast<float>(step_height_threshold_);
-      float cost_f = 253.0f + std::min(excess / static_cast<float>(step_height_threshold_), 1.0f);
-      height_cost = static_cast<unsigned char>(std::min(254.0f, cost_f));
-    }
+  if (height_above_ground <= static_cast<float>(height_cost_start_)) {
+    return 0;
   }
+
+  if (height_above_ground <= static_cast<float>(step_height_threshold_)) {
+    float range = static_cast<float>(step_height_threshold_) - static_cast<float>(height_cost_start_);
+    if (range <= 1e-6f) {
+      return static_cast<unsigned char>(std::min(253.0f, (height_above_ground / static_cast<float>(step_height_threshold_)) * 253.0f));
+    }
+    float ratio = (height_above_ground - static_cast<float>(height_cost_start_)) / range;
+    float cost_f = 1.0f + ratio * 252.0f;
+    return static_cast<unsigned char>(std::min(253.0f, cost_f));
+  }
+
+  float excess = height_above_ground - static_cast<float>(step_height_threshold_);
+  float fallback_ratio = 1.0f - std::exp(-static_cast<float>(height_cost_scale_) * excess);
+  unsigned char height_cost = static_cast<unsigned char>(
+    std::min(static_cast<float>(nav2_costmap_2d::LETHAL_OBSTACLE),
+             fallback_ratio * static_cast<float>(lethal_cost_threshold_)));
 
   unsigned char slope_cost = 0;
   float slope_angle = std::atan(cell.slope_magnitude);
@@ -423,7 +471,6 @@ void TraversabilityLayer::updateCosts(
       cell.representative_z = z;
       cell.point_count = 1;
       cell.has_data = true;
-      cell.is_observed = true;
     }
     else
     {
@@ -448,17 +495,10 @@ void TraversabilityLayer::updateCosts(
       if (cell.height_diff < 0.0f) {
         cell.height_diff = 0.0f;
       }
-    } else {
-      cell.min_z = global_min_z;
-      cell.max_z = global_min_z;
-      cell.representative_z = global_min_z;
-      cell.height_diff = 0.0f;
-      cell.has_data = true;
-      cell.is_observed = false;
     }
   }
 
-  computeSlope();
+  computeSlope(ox, oy);
 
   unsigned char * master_array = master_grid.getCharMap();
   int cells_with_cost = 0;
@@ -528,7 +568,7 @@ void TraversabilityLayer::updateCosts(
           size_t idx = gridIndex(cx, cy);
           const auto & cell = grid_map_[idx];
 
-          if (!cell.has_data || !cell.is_observed) {
+          if (!cell.has_data) {
             continue;
           }
 
@@ -540,16 +580,6 @@ void TraversabilityLayer::updateCosts(
           slope_cloud->push_back(pt);
         }
       }
-
-      RCLCPP_INFO_THROTTLE(
-        rclcpp::get_logger("traversability_layer"), *clock, 5000,
-        "[TraversabilityLayer] slope_map: %zu points, dim=(%u,%u), res=%.3f, "
-        "sample_x0=%.3f x1=%.3f x2=%.3f, origin=(%.3f,%.3f)",
-        slope_cloud->size(), grid_size_x_, grid_size_y_, cell_resolution_,
-        static_cast<double>(0.0 * cell_resolution_ + ox),
-        static_cast<double>(1.0 * cell_resolution_ + ox),
-        static_cast<double>(2.0 * cell_resolution_ + ox),
-        ox, oy);
 
       sensor_msgs::msg::PointCloud2 slope_msg;
       pcl::toROSMsg(*slope_cloud, slope_msg);

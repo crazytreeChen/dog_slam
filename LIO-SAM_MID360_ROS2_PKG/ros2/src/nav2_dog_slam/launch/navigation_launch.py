@@ -72,7 +72,7 @@ def generate_launch_description():
         'map_frame': map_frame,
         'odom_frame': odom_frame,
         'base_frame': base_frame,
-        # 'topic': scan_topic,
+        'topic': scan_topic,
         # 'topic': pointcloud_topic,
         'map_topic': map_topic
     }
@@ -88,7 +88,7 @@ def generate_launch_description():
         'map_frame': map_frame,
         'odom_frame': odom_frame,
         'base_frame': base_frame,
-        # 'topic': scan_topic,
+        'topic': scan_topic,
         # 'topic': pointcloud_topic,
         'map_topic': map_topic
     }
@@ -171,7 +171,7 @@ def generate_launch_description():
                 respawn_delay=2.0,
                 parameters=[configured_params_local],
                 arguments=['--ros-args', '--log-level', log_level],
-                prefix=['taskset -c 5,6'],
+                prefix=['taskset -c 4,5,6,7'],
                 remappings=remappings + [('cmd_vel', 'cmd_vel_nav')]),
             Node(
                 package='nav2_smoother',
