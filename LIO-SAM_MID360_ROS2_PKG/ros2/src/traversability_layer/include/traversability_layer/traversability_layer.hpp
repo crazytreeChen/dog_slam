@@ -39,6 +39,13 @@ struct CellData
   float slope_y = 0.0f;
   float slope_magnitude = 0.0f;
   bool has_data = false;
+  bool is_observed = false;
+};
+
+struct TimedPoint
+{
+  Point3D pt;
+  rclcpp::Time stamp;
 };
 
 class TraversabilityLayer : public nav2_costmap_2d::Layer, public nav2_costmap_2d::Costmap2D
@@ -78,6 +85,7 @@ private:
   double max_slope_traversable_;
   double slope_cost_start_;
   double step_height_threshold_;
+  double height_cost_start_;
   double slope_cost_scale_;
   double height_cost_scale_;
   double lethal_cost_threshold_;
@@ -94,8 +102,7 @@ private:
   unsigned int grid_size_x_ = 0;
   unsigned int grid_size_y_ = 0;
 
-  std::vector<Point3D> latest_cloud_;
-  rclcpp::Time latest_cloud_stamp_{0, 0, RCL_ROS_TIME};
+  std::vector<TimedPoint> accumulated_cloud_;
   bool cloud_updated_ = false;
 
   inline size_t gridIndex(unsigned int cx, unsigned int cy) const
