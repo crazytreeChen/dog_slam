@@ -42,9 +42,18 @@ void TraversabilityLayer::onInitialize()
   declareParameter("observation_persistence", rclcpp::ParameterValue(5.0));
   declareParameter("cloud_buffer_size", rclcpp::ParameterValue(5));
   declareParameter("publish_slope_map", rclcpp::ParameterValue(false));
-  declareParameter("enable_raycast_clear", rclcpp::ParameterValue(false));
   declareParameter("cell_resolution", rclcpp::ParameterValue(0.0));
   declareParameter("num_threads", rclcpp::ParameterValue(0));
+  declareParameter("voxel_z_resolution", rclcpp::ParameterValue(0.1));
+  declareParameter("voxel_z_min", rclcpp::ParameterValue(-1.0));
+  declareParameter("voxel_z_max", rclcpp::ParameterValue(3.0));
+  declareParameter("ground_hit_threshold", rclcpp::ParameterValue(1));
+  declareParameter("free_space_threshold", rclcpp::ParameterValue(1));
+  declareParameter("free_space_window", rclcpp::ParameterValue(3));
+  declareParameter("interp_search_radius", rclcpp::ParameterValue(3));
+  declareParameter("min_interp_neighbors", rclcpp::ParameterValue(2));
+  declareParameter("robot_height", rclcpp::ParameterValue(0.5));
+  declareParameter("obstacle_ratio_threshold", rclcpp::ParameterValue(0.5));
 
   node->get_parameter(name_ + ".enabled", enabled_);
   node->get_parameter(name_ + ".pointcloud_topic", pointcloud_topic_);
@@ -61,9 +70,18 @@ void TraversabilityLayer::onInitialize()
   node->get_parameter(name_ + ".observation_persistence", observation_persistence_);
   node->get_parameter(name_ + ".cloud_buffer_size", cloud_buffer_size_);
   node->get_parameter(name_ + ".publish_slope_map", publish_slope_map_);
-  node->get_parameter(name_ + ".enable_raycast_clear", enable_raycast_clear_);
   node->get_parameter(name_ + ".cell_resolution", cell_resolution_);
   node->get_parameter(name_ + ".num_threads", num_threads_);
+  node->get_parameter(name_ + ".voxel_z_resolution", voxel_z_resolution_);
+  node->get_parameter(name_ + ".voxel_z_min", voxel_z_min_);
+  node->get_parameter(name_ + ".voxel_z_max", voxel_z_max_);
+  node->get_parameter(name_ + ".ground_hit_threshold", ground_hit_threshold_);
+  node->get_parameter(name_ + ".free_space_threshold", free_space_threshold_);
+  node->get_parameter(name_ + ".free_space_window", free_space_window_);
+  node->get_parameter(name_ + ".interp_search_radius", interp_search_radius_);
+  node->get_parameter(name_ + ".min_interp_neighbors", min_interp_neighbors_);
+  node->get_parameter(name_ + ".robot_height", robot_height_);
+  node->get_parameter(name_ + ".obstacle_ratio_threshold", obstacle_ratio_threshold_);
 
   if (num_threads_ > 0) {
     omp_set_num_threads(num_threads_);
@@ -83,13 +101,16 @@ void TraversabilityLayer::onInitialize()
 
   RCLCPP_INFO(
     node->get_logger(),
-    "TraversabilityLayer: step_height_threshold=%.3f, max_slope_traversable=%.1f deg, "
-    "slope_cost_start=%.1f deg, pointcloud_topic=%s, "
-    "enable_raycast_clear=%s, cell_resolution=%.3f, num_threads=%d",
+    "TraversabilityLayer(v3d): step_height=%.3f, max_slope=%.1fdeg, slope_start=%.1fdeg, "
+    "topic=%s, cell_res=%.3f, voxel_z_res=%.3f, z_range=[%.1f,%.1f], "
+    "ground_hit_thr=%d, free_space_thr=%d, free_space_win=%d, "
+    "interp_radius=%d, min_interp=%d, robot_height=%.2f, obstacle_ratio_thr=%.2f, num_threads=%d",
     step_height_threshold_, max_slope_traversable_ * 180.0 / M_PI,
     slope_cost_start_ * 180.0 / M_PI, pointcloud_topic_.c_str(),
-    enable_raycast_clear_ ? "true" : "false",
-    cell_resolution_, num_threads_);
+    cell_resolution_, voxel_z_resolution_, voxel_z_min_, voxel_z_max_,
+    ground_hit_threshold_, free_space_threshold_, free_space_window_,
+    interp_search_radius_, min_interp_neighbors_,
+    robot_height_, obstacle_ratio_threshold_, num_threads_);
 
   tf_buffer_ = std::make_shared<tf2_ros::Buffer>(node->get_clock());
   tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
@@ -121,9 +142,9 @@ void TraversabilityLayer::matchSize()
   double world_w = master_grid->getSizeInCellsX() * master_grid->getResolution();
   double world_h = master_grid->getSizeInCellsY() * master_grid->getResolution();
 
-  grid_size_x_ = static_cast<unsigned int>(std::ceil(world_w / cell_resolution_));
-  grid_size_y_ = static_cast<unsigned int>(std::ceil(world_h / cell_resolution_));
-  grid_map_.assign(grid_size_x_ * grid_size_y_, CellData{});
+  ground_size_x_ = static_cast<unsigned int>(std::ceil(world_w / cell_resolution_));
+  ground_size_y_ = static_cast<unsigned int>(std::ceil(world_h / cell_resolution_));
+  ground_map_.assign(ground_size_x_ * ground_size_y_, GroundCell{});
 }
 
 void TraversabilityLayer::pointCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
@@ -151,24 +172,15 @@ void TraversabilityLayer::pointCloudCallback(const sensor_msgs::msg::PointCloud2
     source_frame = sensor_frame_;
   }
 
-  RCLCPP_DEBUG_THROTTLE(
-    rclcpp::get_logger("traversability_layer"), *clock, 2000,
-    "[TraversabilityLayer] TF lookup: target=%s, source=%s",
-    target_frame.c_str(), source_frame.c_str());
-
   geometry_msgs::msg::TransformStamped transform;
   try {
     transform = tf_buffer_->lookupTransform(
       target_frame, source_frame, msg->header.stamp,
       rclcpp::Duration::from_seconds(0.5));
-    RCLCPP_DEBUG_THROTTLE(
-      rclcpp::get_logger("traversability_layer"), *clock, 2000,
-      "[TraversabilityLayer] TF success: translation=[%.3f, %.3f, %.3f]",
-      transform.transform.translation.x, transform.transform.translation.y, transform.transform.translation.z);
   } catch (tf2::TransformException & ex) {
     RCLCPP_WARN_THROTTLE(
       rclcpp::get_logger("traversability_layer"), *clock, 2000,
-      "[TraversabilityLayer] TF transform failed: %s (target=%s, source=%s)",
+      "[TraversabilityLayer] TF failed: %s (target=%s, source=%s)",
       ex.what(), target_frame.c_str(), source_frame.c_str());
     return;
   }
@@ -179,6 +191,8 @@ void TraversabilityLayer::pointCloudCallback(const sensor_msgs::msg::PointCloud2
 
   sensor_global_x_ = tx;
   sensor_global_y_ = ty;
+  sensor_global_z_ = tz;
+
   double qx = transform.transform.rotation.x;
   double qy = transform.transform.rotation.y;
   double qz = transform.transform.rotation.z;
@@ -194,6 +208,7 @@ void TraversabilityLayer::pointCloudCallback(const sensor_msgs::msg::PointCloud2
   double r21 = 2.0 * (qy * qz + qx * qw);
   double r22 = 1.0 - 2.0 * (qx * qx + qy * qy);
 
+  Point3D sensor_pos{tx, ty, tz};
   std::vector<Point3D> transformed_cloud;
   transformed_cloud.reserve(cloud->size());
 
@@ -219,15 +234,15 @@ void TraversabilityLayer::pointCloudCallback(const sensor_msgs::msg::PointCloud2
 
   RCLCPP_DEBUG_THROTTLE(
     rclcpp::get_logger("traversability_layer"), *clock, 2000,
-    "[TraversabilityLayer] After transform: %zu points kept, %d filtered (z_range=[%.2f, %.2f])",
-    transformed_cloud.size(), filtered_count, min_obstacle_height_, max_obstacle_height_);
+    "[TraversabilityLayer] After transform: %zu kept, %d filtered",
+    transformed_cloud.size(), filtered_count);
 
   if (observation_persistence_ <= 0.0) {
     accumulated_cloud_.clear();
   }
   rclcpp::Time arrival_time = clock->now();
   for (const auto & pt : transformed_cloud) {
-    accumulated_cloud_.push_back({pt, arrival_time});
+    accumulated_cloud_.push_back({pt, sensor_pos, arrival_time});
   }
   const size_t max_points = 200000;
   if (accumulated_cloud_.size() > max_points) {
@@ -237,139 +252,478 @@ void TraversabilityLayer::pointCloudCallback(const sensor_msgs::msg::PointCloud2
   cloud_updated_ = true;
 }
 
-void TraversabilityLayer::computeSlope(double origin_x, double origin_y)
+void TraversabilityLayer::buildVoxelGrid(double ox, double oy)
 {
-  static auto clock = std::make_shared<rclcpp::Clock>(RCL_ROS_TIME);
-  int cells_with_slope = 0;
-  float max_slope_mag = 0.0f;
-  float max_height_diff = 0.0f;
+  if (accumulated_cloud_.empty()) {
+    return;
+  }
 
-  float sensor_gx = static_cast<float>((sensor_global_x_ - origin_x) / cell_resolution_);
-  float sensor_gy = static_cast<float>((sensor_global_y_ - origin_y) / cell_resolution_);
+  double z_min_world = std::numeric_limits<double>::max();
+  double z_max_world = std::numeric_limits<double>::lowest();
+  double cur_sensor_z = sensor_global_z_;
 
-#pragma omp parallel for collapse(2) reduction(+:cells_with_slope) reduction(max:max_slope_mag) reduction(max:max_height_diff)
-  for (int cy = 0; cy < static_cast<int>(grid_size_y_); cy++) {
-    for (int cx = 0; cx < static_cast<int>(grid_size_x_); cx++) {
-      size_t idx = gridIndex(static_cast<unsigned int>(cx), static_cast<unsigned int>(cy));
-      auto & cell = grid_map_[idx];
+#pragma omp parallel for reduction(min:z_min_world) reduction(max:z_max_world)
+  for (int i = 0; i < static_cast<int>(accumulated_cloud_.size()); i++) {
+    const auto & tp = accumulated_cloud_[i];
+    if (tp.pt.z < z_min_world) z_min_world = tp.pt.z;
+    if (tp.pt.z > z_max_world) z_max_world = tp.pt.z;
+    if (tp.sensor_pt.z < z_min_world) z_min_world = tp.sensor_pt.z;
+    if (tp.sensor_pt.z > z_max_world) z_max_world = tp.sensor_pt.z;
+  }
 
-      if (!cell.has_data) {
+  double z_lo = std::min(z_min_world, cur_sensor_z + voxel_z_min_) - voxel_z_resolution_;
+  double z_hi = std::max(z_max_world, cur_sensor_z + voxel_z_max_) + voxel_z_resolution_;
+
+  voxel_z_origin_ = z_lo;
+  voxel_size_z_ = static_cast<unsigned int>(
+    std::ceil((z_hi - z_lo) / voxel_z_resolution_));
+  if (voxel_size_z_ < 1) voxel_size_z_ = 1;
+
+  size_t total_voxels = static_cast<size_t>(voxel_size_x_) *
+                        static_cast<size_t>(voxel_size_y_) *
+                        static_cast<size_t>(voxel_size_z_);
+  voxel_grid_.resize(total_voxels);
+  std::memset(voxel_grid_.data(), 0, total_voxels * sizeof(VoxelData));
+
+  double inv_cell_res = 1.0 / cell_resolution_;
+  double inv_vz_res = 1.0 / voxel_z_resolution_;
+
+  int n_threads = omp_get_max_threads();
+  struct ThreadLocalHit { size_t idx; bool is_hit; };
+  std::vector<std::vector<ThreadLocalHit>> thread_buffers(n_threads);
+
+  for (int t = 0; t < n_threads; t++) {
+    thread_buffers[t].reserve(1024);
+  }
+
+#pragma omp parallel
+  {
+    int tid = omp_get_thread_num();
+    auto & local_buf = thread_buffers[tid];
+
+#pragma omp for schedule(dynamic, 512) nowait
+    for (int pi = 0; pi < static_cast<int>(accumulated_cloud_.size()); pi++)
+    {
+      const auto & tp = accumulated_cloud_[static_cast<size_t>(pi)];
+      const auto & pt = tp.pt;
+      const auto & sp = tp.sensor_pt;
+
+      int ix = static_cast<int>(std::floor((pt.x - ox) * inv_cell_res));
+      int iy = static_cast<int>(std::floor((pt.y - oy) * inv_cell_res));
+      int iz = static_cast<int>(std::floor((pt.z - voxel_z_origin_) * inv_vz_res));
+
+      if (ix < 0 || ix >= static_cast<int>(voxel_size_x_) ||
+          iy < 0 || iy >= static_cast<int>(voxel_size_y_) ||
+          iz < 0 || iz >= static_cast<int>(voxel_size_z_))
+      {
         continue;
       }
 
-      cell.slope_magnitude = 0.0f;
+      size_t hit_idx = voxelIndex(
+        static_cast<unsigned int>(ix),
+        static_cast<unsigned int>(iy),
+        static_cast<unsigned int>(iz));
 
-      float dx = sensor_gx - static_cast<float>(cx);
-      float dy = sensor_gy - static_cast<float>(cy);
-      float dist = std::sqrt(dx * dx + dy * dy);
+      local_buf.push_back({hit_idx, true});
 
-      if (dist < 1.0f) {
-        continue;
-      }
+      int six = static_cast<int>(std::floor((sp.x - ox) * inv_cell_res));
+      int siy = static_cast<int>(std::floor((sp.y - oy) * inv_cell_res));
+      int siz = static_cast<int>(std::floor((sp.z - voxel_z_origin_) * inv_vz_res));
 
-      int n_steps = static_cast<int>(std::ceil(dist / 0.5f));
-      float step_x = dx / static_cast<float>(n_steps);
-      float step_y = dy / static_cast<float>(n_steps);
+      six = std::max(0, std::min(six, static_cast<int>(voxel_size_x_) - 1));
+      siy = std::max(0, std::min(siy, static_cast<int>(voxel_size_y_) - 1));
+      siz = std::max(0, std::min(siz, static_cast<int>(voxel_size_z_) - 1));
 
-      float cur_x = static_cast<float>(cx) + 0.5f;
-      float cur_y = static_cast<float>(cy) + 0.5f;
+      double dx = pt.x - sp.x;
+      double dy = pt.y - sp.y;
+      double dz = pt.z - sp.z;
+      double ray_len = std::sqrt(dx * dx + dy * dy + dz * dz);
 
-      float ref_z = cell.representative_z;
-      float ref_dist = 0.0f;
-      bool found_ref = false;
+      if (ray_len < 1e-6) continue;
 
-      for (int i = 1; i <= n_steps; i++) {
-        cur_x += step_x;
-        cur_y += step_y;
+      double min_step = std::min(cell_resolution_, voxel_z_resolution_);
+      int n_steps = static_cast<int>(std::ceil(ray_len / (min_step * 0.75)));
+      double step_dx = dx / static_cast<double>(n_steps);
+      double step_dy = dy / static_cast<double>(n_steps);
+      double step_dz = dz / static_cast<double>(n_steps);
 
-        int check_cx = static_cast<int>(std::floor(cur_x));
-        int check_cy = static_cast<int>(std::floor(cur_y));
+      int prev_ix = six, prev_iy = siy, prev_iz = siz;
 
-        if (check_cx == static_cast<int>(cx) && check_cy == static_cast<int>(cy)) {
+      for (int s = 1; s < n_steps; s++) {
+        double cx = sp.x + s * step_dx;
+        double cy = sp.y + s * step_dy;
+        double cz = sp.z + s * step_dz;
+
+        int cix = static_cast<int>(std::floor((cx - ox) * inv_cell_res));
+        int ciy = static_cast<int>(std::floor((cy - oy) * inv_cell_res));
+        int ciz = static_cast<int>(std::floor((cz - voxel_z_origin_) * inv_vz_res));
+
+        if (cix < 0 || cix >= static_cast<int>(voxel_size_x_) ||
+            ciy < 0 || ciy >= static_cast<int>(voxel_size_y_) ||
+            ciz < 0 || ciz >= static_cast<int>(voxel_size_z_))
+        {
           continue;
         }
 
-        if (check_cx < 0 || check_cx >= static_cast<int>(grid_size_x_) ||
-            check_cy < 0 || check_cy >= static_cast<int>(grid_size_y_)) {
+        if (cix == prev_ix && ciy == prev_iy && ciz == prev_iz) {
+          continue;
+        }
+
+        prev_ix = cix;
+        prev_iy = ciy;
+        prev_iz = ciz;
+
+        if (cix == ix && ciy == iy && ciz == iz) {
           break;
         }
 
-        size_t ref_idx = gridIndex(
-          static_cast<unsigned int>(check_cx), static_cast<unsigned int>(check_cy));
-        const auto & ref_cell = grid_map_[ref_idx];
+        size_t pass_idx = voxelIndex(
+          static_cast<unsigned int>(cix),
+          static_cast<unsigned int>(ciy),
+          static_cast<unsigned int>(ciz));
 
-        if (ref_cell.has_data) {
-          ref_z = ref_cell.representative_z;
-          float ddx = cur_x - (static_cast<float>(cx) + 0.5f);
-          float ddy = cur_y - (static_cast<float>(cy) + 0.5f);
-          ref_dist = std::sqrt(ddx * ddx + ddy * ddy) * static_cast<float>(cell_resolution_);
-          found_ref = true;
-          break;
-        }
+        local_buf.push_back({pass_idx, false});
       }
+    }
 
-      if (found_ref && ref_dist > 1e-6f) {
-        float dz = std::abs(cell.representative_z - ref_z);
+#pragma omp barrier
 
-        cell.height_diff = dz;
-        cell.slope_magnitude = dz / ref_dist;
-
-        if (cell.slope_magnitude > max_slope_mag) {
-          max_slope_mag = cell.slope_magnitude;
-        }
-        if (dz > max_height_diff) {
-          max_height_diff = dz;
-        }
-        if (cell.slope_magnitude > 0.0f) {
-          cells_with_slope++;
+#pragma omp for schedule(static)
+    for (int t = 0; t < n_threads; t++) {
+      for (const auto & entry : thread_buffers[t]) {
+        if (entry.is_hit) {
+          auto & v = voxel_grid_[entry.idx];
+          if (v.hit_count < 255) v.hit_count++;
+        } else {
+          auto & v = voxel_grid_[entry.idx];
+          if (v.pass_count < 255) v.pass_count++;
         }
       }
     }
   }
-
-  RCLCPP_DEBUG_THROTTLE(
-    rclcpp::get_logger("traversability_layer"), *clock, 2000,
-    "[TraversabilityLayer] computeSlope: %d cells with slope, max_slope_mag=%.3f (angle=%.1f deg), max_height_diff=%.3f",
-    cells_with_slope, max_slope_mag, std::atan(max_slope_mag) * 180.0 / M_PI, max_height_diff);
 }
 
-unsigned char TraversabilityLayer::computeCost(const CellData & cell) const
+void TraversabilityLayer::extractGround(double ox, double oy)
 {
-  if (!cell.has_data) {
+  ground_map_.assign(ground_size_x_ * ground_size_y_, GroundCell{});
+
+  double inv_cell_res = 1.0 / cell_resolution_;
+  double inv_vz_res = 1.0 / voxel_z_resolution_;
+  double sensor_z = sensor_global_z_;
+  int win = free_space_window_;
+
+#pragma omp parallel for collapse(2) schedule(static)
+  for (int cy = 0; cy < static_cast<int>(ground_size_y_); cy++) {
+    for (int cx = 0; cx < static_cast<int>(ground_size_x_); cx++) {
+      unsigned int uix = static_cast<unsigned int>(cx);
+      unsigned int uiy = static_cast<unsigned int>(cy);
+
+      int ground_iz = -1;
+      float ground_z_val = 0.0f;
+
+      for (unsigned int iz = 0; iz < voxel_size_z_; iz++) {
+        size_t vidx = voxelIndex(uix, uiy, iz);
+        const auto & voxel = voxel_grid_[vidx];
+
+        if (voxel.hit_count < static_cast<uint16_t>(ground_hit_threshold_)) {
+          continue;
+        }
+
+        double voxel_world_z = voxel_z_origin_ + (iz + 0.5) * voxel_z_resolution_;
+
+        if (voxel_world_z > sensor_z) {
+          break;
+        }
+
+        bool has_free_above = false;
+        for (int w = 1; w <= win; w++) {
+          unsigned int wiz = iz + static_cast<unsigned int>(w);
+          if (wiz >= voxel_size_z_) break;
+          size_t widx = voxelIndex(uix, uiy, wiz);
+          if (voxel_grid_[widx].pass_count >= static_cast<uint16_t>(free_space_threshold_)) {
+            has_free_above = true;
+            break;
+          }
+        }
+
+        if (has_free_above) {
+          ground_iz = static_cast<int>(iz);
+          ground_z_val = static_cast<float>(voxel_world_z);
+          break;
+        }
+      }
+
+      if (ground_iz < 0) {
+        for (unsigned int iz = 0; iz < voxel_size_z_; iz++) {
+          size_t vidx = voxelIndex(uix, uiy, iz);
+          const auto & voxel = voxel_grid_[vidx];
+
+          if (voxel.hit_count < static_cast<uint16_t>(ground_hit_threshold_)) {
+            continue;
+          }
+
+          double voxel_world_z = voxel_z_origin_ + (iz + 0.5) * voxel_z_resolution_;
+          if (voxel_world_z > sensor_z) {
+            break;
+          }
+
+          ground_iz = static_cast<int>(iz);
+          ground_z_val = static_cast<float>(voxel_world_z);
+          break;
+        }
+      }
+
+      if (ground_iz >= 0) {
+        size_t gidx = groundIndex(static_cast<unsigned int>(cx),
+                                  static_cast<unsigned int>(cy));
+        ground_map_[gidx].ground_z = ground_z_val;
+        ground_map_[gidx].has_ground = true;
+
+        double obs_z_start = ground_z_val + voxel_z_resolution_;
+        double obs_z_end = ground_z_val + static_cast<double>(robot_height_);
+        unsigned int iz_start = static_cast<unsigned int>(
+          std::floor((obs_z_start - voxel_z_origin_) * inv_vz_res));
+        unsigned int iz_end = static_cast<unsigned int>(
+          std::ceil((obs_z_end - voxel_z_origin_) * inv_vz_res));
+        iz_start = std::max(iz_start, static_cast<unsigned int>(ground_iz) + 1);
+        iz_end = std::min(iz_end, voxel_size_z_);
+
+        int obs_layers = 0;
+        int total_layers = 0;
+        for (unsigned int oiz = iz_start; oiz < iz_end; oiz++) {
+          size_t oidx = voxelIndex(uix, uiy, oiz);
+          total_layers++;
+          if (voxel_grid_[oidx].hit_count >= static_cast<uint8_t>(ground_hit_threshold_)) {
+            obs_layers++;
+          }
+        }
+
+        if (total_layers > 0) {
+          ground_map_[gidx].obstacle_ratio =
+            static_cast<float>(obs_layers) / static_cast<float>(total_layers);
+        }
+      }
+    }
+  }
+}
+
+void TraversabilityLayer::interpolateGround()
+{
+  std::vector<GroundCell> interpolated = ground_map_;
+
+  int radius = interp_search_radius_;
+  int min_neighbors = min_interp_neighbors_;
+
+#pragma omp parallel for collapse(2) schedule(static)
+  for (int cy = 0; cy < static_cast<int>(ground_size_y_); cy++) {
+    for (int cx = 0; cx < static_cast<int>(ground_size_x_); cx++) {
+      size_t idx = groundIndex(static_cast<unsigned int>(cx),
+                               static_cast<unsigned int>(cy));
+      if (ground_map_[idx].has_ground) {
+        continue;
+      }
+
+      float sum_w = 0.0f;
+      float sum_wz = 0.0f;
+      int neighbor_count = 0;
+
+      for (int dy = -radius; dy <= radius; dy++) {
+        for (int dx = -radius; dx <= radius; dx++) {
+          if (dx == 0 && dy == 0) continue;
+
+          int nx = cx + dx;
+          int ny = cy + dy;
+          if (nx < 0 || nx >= static_cast<int>(ground_size_x_) ||
+              ny < 0 || ny >= static_cast<int>(ground_size_y_))
+          {
+            continue;
+          }
+
+          size_t nidx = groundIndex(static_cast<unsigned int>(nx),
+                                    static_cast<unsigned int>(ny));
+          if (!ground_map_[nidx].has_ground) continue;
+
+          float dist = std::sqrt(static_cast<float>(dx * dx + dy * dy));
+          float w = 1.0f / (dist * dist);
+          sum_w += w;
+          sum_wz += w * ground_map_[nidx].ground_z;
+          neighbor_count++;
+        }
+      }
+
+      if (neighbor_count >= min_neighbors && sum_w > 1e-8f) {
+        interpolated[idx].ground_z = sum_wz / sum_w;
+        interpolated[idx].has_ground = true;
+      }
+    }
+  }
+
+  ground_map_ = std::move(interpolated);
+}
+
+void TraversabilityLayer::computeGroundSlope()
+{
+  float res = static_cast<float>(cell_resolution_);
+
+#pragma omp parallel for collapse(2) schedule(static)
+  for (int cy = 0; cy < static_cast<int>(ground_size_y_); cy++) {
+    for (int cx = 0; cx < static_cast<int>(ground_size_x_); cx++) {
+      size_t idx = groundIndex(static_cast<unsigned int>(cx),
+                               static_cast<unsigned int>(cy));
+      if (!ground_map_[idx].has_ground) continue;
+
+      float z_center = ground_map_[idx].ground_z;
+      float max_diff = 0.0f;
+      float slope_x = 0.0f;
+      float slope_y = 0.0f;
+
+      float z_xp = 0.0f, z_xm = 0.0f, z_yp = 0.0f, z_ym = 0.0f;
+      bool has_xp = false, has_xm = false, has_yp = false, has_ym = false;
+
+      if (cx + 1 < static_cast<int>(ground_size_x_)) {
+        size_t nidx = groundIndex(static_cast<unsigned int>(cx + 1),
+                                  static_cast<unsigned int>(cy));
+        if (ground_map_[nidx].has_ground) {
+          z_xp = ground_map_[nidx].ground_z;
+          has_xp = true;
+        }
+      }
+      if (cx > 0) {
+        size_t nidx = groundIndex(static_cast<unsigned int>(cx - 1),
+                                  static_cast<unsigned int>(cy));
+        if (ground_map_[nidx].has_ground) {
+          z_xm = ground_map_[nidx].ground_z;
+          has_xm = true;
+        }
+      }
+      if (cy + 1 < static_cast<int>(ground_size_y_)) {
+        size_t nidx = groundIndex(static_cast<unsigned int>(cx),
+                                  static_cast<unsigned int>(cy + 1));
+        if (ground_map_[nidx].has_ground) {
+          z_yp = ground_map_[nidx].ground_z;
+          has_yp = true;
+        }
+      }
+      if (cy > 0) {
+        size_t nidx = groundIndex(static_cast<unsigned int>(cx),
+                                  static_cast<unsigned int>(cy - 1));
+        if (ground_map_[nidx].has_ground) {
+          z_ym = ground_map_[nidx].ground_z;
+          has_ym = true;
+        }
+      }
+
+      if (has_xp && has_xm) {
+        slope_x = (z_xp - z_xm) / (2.0f * res);
+      } else if (has_xp) {
+        slope_x = (z_xp - z_center) / res;
+      } else if (has_xm) {
+        slope_x = (z_center - z_xm) / res;
+      }
+
+      if (has_yp && has_ym) {
+        slope_y = (z_yp - z_ym) / (2.0f * res);
+      } else if (has_yp) {
+        slope_y = (z_yp - z_center) / res;
+      } else if (has_ym) {
+        slope_y = (z_center - z_ym) / res;
+      }
+
+      ground_map_[idx].slope_x = slope_x;
+      ground_map_[idx].slope_y = slope_y;
+      ground_map_[idx].slope_magnitude = std::sqrt(slope_x * slope_x + slope_y * slope_y);
+
+      for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+          if (dx == 0 && dy == 0) continue;
+          int nx = cx + dx;
+          int ny = cy + dy;
+          if (nx < 0 || nx >= static_cast<int>(ground_size_x_) ||
+              ny < 0 || ny >= static_cast<int>(ground_size_y_))
+          {
+            continue;
+          }
+          size_t nidx = groundIndex(static_cast<unsigned int>(nx),
+                                    static_cast<unsigned int>(ny));
+          if (!ground_map_[nidx].has_ground) continue;
+          float diff = std::abs(ground_map_[nidx].ground_z - z_center);
+          if (diff > max_diff) max_diff = diff;
+        }
+      }
+      ground_map_[idx].height_diff = max_diff;
+    }
+  }
+}
+
+unsigned char TraversabilityLayer::computeCost(const GroundCell & cell) const
+{
+  if (!cell.has_ground) {
     return nav2_costmap_2d::NO_INFORMATION;
+  }
+
+  if (cell.obstacle_ratio >= static_cast<float>(obstacle_ratio_threshold_)) {
+    return nav2_costmap_2d::LETHAL_OBSTACLE;
+  }
+
+  unsigned char obstacle_cost = 0;
+  if (cell.obstacle_ratio > 0.0f) {
+    float obs_norm = cell.obstacle_ratio / static_cast<float>(obstacle_ratio_threshold_);
+    if (obs_norm > 1.0f) obs_norm = 1.0f;
+    obstacle_cost = static_cast<unsigned char>(std::min(252.0f, obs_norm * 200.0f));
   }
 
   float height_above_ground = cell.height_diff;
 
   if (height_above_ground <= static_cast<float>(height_cost_start_)) {
-    return 0;
+    float slope_angle = std::atan(cell.slope_magnitude);
+    if (slope_angle <= static_cast<float>(slope_cost_start_)) {
+      return obstacle_cost;
+    }
+    float slope_range = static_cast<float>(max_slope_traversable_) - static_cast<float>(slope_cost_start_);
+    if (slope_range > 1e-6f) {
+      float slope_norm = (slope_angle - static_cast<float>(slope_cost_start_)) / slope_range;
+      if (slope_norm > 1.0f) slope_norm = 1.0f;
+      float cost_f = slope_norm * static_cast<float>(slope_cost_scale_) * 25.0f;
+      unsigned char slope_only = static_cast<unsigned char>(std::min(252.0f, cost_f));
+      return std::max(slope_only, obstacle_cost);
+    }
+    return obstacle_cost;
   }
 
-  float range = static_cast<float>(step_height_threshold_) - static_cast<float>(height_cost_start_);
-  float norm_height = height_above_ground - static_cast<float>(height_cost_start_);
+  float h_range = static_cast<float>(step_height_threshold_) - static_cast<float>(height_cost_start_);
+  float h_norm = height_above_ground - static_cast<float>(height_cost_start_);
 
-  if (range > 1e-6f) {
-    float ratio = norm_height / range;
-    if (ratio > 1.0f) {
-      ratio = 1.0f;
-    }
+  unsigned char height_cost = 0;
+  if (h_range > 1e-6f) {
+    float ratio = h_norm / h_range;
+    if (ratio > 1.0f) ratio = 1.0f;
     float cost_f = 1.0f + ratio * 252.0f;
-    unsigned char height_cost = static_cast<unsigned char>(std::min(253.0f, cost_f));
+    height_cost = static_cast<unsigned char>(std::min(253.0f, cost_f));
+  } else {
+    height_cost = static_cast<unsigned char>(
+      std::min(253.0f, (height_above_ground / static_cast<float>(step_height_threshold_)) * 253.0f));
+  }
 
-    if (height_above_ground <= static_cast<float>(step_height_threshold_)) {
-      return height_cost;
-    }
-
+  if (height_above_ground > static_cast<float>(step_height_threshold_)) {
     float slope_angle = std::atan(cell.slope_magnitude);
-
-    if (slope_angle > max_slope_traversable_) {
+    if (slope_angle > static_cast<float>(max_slope_traversable_)) {
       return nav2_costmap_2d::LETHAL_OBSTACLE;
     }
-
-    return height_cost;
   }
 
-  return static_cast<unsigned char>(std::min(253.0f, (height_above_ground / static_cast<float>(step_height_threshold_)) * 253.0f));
+  float slope_angle = std::atan(cell.slope_magnitude);
+  if (slope_angle > static_cast<float>(slope_cost_start_)) {
+    float slope_range = static_cast<float>(max_slope_traversable_) - static_cast<float>(slope_cost_start_);
+    if (slope_range > 1e-6f) {
+      float slope_norm = (slope_angle - static_cast<float>(slope_cost_start_)) / slope_range;
+      if (slope_norm > 1.0f) slope_norm = 1.0f;
+      float slope_cost_f = slope_norm * static_cast<float>(slope_cost_scale_) * 25.0f;
+      unsigned char slope_cost = static_cast<unsigned char>(std::min(252.0f, slope_cost_f));
+      return std::max({height_cost, slope_cost, obstacle_cost});
+    }
+  }
+
+  return std::max(height_cost, obstacle_cost);
 }
 
 void TraversabilityLayer::updateBounds(
@@ -418,15 +772,17 @@ void TraversabilityLayer::updateCosts(
   unsigned int new_gx = static_cast<unsigned int>(std::ceil(world_w / cell_resolution_));
   unsigned int new_gy = static_cast<unsigned int>(std::ceil(world_h / cell_resolution_));
 
-  if (new_gx != grid_size_x_ || new_gy != grid_size_y_) {
-    grid_size_x_ = new_gx;
-    grid_size_y_ = new_gy;
-    grid_map_.resize(grid_size_x_ * grid_size_y_);
+  if (new_gx != ground_size_x_ || new_gy != ground_size_y_) {
+    ground_size_x_ = new_gx;
+    ground_size_y_ = new_gy;
+    ground_map_.resize(ground_size_x_ * ground_size_y_);
   }
 
-  grid_map_.assign(grid_size_x_ * grid_size_y_, CellData{});
+  voxel_size_x_ = ground_size_x_;
+  voxel_size_y_ = ground_size_y_;
 
   if (accumulated_cloud_.empty()) {
+    ground_map_.assign(ground_size_x_ * ground_size_y_, GroundCell{});
     return;
   }
 
@@ -442,66 +798,33 @@ void TraversabilityLayer::updateCosts(
     }
   }
 
-  double inv_cell_res = 1.0 / cell_resolution_;
+  buildVoxelGrid(ox, oy);
 
-#pragma omp parallel for
-  for (int pi = 0; pi < static_cast<int>(accumulated_cloud_.size()); pi++)
-  {
-    const auto & pt = accumulated_cloud_[static_cast<size_t>(pi)].pt;
-    int cx = static_cast<int>(std::floor((pt.x - ox) * inv_cell_res));
-    int cy = static_cast<int>(std::floor((pt.y - oy) * inv_cell_res));
+  extractGround(ox, oy);
 
-    if (cx < 0 || cx >= static_cast<int>(grid_size_x_) ||
-        cy < 0 || cy >= static_cast<int>(grid_size_y_))
-    {
-      continue;
-    }
+  interpolateGround();
 
-    size_t idx = gridIndex(static_cast<unsigned int>(cx), static_cast<unsigned int>(cy));
-    auto & cell = grid_map_[idx];
-
-    float z = static_cast<float>(pt.z);
-
-#pragma omp critical(grid_update)
-    {
-      if (!cell.has_data)
-      {
-        cell.min_z = z;
-        cell.max_z = z;
-        cell.representative_z = z;
-        cell.point_count = 1;
-        cell.has_data = true;
-      }
-      else
-      {
-        if (z < cell.min_z) cell.min_z = z;
-        if (z > cell.max_z) cell.max_z = z;
-        cell.point_count++;
-      }
-    }
-  }
-
-  for (auto & cell : grid_map_)
-  {
-    if (cell.has_data) {
-      cell.representative_z = cell.max_z;
-    }
-  }
-
-  computeSlope(ox, oy);
+  computeGroundSlope();
 
   unsigned char * master_array = master_grid.getCharMap();
   int cells_with_cost = 0;
   int lethal_cells = 0;
   double inv_costmap_res = 1.0 / costmap_res;
+  size_t master_size = static_cast<size_t>(costmap_sx) * static_cast<size_t>(costmap_sy);
+
+  int n_threads = omp_get_max_threads();
+  std::vector<std::vector<unsigned char>> local_costmaps(n_threads);
+  for (int t = 0; t < n_threads; t++) {
+    local_costmaps[t].assign(master_size, 0);
+  }
 
 #pragma omp parallel for collapse(2) reduction(+:cells_with_cost) reduction(+:lethal_cells)
-  for (unsigned int cy = 0; cy < grid_size_y_; cy++) {
-    for (unsigned int cx = 0; cx < grid_size_x_; cx++) {
-      size_t idx = gridIndex(cx, cy);
-      const auto & cell = grid_map_[idx];
+  for (unsigned int cy = 0; cy < ground_size_y_; cy++) {
+    for (unsigned int cx = 0; cx < ground_size_x_; cx++) {
+      size_t idx = groundIndex(cx, cy);
+      const auto & cell = ground_map_[idx];
 
-      if (!cell.has_data) {
+      if (!cell.has_ground) {
         continue;
       }
 
@@ -527,19 +850,30 @@ void TraversabilityLayer::updateCosts(
       mx_end = std::min(mx_end, static_cast<int>(costmap_sx) - 1);
       my_end = std::min(my_end, static_cast<int>(costmap_sy) - 1);
 
+      int tid = omp_get_thread_num();
+      auto & local_cm = local_costmaps[tid];
+
       for (int my = my_start; my <= my_end; my++) {
         for (int mx = mx_start; mx <= mx_end; mx++) {
           if (mx < 0 || my < 0) continue;
 
           unsigned int master_idx = master_grid.getIndex(
             static_cast<unsigned int>(mx), static_cast<unsigned int>(my));
-#pragma omp critical(cost_write)
-          {
-            unsigned char old_cost = master_array[master_idx];
-            if (old_cost == nav2_costmap_2d::NO_INFORMATION || cost > old_cost) {
-              master_array[master_idx] = cost;
-            }
+          if (cost > local_cm[master_idx]) {
+            local_cm[master_idx] = cost;
           }
+        }
+      }
+    }
+  }
+
+  for (int t = 0; t < n_threads; t++) {
+    const auto & local_cm = local_costmaps[t];
+    for (size_t i = 0; i < master_size; i++) {
+      if (local_cm[i] > 0) {
+        unsigned char old_cost = master_array[i];
+        if (old_cost == nav2_costmap_2d::NO_INFORMATION || local_cm[i] > old_cost) {
+          master_array[i] = local_cm[i];
         }
       }
     }
@@ -547,8 +881,8 @@ void TraversabilityLayer::updateCosts(
 
   RCLCPP_DEBUG_THROTTLE(
     rclcpp::get_logger("traversability_layer"), *clock, 2000,
-    "[TraversabilityLayer] updateCosts: %d cells with cost, %d lethal (range=[%d,%d,%d,%d])",
-    cells_with_cost, lethal_cells, min_i, min_j, max_i, max_j);
+    "[TraversabilityLayer] updateCosts: %d cells with cost, %d lethal",
+    cells_with_cost, lethal_cells);
 
   rclcpp::Time frame_end = clock->now();
   double frame_ms = (frame_end - frame_start).seconds() * 1000.0;
@@ -561,10 +895,11 @@ void TraversabilityLayer::updateCosts(
     RCLCPP_INFO(
       rclcpp::get_logger("traversability_layer"),
       "[TraversabilityLayer] Perf: %d frames in %.1fs, avg=%.2fms, last=%.2fms, "
-      "cells_with_cost=%d, lethal=%d, cloud_points=%zu",
+      "cells_with_cost=%d, lethal=%d, cloud=%zu, voxel_grid=%.1fMB",
       perf_frame_count_, elapsed, avg_ms, frame_ms,
       cells_with_cost, lethal_cells,
-      accumulated_cloud_.size());
+      accumulated_cloud_.size(),
+      static_cast<double>(voxel_grid_.size() * sizeof(VoxelData)) / (1024.0 * 1024.0));
     perf_frame_count_ = 0;
     perf_total_time_ = 0.0;
     last_perf_log_ = frame_end;
@@ -576,19 +911,19 @@ void TraversabilityLayer::updateCosts(
       pcl::PointCloud<pcl::PointXYZI>::Ptr slope_cloud(new pcl::PointCloud<pcl::PointXYZI>);
       slope_cloud->header.frame_id = layered_costmap_->getGlobalFrameID();
 
-      for (unsigned int cy = 0; cy < grid_size_y_; cy++) {
-        for (unsigned int cx = 0; cx < grid_size_x_; cx++) {
-          size_t idx = gridIndex(cx, cy);
-          const auto & cell = grid_map_[idx];
+      for (unsigned int cy = 0; cy < ground_size_y_; cy++) {
+        for (unsigned int cx = 0; cx < ground_size_x_; cx++) {
+          size_t idx = groundIndex(cx, cy);
+          const auto & cell = ground_map_[idx];
 
-          if (!cell.has_data) {
+          if (!cell.has_ground) {
             continue;
           }
 
           pcl::PointXYZI pt;
           pt.x = static_cast<float>(cx * cell_resolution_ + ox);
           pt.y = static_cast<float>(cy * cell_resolution_ + oy);
-          pt.z = cell.representative_z;
+          pt.z = cell.ground_z;
           pt.intensity = cell.slope_magnitude;
           slope_cloud->push_back(pt);
         }
@@ -598,13 +933,10 @@ void TraversabilityLayer::updateCosts(
       pcl::toROSMsg(*slope_cloud, slope_msg);
       slope_msg.header.stamp = node->now();
       slope_pub_->publish(slope_msg);
-
-      RCLCPP_DEBUG_THROTTLE(
-        rclcpp::get_logger("traversability_layer"), *clock, 2000,
-        "[TraversabilityLayer] Published slope_map: %zu points, frame=%s",
-        slope_cloud->size(), slope_cloud->header.frame_id.c_str());
     }
   }
+
+  cloud_updated_ = false;
 }
 
 void TraversabilityLayer::reset()
@@ -615,7 +947,8 @@ void TraversabilityLayer::reset()
 
 void TraversabilityLayer::resetMaps()
 {
-  grid_map_.assign(grid_size_x_ * grid_size_y_, CellData{});
+  ground_map_.assign(ground_size_x_ * ground_size_y_, GroundCell{});
+  voxel_grid_.clear();
   accumulated_cloud_.clear();
   cloud_updated_ = false;
 }

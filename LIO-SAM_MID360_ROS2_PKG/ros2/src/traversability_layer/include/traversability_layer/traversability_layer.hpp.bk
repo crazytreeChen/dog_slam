@@ -28,27 +28,22 @@ struct Point3D
   double z;
 };
 
-struct VoxelData
+struct CellData
 {
-  uint8_t hit_count = 0;
-  uint8_t pass_count = 0;
-};
-
-struct GroundCell
-{
-  float ground_z = 0.0f;
-  bool has_ground = false;
+  float min_z = std::numeric_limits<float>::max();
+  float max_z = std::numeric_limits<float>::lowest();
+  float representative_z = 0.0f;
+  unsigned int point_count = 0;
   float height_diff = 0.0f;
   float slope_x = 0.0f;
   float slope_y = 0.0f;
   float slope_magnitude = 0.0f;
-  float obstacle_ratio = 0.0f;
+  bool has_data = false;
 };
 
 struct TimedPoint
 {
   Point3D pt;
-  Point3D sensor_pt;
   rclcpp::Time stamp;
 };
 
@@ -75,24 +70,9 @@ public:
 
 private:
   void pointCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
-  void buildVoxelGrid(double ox, double oy);
-  void extractGround(double ox, double oy);
-  void interpolateGround();
-  void computeGroundSlope();
-  unsigned char computeCost(const GroundCell & cell) const;
+  void computeSlope(double origin_x, double origin_y);
+  unsigned char computeCost(const CellData & cell) const;
   void resetMaps();
-
-  inline size_t voxelIndex(unsigned int ix, unsigned int iy, unsigned int iz) const
-  {
-    return static_cast<size_t>(iz) * voxel_size_x_ * voxel_size_y_ +
-           static_cast<size_t>(iy) * voxel_size_x_ +
-           static_cast<size_t>(ix);
-  }
-
-  inline size_t groundIndex(unsigned int cx, unsigned int cy) const
-  {
-    return static_cast<size_t>(cy) * ground_size_x_ + static_cast<size_t>(cx);
-  }
 
   std::mutex mutex_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
@@ -112,39 +92,27 @@ private:
   int cloud_buffer_size_;
   bool enabled_;
   bool publish_slope_map_;
+  bool enable_raycast_clear_;
   double cell_resolution_;
   int num_threads_;
-
-  double voxel_z_resolution_;
-  double voxel_z_min_;
-  double voxel_z_max_;
-  int ground_hit_threshold_;
-  int free_space_threshold_;
-  int free_space_window_;
-  int interp_search_radius_;
-  int min_interp_neighbors_;
-  double robot_height_;
-  double obstacle_ratio_threshold_;
 
   rclcpp::Time last_perf_log_{0, 0, RCL_ROS_TIME};
   int perf_frame_count_ = 0;
   double perf_total_time_ = 0.0;
 
-  std::vector<VoxelData> voxel_grid_;
-  unsigned int voxel_size_x_ = 0;
-  unsigned int voxel_size_y_ = 0;
-  unsigned int voxel_size_z_ = 0;
-  double voxel_z_origin_ = 0.0;
-
-  std::vector<GroundCell> ground_map_;
-  unsigned int ground_size_x_ = 0;
-  unsigned int ground_size_y_ = 0;
+  std::vector<CellData> grid_map_;
+  unsigned int grid_size_x_ = 0;
+  unsigned int grid_size_y_ = 0;
 
   std::vector<TimedPoint> accumulated_cloud_;
   double sensor_global_x_ = 0.0;
   double sensor_global_y_ = 0.0;
-  double sensor_global_z_ = 0.0;
   bool cloud_updated_ = false;
+
+  inline size_t gridIndex(unsigned int cx, unsigned int cy) const
+  {
+    return static_cast<size_t>(cy) * grid_size_x_ + static_cast<size_t>(cx);
+  }
 
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr slope_pub_;
 
