@@ -992,11 +992,11 @@ slam_toolbox_node:
     # map_start_pose: [1.5, 1.5, 0.57]
 
     # 如果想以 dock（第一节点）作为启动位置，可以启用下一项
-    map_start_at_dock: true
+    map_start_at_dock: false
 
     # 坐标系
     # 里程计坐标系
-    odom_frame: odom
+    odom_frame: world
     # 地图坐标系
     map_frame: map
     # 基座坐标系
@@ -1004,9 +1004,9 @@ slam_toolbox_node:
 
     # 激光与里程计话题
     # 扫描话题 - 绝对路径，即 /scan 而不是 scan
-    scan_topic: scan
+    scan_topic: /rkbot/scan
     # 里程计话题
-    odom_topic: lio/odom
+    odom_topic: /rkbot/front_lidar/odom
 
     # 保持 transform publish（map->odom 发布通常需要）
     # 地图到里程计变换的发布周期，0 表示不发布变换
@@ -1030,10 +1030,10 @@ slam_toolbox_node:
     # =============================================================================
     
     # 角度方差惩罚 - 当匹配扫描与里程计位姿不同时应用的惩罚，用于重定位时惩罚与里程计不一致的位姿
-    angle_variance_penalty: 1.0
+    angle_variance_penalty: 100.0
     
     # 距离方差惩罚 - 当匹配扫描与里程计位姿不同时应用的惩罚，用于重定位时惩罚与里程计不一致的位姿
-    distance_variance_penalty: 1.0
+    distance_variance_penalty: 100.0
     
     # 最小角度惩罚 - 确保角度惩罚不会过大的最小惩罚值，防止重定位时角度变化过大
     minimum_angle_penalty: 0.3
@@ -1042,10 +1042,10 @@ slam_toolbox_node:
     minimum_distance_penalty: 0.3
     
     # 是否启用闭环检测 - 必须启用才能支持重定位功能
-    do_loop_closing: true
+    do_loop_closing: false
     
     # # 是否启用交互模式
-    enable_interactive_mode: true
+    enable_interactive_mode: false
     # interactive_mode: false
     
     # # 暂停新测量处理
@@ -1055,10 +1055,10 @@ slam_toolbox_node:
     # paused_processing: false
     
     # 位置协方差缩放 - 控制位置估计的不确定性，值越小表示对位置估计越自信
-    position_covariance_scale: 0.3
+    position_covariance_scale: 0.001
     
     # 偏航角协方差缩放 - 控制角度估计的不确定性，值越小表示对角度估计越自信
-    yaw_covariance_scale: 0.3
+    yaw_covariance_scale: 0.001
     
     # # 分辨率 - 地图分辨率
     resolution: 0.05
@@ -1097,19 +1097,19 @@ slam_toolbox_node:
     # link_scan_maximum_distance: 10.0
     
     # 闭环匹配最大方差（粗略） - 控制闭环检测的匹配阈值，值越小匹配越严格
-    loop_match_maximum_variance_coarse: 0.2
+    loop_match_maximum_variance_coarse: 0.4
     
     # 闭环匹配最小链大小 - 检测闭环所需的最小连续匹配数
     loop_match_minimum_chain_size: 3
     
     # 闭环匹配最小响应（粗略） - 粗略匹配的最小响应阈值
-    loop_match_minimum_response_coarse: 0.8
+    loop_match_minimum_response_coarse: 0.35
     
     # 闭环匹配最小响应（精细） - 精细匹配的最小响应阈值
     loop_match_minimum_response_fine: 0.1
     
     # 闭环搜索最大距离 - 增加搜索距离范围以支持更长的匹配，提高重定位能力
-    loop_search_maximum_distance: 6.0
+    loop_search_maximum_distance: 15.0
     
     # 闭环搜索空间维度 - 适当增加搜索空间尺寸以支持更长的匹配距离
     loop_search_space_dimension: 0.25
@@ -1142,7 +1142,7 @@ slam_toolbox_node:
     use_scan_barycenter: true
     
     # 是否使用响应扩展 - 如果未找到可行匹配，是否自动增加搜索网格大小，重定位时建议启用
-    use_response_expansion: false
+    use_response_expansion: true
     
     # # 是否启用调试日志
     debug_logging: false

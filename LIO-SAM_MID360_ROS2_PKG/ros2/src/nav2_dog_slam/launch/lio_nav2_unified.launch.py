@@ -359,9 +359,6 @@ def generate_launch_description():
             configured_params,
             {
                 'use_sim_time': use_sim_time,
-                'map_update_interval': 1.0,
-                'publish_occupancy_map': 'True',
-                'use_map_saver': True,
                 'odom_frame': ns_odom_frame,
                 'map_frame': ns_map_frame,
                 'base_frame': ns_base_frame,
@@ -370,8 +367,6 @@ def generate_launch_description():
         ],
         prefix=['taskset -c 5,6'],
         remappings=[
-            ('/scan', 'scan'), 
-            ('/odom', lio_config['odom_topic']),
             ('/tf', '/tf'),
             ('/tf_static', '/tf_static'),
             ('/initialpose', '/initialpose')
