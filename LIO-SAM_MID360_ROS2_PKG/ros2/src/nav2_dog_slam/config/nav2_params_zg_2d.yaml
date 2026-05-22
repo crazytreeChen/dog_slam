@@ -1004,7 +1004,7 @@ slam_toolbox_node:
 
     # 激光与里程计话题
     # 扫描话题 - 绝对路径，即 /scan 而不是 scan
-    scan_topic: scan_front
+    scan_topic: scan
     # 里程计话题
     odom_topic: lio/odom
 
