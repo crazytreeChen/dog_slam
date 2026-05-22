@@ -13,6 +13,7 @@
 
     lio.ros.lidar_topic: "/rear_lidar"
     lio.ros.imu_topic: "/rear_lidar/imu"
+    lio.ros.map_save_service_topic: "/map_save_rear"
 
     lio.sensor.lidar_type: 9
     lio.sensor.blind: 0.1

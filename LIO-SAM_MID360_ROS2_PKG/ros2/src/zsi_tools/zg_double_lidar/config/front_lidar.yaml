@@ -13,11 +13,12 @@
 
     lio.ros.lidar_topic: "/front_lidar"
     lio.ros.imu_topic: "/front_lidar/imu"
+    lio.ros.map_save_service_topic: "/map_save"
 
     lio.sensor.lidar_type: 9
     lio.sensor.blind: 0.1
     lio.sensor.maxrange: 100.0
-    lio.sensor.filter_rate: 5
+    lio.sensor.filter_rate: 4
     lio.sensor.enable_downsample: true
     lio.sensor.voxel_fliter_size: 0.2
     lio.sensor.intensity_filter_en: true

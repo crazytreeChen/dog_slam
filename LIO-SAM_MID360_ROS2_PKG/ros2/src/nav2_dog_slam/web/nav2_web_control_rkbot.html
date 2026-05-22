@@ -112,6 +112,52 @@
     button:hover {
       background: #2a5fb0;
     }
+    
+    /* 侧边栏折叠按钮 */
+    #toggle-sidebar-btn {
+      width: 20px;
+      min-width: 20px;
+      background: #3a3a3a;
+      border: 1px solid #555;
+      border-left: none;
+      border-right: none;
+      color: #aaa;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      margin: 0;
+      margin-right: 10px;
+      border-radius: 0;
+      font-size: 14px;
+      user-select: none;
+      transition: background 0.2s, color 0.2s;
+    }
+    #toggle-sidebar-btn:hover {
+      background: #555;
+      color: #fff;
+    }
+    #toggle-sidebar-btn.collapsed {
+      margin-right: 0;
+      margin-left: 0;
+      border-left: 1px solid #555;
+      border-right: 1px solid #555;
+    }
+    
+    /* 侧边栏折叠状态 */
+    #control-panel.collapsed {
+      width: 0;
+      padding: 0;
+      margin-right: 0;
+      overflow: hidden;
+      opacity: 0;
+      pointer-events: none;
+    }
+    
+    body.sidebar-collapsed #map-container {
+      border-radius: 4px;
+    }
   </style>
 </head>
 <body>
@@ -200,6 +246,7 @@
       </div>
     </div>
   </div>
+  <button id="toggle-sidebar-btn" onclick="toggleSidebar()" title="收起/展开侧边栏">◀</button>
   <div id="map-container">
     <canvas id="map-canvas"></canvas>
     <canvas id="laser-canvas"></canvas>
@@ -209,12 +256,37 @@
   </div>
 
   <script type="text/javascript">
+    // === 侧边栏折叠逻辑 ===
+    let sidebarCollapsed = false;
+
+    function toggleSidebar() {
+      sidebarCollapsed = !sidebarCollapsed;
+      const panel = document.getElementById('control-panel');
+      const btn = document.getElementById('toggle-sidebar-btn');
+      if (sidebarCollapsed) {
+        panel.classList.add('collapsed');
+        btn.classList.add('collapsed');
+        btn.innerHTML = '▶';
+        btn.title = '展开侧边栏';
+        document.body.classList.add('sidebar-collapsed');
+      } else {
+        panel.classList.remove('collapsed');
+        btn.classList.remove('collapsed');
+        btn.innerHTML = '◀';
+        btn.title = '收起侧边栏';
+        document.body.classList.remove('sidebar-collapsed');
+      }
+      // 触发resize以重新适配地图Canvas
+      window.dispatchEvent(new Event('resize'));
+    }
+
     // === 配置部分 ===
     let ROSBRIDGE_SERVER_IP = localStorage.getItem('ros_hostname') || location.hostname; // 优先使用本地存储的主机名
     const ROSBRIDGE_SERVER_PORT = 9090;
     const MAP_TOPIC = "/rkbot/map";
     const ROBOT_FRAME = "rkbot/base_link";
     const SUPER_LIO_ODOM_TOPIC = "/rkbot/lio/odom"; // super_lio发布的里程计话题
+    const SUPER_LIO_FRONT_ODOM_TOPIC = "/rkbot/front_lidar/odom"; // super_lio_front发布的里程计话题
   const AMCL_POSE_TOPIC = "/rkbot/amcl_pose"; // AMCL发布的定位话题
     const CMD_TOPIC = "/cmd_vel";
     const GOAL_TOPIC = "/goal_pose";
@@ -1279,22 +1351,13 @@
         }
       }
       
-      // 订阅super_lio里程计主题
-      var superLioOdomTopic = new ROSLIB.Topic({
-        ros: ros,
-        name: SUPER_LIO_ODOM_TOPIC,
-        messageType: 'nav_msgs/Odometry'
-      });
-      
       // 四元数转欧拉角（yaw）的函数
       function quaternionToYaw(orientation) {
-        // 使用四元数到欧拉角的转换公式计算yaw
         const x = orientation.x;
         const y = orientation.y;
         const z = orientation.z;
         const w = orientation.w;
         
-        // 计算yaw (绕Z轴旋转)
         const siny_cosp = 2 * (w * z + x * y);
         const cosy_cosp = 1 - 2 * (y * y + z * z);
         const yaw = Math.atan2(siny_cosp, cosy_cosp);
@@ -1306,7 +1369,6 @@
       function startMapToOdomTFQuery(ros) {
         console.log('启动map->odom TF查询定时器，每5秒查询一次');
         
-        // 订阅/tf话题来获取map->odom变换
         const tfTopic = new ROSLIB.Topic({
           ros: ros,
           name: '/tf',
@@ -1314,11 +1376,9 @@
         });
         
         tfTopic.subscribe(function(tfMsg) {
-          // 遍历所有变换，查找map->odom
           if (tfMsg.transforms) {
             for (let transform of tfMsg.transforms) {
               if (transform.header.frame_id === 'rkbot/map' && transform.child_frame_id === 'rkbot/odom') {
-                // 更新map->odom变换
                 mapToOdomTransform = {
                   translation: {
                     x: transform.transform.translation.x,
@@ -1351,13 +1411,10 @@
           return { x: odomX, y: odomY, theta: odomTheta };
         }
         
-        // 获取map->odom的平移和旋转
         const tx = mapToOdomTransform.translation.x;
         const ty = mapToOdomTransform.translation.y;
         const mapToOdomYaw = quaternionToYaw(mapToOdomTransform.rotation);
         
-        // 应用变换：map = map->odom * odom
-        // 先旋转，再平移
         const cosYaw = Math.cos(mapToOdomYaw);
         const sinYaw = Math.sin(mapToOdomYaw);
         
@@ -1368,26 +1425,86 @@
         return { x: mapX, y: mapY, theta: mapTheta };
       }
       
-      superLioOdomTopic.subscribe(function(odomMsg) {
-        // 只有当位置源设置为super_lio时才使用这些数据
-        if (positionSource === 'super_lio') {
-          // 获取odom坐标系下的位置和朝向
-          const odomX = odomMsg.pose.pose.position.x;
-          const odomY = odomMsg.pose.pose.position.y;
-          const odomTheta = quaternionToYaw(odomMsg.pose.pose.orientation);
-          
-          // 应用map->odom变换，得到map坐标系下的位置
-          const mapPosition = applyMapToOdomTransform(odomX, odomY, odomTheta);
-          
-          // 更新机器人位置和朝向
-          robotPosition.x = mapPosition.x;
-          robotPosition.y = mapPosition.y;
-          robotPosition.theta = mapPosition.theta;
-          
-          // 重绘地图以更新机器人位置
-          drawMap();
+      // 订阅里程计（带主备切换）：优先SUPER_LIO_ODOM_TOPIC，超时后尝试SUPER_LIO_FRONT_ODOM_TOPIC
+      let lioOdomReceived = false;
+      let lioFrontOdomTopic = null;
+      let fallbackTimer = null;
+      
+      function onLioOdomReceived(odomMsg) {
+        if (positionSource !== 'super_lio') return;
+        
+        if (!lioOdomReceived) {
+          lioOdomReceived = true;
+          console.log('已从', SUPER_LIO_ODOM_TOPIC, '收到里程计数据，取消fallback定时器');
+          if (fallbackTimer) {
+            clearTimeout(fallbackTimer);
+            fallbackTimer = null;
+          }
         }
+        
+        const odomX = odomMsg.pose.pose.position.x;
+        const odomY = odomMsg.pose.pose.position.y;
+        const odomTheta = quaternionToYaw(odomMsg.pose.pose.orientation);
+        
+        const mapPosition = applyMapToOdomTransform(odomX, odomY, odomTheta);
+        
+        robotPosition.x = mapPosition.x;
+        robotPosition.y = mapPosition.y;
+        robotPosition.theta = mapPosition.theta;
+        
+        drawMap();
+      }
+      
+      function onLioFrontOdomReceived(odomMsg) {
+        if (positionSource !== 'super_lio') return;
+        
+        if (!lioOdomReceived) {
+          lioOdomReceived = true;
+          console.log('主话题无数据，已切换到', SUPER_LIO_FRONT_ODOM_TOPIC, '接收里程计数据');
+        }
+        
+        const odomX = odomMsg.pose.pose.position.x;
+        const odomY = odomMsg.pose.pose.position.y;
+        const odomTheta = quaternionToYaw(odomMsg.pose.pose.orientation);
+        
+        const mapPosition = applyMapToOdomTransform(odomX, odomY, odomTheta);
+        
+        robotPosition.x = mapPosition.x;
+        robotPosition.y = mapPosition.y;
+        robotPosition.theta = mapPosition.theta;
+        
+        drawMap();
+      }
+      
+      // 订阅主话题
+      var superLioOdomTopic = new ROSLIB.Topic({
+        ros: ros,
+        name: SUPER_LIO_ODOM_TOPIC,
+        messageType: 'nav_msgs/Odometry'
       });
+      superLioOdomTopic.subscribe(onLioOdomReceived);
+      console.log('正在订阅主里程计话题:', SUPER_LIO_ODOM_TOPIC);
+      
+      // 设置fallback定时器：3秒后主话题无数据则尝试备话题
+      fallbackTimer = setTimeout(function() {
+        if (!lioOdomReceived) {
+          console.warn('主话题', SUPER_LIO_ODOM_TOPIC, '在3秒内未收到数据，尝试备话题', SUPER_LIO_FRONT_ODOM_TOPIC);
+          lioFrontOdomTopic = new ROSLIB.Topic({
+            ros: ros,
+            name: SUPER_LIO_FRONT_ODOM_TOPIC,
+            messageType: 'nav_msgs/Odometry'
+          });
+          lioFrontOdomTopic.subscribe(onLioFrontOdomReceived);
+          
+          // 再设置一个超时，如果备话题也无数据则输出警告
+          setTimeout(function() {
+            if (!lioOdomReceived) {
+              console.error('主话题', SUPER_LIO_ODOM_TOPIC, '和备话题', SUPER_LIO_FRONT_ODOM_TOPIC, '均无数据，里程计定位不可用');
+            }
+          }, 5000);
+        }
+        fallbackTimer = null;
+      }, 3000);
       
       // 订阅AMCL位置主题（仍然保持）
       var amclPoseTopic = new ROSLIB.Topic({

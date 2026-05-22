@@ -1010,7 +1010,7 @@ slam_toolbox_node:
 
     # 保持 transform publish（map->odom 发布通常需要）
     # 地图到里程计变换的发布周期，0 表示不发布变换
-    transform_publish_period: 0.0
+    transform_publish_period: 0.1
 
     # 传感器范围与匹配参数（可按需调优）
     # 最大激光范围 - 用于 2D 占用地图栅格化的最大激光范围
@@ -1030,10 +1030,10 @@ slam_toolbox_node:
     # =============================================================================
     
     # 角度方差惩罚 - 当匹配扫描与里程计位姿不同时应用的惩罚，用于重定位时惩罚与里程计不一致的位姿
-    angle_variance_penalty: 100.0
+    angle_variance_penalty: 1.0
     
     # 距离方差惩罚 - 当匹配扫描与里程计位姿不同时应用的惩罚，用于重定位时惩罚与里程计不一致的位姿
-    distance_variance_penalty: 100.0
+    distance_variance_penalty: 1.0
     
     # 最小角度惩罚 - 确保角度惩罚不会过大的最小惩罚值，防止重定位时角度变化过大
     minimum_angle_penalty: 0.3
@@ -1042,7 +1042,7 @@ slam_toolbox_node:
     minimum_distance_penalty: 0.3
     
     # 是否启用闭环检测 - 必须启用才能支持重定位功能
-    do_loop_closing: false
+    do_loop_closing: true
     
     # # 是否启用交互模式
     enable_interactive_mode: false
@@ -1055,10 +1055,10 @@ slam_toolbox_node:
     # paused_processing: false
     
     # 位置协方差缩放 - 控制位置估计的不确定性，值越小表示对位置估计越自信
-    position_covariance_scale: 0.001
+    position_covariance_scale: 0.01
     
     # 偏航角协方差缩放 - 控制角度估计的不确定性，值越小表示对角度估计越自信
-    yaw_covariance_scale: 0.001
+    yaw_covariance_scale: 0.01
     
     # # 分辨率 - 地图分辨率
     resolution: 0.05
