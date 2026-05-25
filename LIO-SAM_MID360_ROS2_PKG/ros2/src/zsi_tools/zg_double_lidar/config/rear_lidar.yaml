@@ -73,7 +73,7 @@
     lio.dynamic_removal.min_neighbors: 2
     lio.dynamic_removal.frame_window: 1
     lio.dynamic_removal.raycast_min_hits: 2
-    lio.dynamic_removal.isolated_removal: true
+    lio.dynamic_removal.isolated_removal: false
 
     # 仅做点云去畸变和降采样模式，不计算LIO
     # 启用后: 只进行IMU传播去畸变+降采样，跳过观测和地图更新

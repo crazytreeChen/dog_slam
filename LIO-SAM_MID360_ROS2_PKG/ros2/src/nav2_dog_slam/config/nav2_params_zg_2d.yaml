@@ -1010,7 +1010,7 @@ slam_toolbox_node:
 
     # 保持 transform publish（map->odom 发布通常需要）
     # 地图到里程计变换的发布周期，0 表示不发布变换
-    transform_publish_period: 0.1
+    transform_publish_period: 0.0
 
     # 传感器范围与匹配参数（可按需调优）
     # 最大激光范围 - 用于 2D 占用地图栅格化的最大激光范围
@@ -1042,7 +1042,7 @@ slam_toolbox_node:
     minimum_distance_penalty: 0.3
     
     # 是否启用闭环检测 - 必须启用才能支持重定位功能
-    do_loop_closing: true
+    do_loop_closing: false
     
     # # 是否启用交互模式
     enable_interactive_mode: false
