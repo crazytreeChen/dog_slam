@@ -17,14 +17,14 @@ controller_server:
     # bond_disable_heartbeat_timeout: false  # 新增参数
     use_sim_time: false
 
-    controller_frequency: 20.0  # 保持10Hz控制器频率
+    controller_frequency: 10.0  # 保持10Hz控制器频率
     failure_tolerance: 3.0
 
     min_x_velocity_threshold: 0.1  #<- 【走慢】阈值0.05太低，低于此值的线速度被忽略，但实际上0.05~0.1m/s的微小速度指令被下发到底盘却无法执行，造成"走不动"的感觉。建议改为0.1
     min_y_velocity_threshold: 0.1
     min_theta_velocity_threshold: 0.1  # 提高最小角速度阈值，避免低速无法转动
 
-    odom_topic: "front_lidar/robo/odom"  # 新增参数
+    odom_topic: "lio/odom"  # 新增参数
     # publish_zero_velocity: true  # 新增参数
     # speed_limit_topic: "/speed_limit"  # 新增参数
     
@@ -56,10 +56,10 @@ controller_server:
     FollowPath:
       plugin: "nav2_mppi_controller::MPPIController"
 
-      time_steps: 56
+      time_steps: 34
       # time_steps: 30
-      model_dt: 0.05
-      batch_size: 1000  # 大幅减少批量大小，从1500减到800，提高计算速度
+      model_dt: 0.1
+      batch_size: 300  # 大幅减少批量大小，从1500减到800，提高计算速度
       transform_tolerance: 0.5  # 减少变换容差，提高实时性
       
       # 全向移动速度限制 - 适应机器人结构特性
@@ -74,7 +74,7 @@ controller_server:
       # vx_max: 1.5
       # vx_max: 0.6
       vy_max: 0.2
-      vy_std: 0.2  # 降低横移速度采样标准差
+      vy_std: 0.1  # 降低横移速度采样标准差
       vx_min: -0.5
       # wz_max: 2.0
       # wz_max: 1.2
@@ -216,8 +216,8 @@ velocity_smoother:
     # bond_disable_heartbeat_timeout: false  # 新增参数
     
     use_sim_time: false
-    smoothing_frequency: 20.0
-    scale_velocities: true
+    smoothing_frequency: 10.0
+    scale_velocities: false
     feedback: "OPEN_LOOP" 
 
     # feedback: "CLOSED_LOOP"  
@@ -257,17 +257,17 @@ velocity_smoother:
 planner_server:
   ros__parameters:
     use_sim_time: false
-    expected_planner_frequency: 0.5
+    expected_planner_frequency: 0.2
     planner_plugins: ["LatticeBased", "GridBased", "HybridBased"]
 
     LatticeBased:
       plugin: "nav2_smac_planner/SmacPlannerLattice"
       tolerance: 0.3
-      allow_unknown: true
+      allow_unknown: false
       max_iterations: 1000000
       max_on_approach_iterations: 10000
       max_planning_time: 10.0
-      lattice_filepath: "/home/ywj/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/nav2_dog_slam/config/lattice_primitives.json"
+      lattice_filepath: "/home/ztl/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/nav2_dog_slam/config/lattice_primitives.json"
       minimum_turning_radius: 0.2
       reverse_penalty: 2.0
       change_penalty: 0.3
@@ -292,7 +292,7 @@ planner_server:
     GridBased:
       plugin: "nav2_smac_planner/SmacPlanner2D"
       tolerance: 0.3
-      allow_unknown: true
+      allow_unknown: false
       max_iterations: 1000000
       max_on_approach_iterations: 1000
       use_final_approach_orientation: false
@@ -361,7 +361,7 @@ local_costmap:
       transform_tolerance: 0.5
       
       # 地图参数
-      footprint: "[[-0.8, -0.25], [-0.8, 0.25], [0.05, 0.25], [0.05, -0.25]]"  # 机器狗矩形footprint（base_link前移10cm）
+      footprint: "[[-0.7, -0.25], [-0.7, 0.25], [0.05, 0.25], [0.05, -0.25]]"  # 机器狗矩形footprint（base_link前移10cm）
       footprint_padding: 0.05  # footprint膨胀填充
       resolution: 0.05
       rolling_window: true
@@ -421,7 +421,7 @@ local_costmap:
         max_obstacle_height: 100.0
         min_obstacle_height: -100.0
         scan:
-          topic: /scan
+          topic: scan
           max_obstacle_height: 100.0
           min_obstacle_height: -100.0
           clearing: true
@@ -441,7 +441,7 @@ local_costmap:
         plugin: "nav2_costmap_2d::InflationLayer"
         enabled: true
         inflation_radius: 1.0
-        cost_scaling_factor: 20.0
+        cost_scaling_factor: 5.0
         # inflate_unknown: false      # 新增参数
         # inflate_around_unknown: false  # 新增参数
       
@@ -478,7 +478,7 @@ global_costmap:
       transform_tolerance: 0.5
       
       # 地图参数
-      footprint: "[[-0.8, -0.25], [-0.8, 0.25], [0.05, 0.25], [0.05, -0.25]]"  # 机器狗矩形footprint（base_link前移10cm）
+      footprint: "[[-0.7, -0.25], [-0.7, 0.25], [0.05, 0.25], [0.05, -0.25]]"  # 机器狗矩形footprint（base_link前移10cm）
       footprint_padding: 0.05  # footprint膨胀填充
       resolution: 0.05
       track_unknown_space: true
@@ -512,7 +512,7 @@ global_costmap:
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         enabled: true  # 新增参数
-        map_topic: "/map"  # 新增参数
+        map_topic: "map"  # 新增参数
         # subscribe_to_updates: false  # 新增参数
         map_subscribe_transient_local: true
         # transform_tolerance: 0.3  # 新增参数

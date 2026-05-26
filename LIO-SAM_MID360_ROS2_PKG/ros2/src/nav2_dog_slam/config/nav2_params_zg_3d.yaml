@@ -20,7 +20,7 @@ controller_server:
     controller_frequency: 10.0  # 保持10Hz控制器频率
     failure_tolerance: 3.0
 
-    min_x_velocity_threshold: 0.05
+    min_x_velocity_threshold: 0.1  #<- 【走慢】阈值0.05太低，低于此值的线速度被忽略，但实际上0.05~0.1m/s的微小速度指令被下发到底盘却无法执行，造成"走不动"的感觉。建议改为0.1
     min_y_velocity_threshold: 0.1
     min_theta_velocity_threshold: 0.1  # 提高最小角速度阈值，避免低速无法转动
 
@@ -84,8 +84,8 @@ controller_server:
       
       # 温度参数
       temperature: 0.2
-      # motion_model: "DiffDrive" 
-      motion_model: "Omni"  # 全向移动模型
+      motion_model: "DiffDrive" 
+      # motion_model: "Omni"  # 全向移动模型
       reset_period: 0.5
 
       visualize: false
@@ -116,8 +116,8 @@ controller_server:
       
       CostCritic:
         enabled: false
-        cost_weight: 10.0  # 大幅增加避障成本权重，强制避障
-        cost_power: 1      # 大幅增加成本幂次，使靠近障碍物时成本急剧增加
+        cost_weight: 30.0  # 大幅增加避障成本权重，强制避障
+        cost_power: 2      # 大幅增加成本幂次，使靠近障碍物时成本急剧增加
         collision_cost: 254.0  # 碰撞成本设为最大值
         consider_footprint: true  # 考虑机器人轮廓
         critical_cost: 254.0  # 临界成本设为最大值
@@ -126,16 +126,16 @@ controller_server:
 
       ObstaclesCritic:
         enabled: true
-        cost_weight: 40.0
+        cost_weight: 30.0
         cost_power: 3
         collision_cost: 254.0
         consider_footprint: true
         critical_cost: 250.0
-        critical_weight: 200.0
+        critical_weight: 50.0
         repulsion_weight: 5.0
-        collision_margin_distance: 0.1
+        collision_margin_distance: 0.5
         inflation_layer_name: "inflation_layer_local"
-        inflation_radius: 0.2
+        inflation_radius: 0.5
         near_goal_distance: 1.5
         
       PathFollowCritic:
@@ -148,19 +148,19 @@ controller_server:
 
       PathAlignCritic:
         enabled: true
-        cost_weight: 5.0  #<- 【左右扭】横向对齐惩罚权重偏高，配合cost_power=4导致过度修正。建议降至5.0
-        cost_power: 2  #<- 【左右扭】4次幂！微小横向偏差被急剧放大(如偏离0.1m惩罚被放大10000倍)，是扭动的主要原因之一。建议改为2
-        forward_point_distance: 2.0
+        cost_weight: 10.0  #<- 【左右扭】横向对齐惩罚权重偏高，配合cost_power=4导致过度修正。建议降至5.0
+        cost_power: 4  #<- 【左右扭】4次幂！微小横向偏差被急剧放大(如偏离0.1m惩罚被放大10000倍)，是扭动的主要原因之一。建议改为2
+        forward_point_distance: 0.5
         threshold_to_consider: 1.0
 
       PathAngleCritic:
         enabled: true
-        cost_weight: 20.0  # 大幅降低权重，减少方向修正的过度反应  #<- 【左右扭】权重40太高，稍微偏一点就大力修正，修正过头又反向修正，形成左右扭动(oscillation)。建议降至15.0
+        cost_weight: 30.0  # 大幅降低权重，减少方向修正的过度反应  #<- 【左右扭】权重40太高，稍微偏一点就大力修正，修正过头又反向修正，形成左右扭动(oscillation)。建议降至15.0
         cost_power: 4
         forward_preference: true
-        offset_from_furthest: 4  # 进一步减少前瞻距离，提高实时响应
+        offset_from_furthest: 2  # 进一步减少前瞻距离，提高实时响应
         threshold_to_consider: 0.5  # Distance (m) between robot and goal to stop considering path angles and allow goal critics to take over.
-        max_angle_to_furthest: 0.8  # 大幅减少最大角度阈值，避免过度修正  #<- 【左右扭】0.5(约28.6°)太小，稍微偏离路径方向就产生很大角速度修正，是扭动的主要原因之一。建议改为1.0
+        max_angle_to_furthest: 0.5  # 大幅减少最大角度阈值，避免过度修正  #<- 【左右扭】0.5(约28.6°)太小，稍微偏离路径方向就产生很大角速度修正，是扭动的主要原因之一。建议改为1.0
         # mode: 0
         
       PreferForwardCritic:
@@ -263,7 +263,7 @@ planner_server:
     LatticeBased:
       plugin: "nav2_smac_planner/SmacPlannerLattice"
       tolerance: 0.3
-      allow_unknown: false
+      allow_unknown: true
       max_iterations: 1000000
       max_on_approach_iterations: 10000
       max_planning_time: 10.0
@@ -385,41 +385,41 @@ local_costmap:
       # filters: []  # 新增参数 - 无过滤器
       
       # 插件配置
-      plugins: ["traversability_layer_local", "obstacle_layer_local", "inflation_layer_local"] # "voxel_layer", "stvl_layer",
+      plugins: ["stvl_layer", "obstacle_layer_local", "inflation_layer_local"] # "voxel_layer", "traversability_layer_local",
       
       # 可通行性层参数 - 基于点云高度差和坡度分析三维地形
       traversability_layer_local:
         plugin: "traversability_layer::TraversabilityLayer"
         enabled: true
         # 点云话题
-        pointcloud_topic: /rkbot/front_lidar/body/cloud
+        pointcloud_topic: /rkbot/front_lidar/cloud_world
         # 传感器坐标系（为空则使用点云自带的 frame_id）
         # sensor_frame: ""
         # 高度过滤（相对于机器人坐标系的高度）
         max_obstacle_height: 1.0    # 最大考虑高度(m)，高于此忽略
-        min_obstacle_height: -1.5   # 最小考虑高度(m)，低于此忽略
+        min_obstacle_height: -0.2   # 最小考虑高度(m)，低于此忽略
         # 坡度参数（角度制）
         max_slope_traversable: 80.0   # 最大可通行坡度(°)，超过则直接 lethal
         slope_cost_start: 70.0        # 开始产生坡度 cost 的坡度角(°)
         slope_cost_scale: 0.1         # 坡度 cost 指数增长系数
         # 高度差参数
         step_height_threshold: 0.4   # 台阶高度阈值(m)，超过此值进入坡度检测
-        height_cost_start: 0.1        # 产生 cost 的最小高度(m)，低于此值 cost=0
+        height_cost_start: 0.3        # 产生 cost 的最小高度(m)，低于此值 cost=0
         # 高度差 cost 缩放（仅在旧版 computeCost 中使用，当前版本由三段逻辑取代
         # 但保留声明避免未知参数警告）
-        height_cost_scale: 2.0
+        height_cost_scale: 0.1
         # 致命 cost 阈值
         lethal_cost_threshold: 254.0
         # 点云持久化
         observation_persistence: 1.0  # 点云保留时间(s)。0=仅用最新帧；>0=累积并按时修剪过期点
         # 点云缓冲
-        cloud_buffer_size: 5          # 点云缓冲队列长度
+        cloud_buffer_size: 50          # 点云缓冲队列长度
         # 调试输出
-        publish_slope_map: true       # 是否发布坡度可视化点云
+        publish_slope_map: false       # 是否发布坡度可视化点云
         # 射线清除
         enable_raycast_clear: false   # 是否启用射线追踪清除(未实现)
         # 网格分辨率
-        cell_resolution: 0.1          # 可通行性分析网格分辨率(m)
+        cell_resolution: 0.2          # 可通行性分析网格分辨率(m)
         # 并行计算
         num_threads: 4                # OpenMP 线程数，0=系统默认，-1=单线程(禁用OpenMP)
 
@@ -427,26 +427,12 @@ local_costmap:
       obstacle_layer_local:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
-        observation_sources: scan_front scan_rear
+        observation_sources: scan_rear scan_front 
         combination_method: 1  # 取最大值组合方法
-        footprint_clearing_enabled: true  # 启用footprint清理
+        footprint_clearing_enabled: false  # 启用footprint清理
         max_obstacle_height: 100.0
         min_obstacle_height: -100.0
-        scan_front:
-          topic: /rkbot/scan_front
-          max_obstacle_height: 100.0
-          min_obstacle_height: -100.0
-          clearing: true
-          marking: false
-          data_type: "LaserScan"
-          raytrace_max_range: 10.0
-          raytrace_min_range: 0.0
-          obstacle_max_range: 0.0
-          obstacle_min_range: 0.0
-          # expected_update_rate: 0.0  # 新增参数
-          # inf_is_valid: false  # 新增参数
-          # observation_persistence: 0.0  # 新增参数
-          # sensor_frame: ""  # 新增参数 - 空表示使用数据帧
+        
         scan_rear:
           topic: /rkbot/scan_rear
           max_obstacle_height: 100.0
@@ -455,9 +441,25 @@ local_costmap:
           marking: true
           data_type: "LaserScan"
           raytrace_max_range: 10.0
-          raytrace_min_range: 0.0
+          raytrace_min_range: 0.1
           obstacle_max_range: 10.0
-          obstacle_min_range: 0.0
+          obstacle_min_range: 0.1
+          # expected_update_rate: 0.0  # 新增参数
+          # inf_is_valid: false  # 新增参数
+          # observation_persistence: 0.0  # 新增参数
+          # sensor_frame: ""  # 新增参数 - 空表示使用数据帧
+
+        scan_front:
+          topic: /rkbot/scan_front
+          max_obstacle_height: 100.0
+          min_obstacle_height: -100.0
+          clearing: true
+          marking: false
+          data_type: "LaserScan"
+          raytrace_max_range: 10.0
+          raytrace_min_range: 0.1
+          obstacle_max_range: 10.0
+          obstacle_min_range: 0.1
           # expected_update_rate: 0.0  # 新增参数
           # inf_is_valid: false  # 新增参数
           # observation_persistence: 0.0  # 新增参数
@@ -476,40 +478,40 @@ local_costmap:
       always_send_full_costmap: true
       
 
-      # # STVL (Spatio-Temporal Voxel Layer) - 3D点云障碍物层
-      # stvl_layer:
-      #   plugin: "spatio_temporal_voxel_layer/SpatioTemporalVoxelLayer"
-      #   enabled: true
-      #   # 体素衰减时间（秒）
-      #   voxel_decay: 5.0  
-      #   # 衰减模型：0=线性，1=指数  
-      #   decay_model: 0  
-      #   # 体素大小（米）
-      #   voxel_size: 0.05  
-      #   track_unknown_space: true
-      #   observation_persistence: 0.0
-      #   max_obstacle_height: 1.0
-      #   min_obstacle_height: -0.2
-      #   publish_voxel_map: true
-      #   observation_sources: pointcloud
-      #   pointcloud:
-      #     topic: /rkbot/front_lidar/body/cloud  # 点云话题
-      #     max_obstacle_height: 1.0
-      #     min_obstacle_height: -0.2
-      #     obstacle_max_range: 5.0
-      #     obstacle_min_range: 0.1
-      #     raytrace_max_range: 5.0
-      #     raytrace_min_range: 0.0
-      #     clearing: true
-      #     marking: true
-      #     data_type: "PointCloud2"
-      #     sensor_frame: "rslidar_head"  # 点云传感器坐标系
-      #     observation_persistence: 0.0
-      #     inf_is_valid: true
-      #     filter: "voxel"  # 点云滤波器
-      #     voxel_min_points: 2  # 体素最小点数
-      #     clear_after_reading: false
-      #     max_update_rate: 10.0
+      # STVL (Spatio-Temporal Voxel Layer) - 3D点云障碍物层
+      stvl_layer:
+        plugin: "spatio_temporal_voxel_layer/SpatioTemporalVoxelLayer"
+        enabled: true
+        # 体素衰减时间（秒）
+        voxel_decay: 5.0  
+        # 衰减模型：0=线性，1=指数  
+        decay_model: 0  
+        # 体素大小（米）
+        voxel_size: 0.05  
+        track_unknown_space: true
+        observation_persistence: 0.0
+        max_obstacle_height: 1.0
+        min_obstacle_height: -0.2
+        publish_voxel_map: true
+        observation_sources: pointcloud
+        pointcloud:
+          topic: /rkbot/front_lidar/body/cloud  # 点云话题
+          max_obstacle_height: 1.0
+          min_obstacle_height: -0.2
+          obstacle_max_range: 5.0
+          obstacle_min_range: 0.1
+          raytrace_max_range: 5.0
+          raytrace_min_range: 0.0
+          clearing: true
+          marking: true
+          data_type: "PointCloud2"
+          sensor_frame: "rslidar_head"  # 点云传感器坐标系
+          observation_persistence: 0.0
+          inf_is_valid: true
+          filter: "voxel"  # 点云滤波器
+          voxel_min_points: 2  # 体素最小点数
+          clear_after_reading: false
+          max_update_rate: 10.0
 
 
       # # 体素层参数
@@ -692,8 +694,8 @@ amcl:
     alpha5: 0.7           # 降低额外噪声参数，室内环境更可预测
     
     # 机器人运动模型类型 - 全向移动
-    robot_model_type: "nav2_amcl::OmniMotionModel"
-    # robot_model_type: "nav2_amcl::DifferentialMotionModel"
+    # robot_model_type: "nav2_amcl::OmniMotionModel"
+    robot_model_type: "nav2_amcl::DifferentialMotionModel"
     
     # 更新阈值 - 两个模型共用
     update_min_d: 0.1
@@ -1163,10 +1165,10 @@ slam_toolbox_node:
     minimum_distance_penalty: 0.3
     
     # 是否启用闭环检测 - 必须启用才能支持重定位功能
-    do_loop_closing: true
+    do_loop_closing: false
     
     # # 是否启用交互模式
-    enable_interactive_mode: true
+    enable_interactive_mode: false
     # interactive_mode: false
     
     # # 暂停新测量处理
