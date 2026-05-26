@@ -78,6 +78,8 @@ private:
   void incrementalUpdateVoxelGrid(
     const std::vector<Point3D> & transformed_pts,
     const Point3D & sensor_pos, double ox, double oy);
+  void shiftVoxelGrid(int shift_x, int shift_y);
+  void expandVoxelGridZ(double new_z_lo, double new_z_hi);
   void decayVoxelGrid();
   void extractGround(double ox, double oy);
   void interpolateGround();

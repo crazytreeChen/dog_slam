@@ -245,12 +245,93 @@ void TraversabilityLayer::pointCloudCallback(const sensor_msgs::msg::PointCloud2
   cloud_updated_ = true;
 }
 
+void TraversabilityLayer::shiftVoxelGrid(int shift_x, int shift_y)
+{
+  if (shift_x == 0 && shift_y == 0) return;
+
+  std::vector<VoxelData> new_grid(
+    static_cast<size_t>(voxel_size_x_) *
+    static_cast<size_t>(voxel_size_y_) *
+    static_cast<size_t>(voxel_size_z_), VoxelData{});
+
+#pragma omp parallel for collapse(2) schedule(static)
+  for (int ny = 0; ny < static_cast<int>(voxel_size_y_); ny++) {
+    for (int nx = 0; nx < static_cast<int>(voxel_size_x_); nx++) {
+      int old_x = nx - shift_x;
+      int old_y = ny - shift_y;
+
+      if (old_x < 0 || old_x >= static_cast<int>(voxel_size_x_) ||
+          old_y < 0 || old_y >= static_cast<int>(voxel_size_y_))
+      {
+        continue;
+      }
+
+      for (unsigned int iz = 0; iz < voxel_size_z_; iz++) {
+        size_t new_idx = voxelIndex(
+          static_cast<unsigned int>(nx),
+          static_cast<unsigned int>(ny), iz);
+        size_t old_idx = voxelIndex(
+          static_cast<unsigned int>(old_x),
+          static_cast<unsigned int>(old_y), iz);
+        new_grid[new_idx] = voxel_grid_[old_idx];
+      }
+    }
+  }
+
+  voxel_grid_ = std::move(new_grid);
+  voxel_ox_ -= shift_x * cell_resolution_;
+  voxel_oy_ -= shift_y * cell_resolution_;
+}
+
+void TraversabilityLayer::expandVoxelGridZ(double new_z_lo, double new_z_hi)
+{
+  unsigned int new_size_z = static_cast<unsigned int>(
+    std::ceil((new_z_hi - new_z_lo) / voxel_z_resolution_));
+  if (new_size_z < 1) new_size_z = 1;
+
+  if (new_size_z == voxel_size_z_ &&
+      std::abs(new_z_lo - voxel_z_origin_) < voxel_z_resolution_ * 0.5)
+  {
+    return;
+  }
+
+  int z_offset = static_cast<int>(
+    std::round((voxel_z_origin_ - new_z_lo) / voxel_z_resolution_));
+
+  std::vector<VoxelData> new_grid(
+    static_cast<size_t>(voxel_size_x_) *
+    static_cast<size_t>(voxel_size_y_) *
+    static_cast<size_t>(new_size_z), VoxelData{});
+
+#pragma omp parallel for collapse(2) schedule(static)
+  for (int y = 0; y < static_cast<int>(voxel_size_y_); y++) {
+    for (int x = 0; x < static_cast<int>(voxel_size_x_); x++) {
+      for (unsigned int old_iz = 0; old_iz < voxel_size_z_; old_iz++) {
+        int new_iz = static_cast<int>(old_iz) + z_offset;
+        if (new_iz < 0 || new_iz >= static_cast<int>(new_size_z)) continue;
+
+        size_t old_idx = voxelIndex(
+          static_cast<unsigned int>(x),
+          static_cast<unsigned int>(y), old_iz);
+        size_t new_idx = static_cast<size_t>(new_iz) *
+          static_cast<size_t>(voxel_size_x_) *
+          static_cast<size_t>(voxel_size_y_) +
+          static_cast<size_t>(y) * static_cast<size_t>(voxel_size_x_) +
+          static_cast<size_t>(x);
+        new_grid[new_idx] = voxel_grid_[old_idx];
+      }
+    }
+  }
+
+  voxel_grid_ = std::move(new_grid);
+  voxel_z_origin_ = new_z_lo;
+  voxel_size_z_ = new_size_z;
+}
+
 void TraversabilityLayer::incrementalUpdateVoxelGrid(
   const std::vector<Point3D> & transformed_pts,
   const Point3D & sensor_pos, double ox, double oy)
 {
-  double world_w = ground_size_x_ * cell_resolution_;
-  double world_h = ground_size_y_ * cell_resolution_;
   voxel_size_x_ = ground_size_x_;
   voxel_size_y_ = ground_size_y_;
 
@@ -269,17 +350,7 @@ void TraversabilityLayer::incrementalUpdateVoxelGrid(
   double z_lo = std::min(z_min_world, cur_sensor_z + voxel_z_min_) - voxel_z_resolution_;
   double z_hi = std::max(z_max_world, cur_sensor_z + voxel_z_max_) + voxel_z_resolution_;
 
-  bool need_rebuild = false;
-  if (!voxel_grid_valid_ ||
-      static_cast<unsigned int>(std::ceil((z_hi - z_lo) / voxel_z_resolution_)) != voxel_size_z_ ||
-      std::abs(z_lo - voxel_z_origin_) > voxel_z_resolution_ * 0.5 ||
-      std::abs(ox - voxel_ox_) > cell_resolution_ * 0.5 ||
-      std::abs(oy - voxel_oy_) > cell_resolution_ * 0.5)
-  {
-    need_rebuild = true;
-  }
-
-  if (need_rebuild) {
+  if (!voxel_grid_valid_) {
     voxel_z_origin_ = z_lo;
     voxel_ox_ = ox;
     voxel_oy_ = oy;
@@ -292,6 +363,20 @@ void TraversabilityLayer::incrementalUpdateVoxelGrid(
                           static_cast<size_t>(voxel_size_z_);
     voxel_grid_.assign(total_voxels, VoxelData{});
     voxel_grid_valid_ = true;
+  } else {
+    int shift_x = static_cast<int>(std::round((voxel_ox_ - ox) / cell_resolution_));
+    int shift_y = static_cast<int>(std::round((voxel_oy_ - oy) / cell_resolution_));
+    shiftVoxelGrid(shift_x, shift_y);
+
+    bool z_expand = false;
+    if (z_lo < voxel_z_origin_ - voxel_z_resolution_ * 0.5) z_expand = true;
+    if (z_hi > voxel_z_origin_ + voxel_size_z_ * voxel_z_resolution_ + voxel_z_resolution_ * 0.5) z_expand = true;
+
+    if (z_expand) {
+      double expanded_z_lo = std::min(z_lo, voxel_z_origin_);
+      double expanded_z_hi = std::max(z_hi, voxel_z_origin_ + voxel_size_z_ * voxel_z_resolution_);
+      expandVoxelGridZ(expanded_z_lo, expanded_z_hi);
+    }
   }
 
   frame_counter_++;
