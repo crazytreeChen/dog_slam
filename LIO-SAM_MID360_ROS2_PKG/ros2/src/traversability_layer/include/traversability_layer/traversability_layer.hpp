@@ -32,6 +32,7 @@ struct VoxelData
 {
   uint8_t hit_count = 0;
   uint8_t pass_count = 0;
+  uint16_t last_update_frame = 0;
 };
 
 struct GroundCell
@@ -45,11 +46,10 @@ struct GroundCell
   float obstacle_ratio = 0.0f;
 };
 
-struct TimedPoint
+struct IncrementalRay
 {
-  Point3D pt;
-  Point3D sensor_pt;
-  rclcpp::Time stamp;
+  size_t hit_idx;
+  std::vector<size_t> pass_indices;
 };
 
 class TraversabilityLayer : public nav2_costmap_2d::Layer, public nav2_costmap_2d::Costmap2D
@@ -75,7 +75,10 @@ public:
 
 private:
   void pointCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
-  void buildVoxelGrid(double ox, double oy);
+  void incrementalUpdateVoxelGrid(
+    const std::vector<Point3D> & transformed_pts,
+    const Point3D & sensor_pos, double ox, double oy);
+  void decayVoxelGrid();
   void extractGround(double ox, double oy);
   void interpolateGround();
   void computeGroundSlope();
@@ -135,12 +138,16 @@ private:
   unsigned int voxel_size_y_ = 0;
   unsigned int voxel_size_z_ = 0;
   double voxel_z_origin_ = 0.0;
+  double voxel_ox_ = 0.0;
+  double voxel_oy_ = 0.0;
+  bool voxel_grid_valid_ = false;
+  uint16_t frame_counter_ = 0;
+  uint16_t decay_interval_frames_ = 10;
 
   std::vector<GroundCell> ground_map_;
   unsigned int ground_size_x_ = 0;
   unsigned int ground_size_y_ = 0;
 
-  std::vector<TimedPoint> accumulated_cloud_;
   double sensor_global_x_ = 0.0;
   double sensor_global_y_ = 0.0;
   double sensor_global_z_ = 0.0;

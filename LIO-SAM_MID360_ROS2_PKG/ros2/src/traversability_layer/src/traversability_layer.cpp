@@ -237,53 +237,64 @@ void TraversabilityLayer::pointCloudCallback(const sensor_msgs::msg::PointCloud2
     "[TraversabilityLayer] After transform: %zu kept, %d filtered",
     transformed_cloud.size(), filtered_count);
 
-  if (observation_persistence_ <= 0.0) {
-    accumulated_cloud_.clear();
-  }
-  rclcpp::Time arrival_time = clock->now();
-  for (const auto & pt : transformed_cloud) {
-    accumulated_cloud_.push_back({pt, sensor_pos, arrival_time});
-  }
-  const size_t max_points = 200000;
-  if (accumulated_cloud_.size() > max_points) {
-    accumulated_cloud_.erase(accumulated_cloud_.begin(),
-      accumulated_cloud_.begin() + static_cast<long>(accumulated_cloud_.size() - max_points));
-  }
+  nav2_costmap_2d::Costmap2D * master_grid = layered_costmap_->getCostmap();
+  double ox = master_grid->getOriginX();
+  double oy = master_grid->getOriginY();
+
+  incrementalUpdateVoxelGrid(transformed_cloud, sensor_pos, ox, oy);
   cloud_updated_ = true;
 }
 
-void TraversabilityLayer::buildVoxelGrid(double ox, double oy)
+void TraversabilityLayer::incrementalUpdateVoxelGrid(
+  const std::vector<Point3D> & transformed_pts,
+  const Point3D & sensor_pos, double ox, double oy)
 {
-  if (accumulated_cloud_.empty()) {
-    return;
-  }
+  double world_w = ground_size_x_ * cell_resolution_;
+  double world_h = ground_size_y_ * cell_resolution_;
+  voxel_size_x_ = ground_size_x_;
+  voxel_size_y_ = ground_size_y_;
 
   double z_min_world = std::numeric_limits<double>::max();
   double z_max_world = std::numeric_limits<double>::lowest();
   double cur_sensor_z = sensor_global_z_;
 
 #pragma omp parallel for reduction(min:z_min_world) reduction(max:z_max_world)
-  for (int i = 0; i < static_cast<int>(accumulated_cloud_.size()); i++) {
-    const auto & tp = accumulated_cloud_[i];
-    if (tp.pt.z < z_min_world) z_min_world = tp.pt.z;
-    if (tp.pt.z > z_max_world) z_max_world = tp.pt.z;
-    if (tp.sensor_pt.z < z_min_world) z_min_world = tp.sensor_pt.z;
-    if (tp.sensor_pt.z > z_max_world) z_max_world = tp.sensor_pt.z;
+  for (int i = 0; i < static_cast<int>(transformed_pts.size()); i++) {
+    if (transformed_pts[i].z < z_min_world) z_min_world = transformed_pts[i].z;
+    if (transformed_pts[i].z > z_max_world) z_max_world = transformed_pts[i].z;
   }
+  if (sensor_pos.z < z_min_world) z_min_world = sensor_pos.z;
+  if (sensor_pos.z > z_max_world) z_max_world = sensor_pos.z;
 
   double z_lo = std::min(z_min_world, cur_sensor_z + voxel_z_min_) - voxel_z_resolution_;
   double z_hi = std::max(z_max_world, cur_sensor_z + voxel_z_max_) + voxel_z_resolution_;
 
-  voxel_z_origin_ = z_lo;
-  voxel_size_z_ = static_cast<unsigned int>(
-    std::ceil((z_hi - z_lo) / voxel_z_resolution_));
-  if (voxel_size_z_ < 1) voxel_size_z_ = 1;
+  bool need_rebuild = false;
+  if (!voxel_grid_valid_ ||
+      static_cast<unsigned int>(std::ceil((z_hi - z_lo) / voxel_z_resolution_)) != voxel_size_z_ ||
+      std::abs(z_lo - voxel_z_origin_) > voxel_z_resolution_ * 0.5 ||
+      std::abs(ox - voxel_ox_) > cell_resolution_ * 0.5 ||
+      std::abs(oy - voxel_oy_) > cell_resolution_ * 0.5)
+  {
+    need_rebuild = true;
+  }
 
-  size_t total_voxels = static_cast<size_t>(voxel_size_x_) *
-                        static_cast<size_t>(voxel_size_y_) *
-                        static_cast<size_t>(voxel_size_z_);
-  voxel_grid_.resize(total_voxels);
-  std::memset(voxel_grid_.data(), 0, total_voxels * sizeof(VoxelData));
+  if (need_rebuild) {
+    voxel_z_origin_ = z_lo;
+    voxel_ox_ = ox;
+    voxel_oy_ = oy;
+    voxel_size_z_ = static_cast<unsigned int>(
+      std::ceil((z_hi - z_lo) / voxel_z_resolution_));
+    if (voxel_size_z_ < 1) voxel_size_z_ = 1;
+
+    size_t total_voxels = static_cast<size_t>(voxel_size_x_) *
+                          static_cast<size_t>(voxel_size_y_) *
+                          static_cast<size_t>(voxel_size_z_);
+    voxel_grid_.assign(total_voxels, VoxelData{});
+    voxel_grid_valid_ = true;
+  }
+
+  frame_counter_++;
 
   double inv_cell_res = 1.0 / cell_resolution_;
   double inv_vz_res = 1.0 / voxel_z_resolution_;
@@ -293,7 +304,7 @@ void TraversabilityLayer::buildVoxelGrid(double ox, double oy)
   std::vector<std::vector<ThreadLocalHit>> thread_buffers(n_threads);
 
   for (int t = 0; t < n_threads; t++) {
-    thread_buffers[t].reserve(1024);
+    thread_buffers[t].reserve(512);
   }
 
 #pragma omp parallel
@@ -302,11 +313,10 @@ void TraversabilityLayer::buildVoxelGrid(double ox, double oy)
     auto & local_buf = thread_buffers[tid];
 
 #pragma omp for schedule(dynamic, 512) nowait
-    for (int pi = 0; pi < static_cast<int>(accumulated_cloud_.size()); pi++)
+    for (int pi = 0; pi < static_cast<int>(transformed_pts.size()); pi++)
     {
-      const auto & tp = accumulated_cloud_[static_cast<size_t>(pi)];
-      const auto & pt = tp.pt;
-      const auto & sp = tp.sensor_pt;
+      const auto & pt = transformed_pts[pi];
+      const auto & sp = sensor_pos;
 
       int ix = static_cast<int>(std::floor((pt.x - ox) * inv_cell_res));
       int iy = static_cast<int>(std::floor((pt.y - oy) * inv_cell_res));
@@ -394,11 +404,41 @@ void TraversabilityLayer::buildVoxelGrid(double ox, double oy)
         if (entry.is_hit) {
           auto & v = voxel_grid_[entry.idx];
           if (v.hit_count < 255) v.hit_count++;
+          v.last_update_frame = frame_counter_;
         } else {
           auto & v = voxel_grid_[entry.idx];
           if (v.pass_count < 255) v.pass_count++;
+          v.last_update_frame = frame_counter_;
         }
       }
+    }
+  }
+}
+
+void TraversabilityLayer::decayVoxelGrid()
+{
+  if (observation_persistence_ <= 0.0) {
+    voxel_grid_.assign(voxel_grid_.size(), VoxelData{});
+    return;
+  }
+
+  uint16_t decay_frames = static_cast<uint16_t>(
+    observation_persistence_ * decay_interval_frames_);
+  if (decay_frames == 0) decay_frames = 1;
+
+#pragma omp parallel for schedule(static)
+  for (int i = 0; i < static_cast<int>(voxel_grid_.size()); i++) {
+    auto & v = voxel_grid_[i];
+    if (v.hit_count == 0 && v.pass_count == 0) continue;
+
+    uint16_t age = frame_counter_ - v.last_update_frame;
+    if (age > decay_frames) {
+      v.hit_count = 0;
+      v.pass_count = 0;
+      v.last_update_frame = 0;
+    } else if (age > decay_frames / 2) {
+      v.hit_count = v.hit_count >> 1;
+      v.pass_count = v.pass_count >> 1;
     }
   }
 }
@@ -781,24 +821,12 @@ void TraversabilityLayer::updateCosts(
   voxel_size_x_ = ground_size_x_;
   voxel_size_y_ = ground_size_y_;
 
-  if (accumulated_cloud_.empty()) {
+  if (!voxel_grid_valid_) {
     ground_map_.assign(ground_size_x_ * ground_size_y_, GroundCell{});
     return;
   }
 
-  if (observation_persistence_ > 0.0) {
-    auto node = node_.lock();
-    if (node) {
-      rclcpp::Time now = node->now();
-      auto cutoff = now - rclcpp::Duration::from_seconds(observation_persistence_);
-      accumulated_cloud_.erase(
-        std::remove_if(accumulated_cloud_.begin(), accumulated_cloud_.end(),
-          [&](const TimedPoint & tp) { return tp.stamp < cutoff; }),
-        accumulated_cloud_.end());
-    }
-  }
-
-  buildVoxelGrid(ox, oy);
+  decayVoxelGrid();
 
   extractGround(ox, oy);
 
@@ -895,11 +923,11 @@ void TraversabilityLayer::updateCosts(
     RCLCPP_INFO(
       rclcpp::get_logger("traversability_layer"),
       "[TraversabilityLayer] Perf: %d frames in %.1fs, avg=%.2fms, last=%.2fms, "
-      "cells_with_cost=%d, lethal=%d, cloud=%zu, voxel_grid=%.1fMB",
+      "cells_with_cost=%d, lethal=%d, voxel_grid=%.1fMB, frame=%u",
       perf_frame_count_, elapsed, avg_ms, frame_ms,
       cells_with_cost, lethal_cells,
-      accumulated_cloud_.size(),
-      static_cast<double>(voxel_grid_.size() * sizeof(VoxelData)) / (1024.0 * 1024.0));
+      static_cast<double>(voxel_grid_.size() * sizeof(VoxelData)) / (1024.0 * 1024.0),
+      static_cast<unsigned int>(frame_counter_));
     perf_frame_count_ = 0;
     perf_total_time_ = 0.0;
     last_perf_log_ = frame_end;
@@ -949,7 +977,8 @@ void TraversabilityLayer::resetMaps()
 {
   ground_map_.assign(ground_size_x_ * ground_size_y_, GroundCell{});
   voxel_grid_.clear();
-  accumulated_cloud_.clear();
+  voxel_grid_valid_ = false;
+  frame_counter_ = 0;
   cloud_updated_ = false;
 }
 

@@ -295,8 +295,8 @@ def generate_launch_description():
         remappings=[
             ('cloud_in', lio_config['pointcloud_topic']),
             ('scan', 'scan'),
-            ('/tf', '/tf'),
-            ('/tf_static', '/tf_static')
+            ('/tf', 'tf'),
+            ('/tf_static', 'tf_static')
         ],
         parameters=[{
             'transform_tolerance': 0.1,
@@ -367,9 +367,9 @@ def generate_launch_description():
         ],
         prefix=['taskset -c 5,6'],
         remappings=[
-            ('/tf', '/tf'),
-            ('/tf_static', '/tf_static'),
-            ('/initialpose', '/initialpose')
+            ('/tf', 'tf'),
+            ('/tf_static', 'tf_static'),
+            ('/initialpose', 'initialpose')
         ],
         respawn=True,
         respawn_delay=2.0
@@ -395,8 +395,8 @@ def generate_launch_description():
         prefix=['taskset -c 4,5'],
         remappings=[
             ('cloud_in', lio_config['octomap_topic']),
-            ('/tf', '/tf'),
-            ('/tf_static', '/tf_static')
+            ('/tf', 'tf'),
+            ('/tf_static', 'tf_static')
         ]
     )
     
@@ -415,8 +415,8 @@ def generate_launch_description():
         ],
         prefix=['taskset -c 0,1,2,3'],
         remappings=[
-            ('/tf', '/tf'),
-            ('/tf_static', '/tf_static')
+            ('/tf', 'tf'),
+            ('/tf_static', 'tf_static')
         ]
     )
 
@@ -435,9 +435,9 @@ def generate_launch_description():
             }
         ],
         remappings=[
-            ('/tf', '/tf'),
-            ('/tf_static', '/tf_static'),
-            ('initialpose', '/initialpose')
+            ('/tf', 'tf'),
+            ('/tf_static', 'tf_static'),
+            ('initialpose', 'initialpose')
         ],
         prefix=['taskset -c 5,6']
     )
@@ -567,8 +567,8 @@ def generate_launch_description():
             ("/aft_mapped_to_init", lio_config['odom_topic']),
             ("/velodyne_cloud_registered_local", lio_config['pointcloud_topic']),
             ("/cloud_for_scancontext", lio_config['pointcloud_topic']),
-            ("/tf", "/tf"),
-            ("/tf_static", "/tf_static"),
+            ("/tf", "tf"),
+            ("/tf_static", "tf_static"),
         ],
         prefix=['taskset -c 6'],
     )
