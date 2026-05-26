@@ -17,14 +17,14 @@ controller_server:
     # bond_disable_heartbeat_timeout: false  # 新增参数
     use_sim_time: false
 
-    controller_frequency: 20.0  # 保持10Hz控制器频率
+    controller_frequency: 10.0  # 保持10Hz控制器频率
     failure_tolerance: 3.0
 
     min_x_velocity_threshold: 0.05
     min_y_velocity_threshold: 0.1
     min_theta_velocity_threshold: 0.1  # 提高最小角速度阈值，避免低速无法转动
 
-    odom_topic: "/rkbot/lio/robo/odom"  # 新增参数
+    odom_topic: "lio/odom"  # 新增参数
     # publish_zero_velocity: true  # 新增参数
     # speed_limit_topic: "/speed_limit"  # 新增参数
     
@@ -56,10 +56,10 @@ controller_server:
     FollowPath:
       plugin: "nav2_mppi_controller::MPPIController"
 
-      time_steps: 56
+      time_steps: 34
       # time_steps: 30
-      model_dt: 0.05
-      batch_size: 1000  # 大幅减少批量大小，从1500减到800，提高计算速度
+      model_dt: 0.1
+      batch_size: 300  # 大幅减少批量大小，从1500减到800，提高计算速度
       transform_tolerance: 0.5  # 减少变换容差，提高实时性
       
       # 全向移动速度限制 - 适应机器人结构特性
@@ -68,14 +68,14 @@ controller_server:
       az_max: 1.0
       az_min: -1.0
       vx_std: 0.5  # 降低线速度采样标准差，减少速度波动
-      wz_std: 0.3  # 提高角速度采样标准差，增加转向探索性
+      wz_std: 0.2  # 提高角速度采样标准差，增加转向探索性  #<- 【左右扭】角速度采样标准差相对线速度偏大(0.3/0.5=60%)，MPPI采样出更多大角速度轨迹，使机器人倾向转向而非直行。建议降至0.2
       
-      # vx_max: 2.0
-      vx_max: 1.5
+      vx_max: 2.0
+      # vx_max: 1.5
       # vx_max: 0.6
       vy_max: 0.2
-      vy_std: 0.2  # 降低横移速度采样标准差
-      vx_min: -0.3
+      vy_std: 0.1  # 降低横移速度采样标准差
+      vx_min: -0.5
       # wz_max: 2.0
       # wz_max: 1.2
       wz_max: 0.8
@@ -116,8 +116,8 @@ controller_server:
       
       CostCritic:
         enabled: false
-        cost_weight: 30.0  # 大幅增加避障成本权重，强制避障
-        cost_power: 2      # 大幅增加成本幂次，使靠近障碍物时成本急剧增加
+        cost_weight: 10.0  # 大幅增加避障成本权重，强制避障
+        cost_power: 1      # 大幅增加成本幂次，使靠近障碍物时成本急剧增加
         collision_cost: 254.0  # 碰撞成本设为最大值
         consider_footprint: true  # 考虑机器人轮廓
         critical_cost: 254.0  # 临界成本设为最大值
@@ -126,16 +126,16 @@ controller_server:
 
       ObstaclesCritic:
         enabled: true
-        cost_weight: 30.0
+        cost_weight: 40.0
         cost_power: 3
         collision_cost: 254.0
         consider_footprint: true
         critical_cost: 250.0
-        critical_weight: 50.0
+        critical_weight: 200.0
         repulsion_weight: 5.0
-        collision_margin_distance: 0.5
+        collision_margin_distance: 0.1
         inflation_layer_name: "inflation_layer_local"
-        inflation_radius: 0.5
+        inflation_radius: 0.2
         near_goal_distance: 1.5
         
       PathFollowCritic:
@@ -148,25 +148,25 @@ controller_server:
 
       PathAlignCritic:
         enabled: true
-        cost_weight: 10.0
-        cost_power: 4
-        forward_point_distance: 0.5
+        cost_weight: 5.0  #<- 【左右扭】横向对齐惩罚权重偏高，配合cost_power=4导致过度修正。建议降至5.0
+        cost_power: 2  #<- 【左右扭】4次幂！微小横向偏差被急剧放大(如偏离0.1m惩罚被放大10000倍)，是扭动的主要原因之一。建议改为2
+        forward_point_distance: 2.0
         threshold_to_consider: 1.0
 
       PathAngleCritic:
         enabled: true
-        cost_weight: 30.0  # 大幅降低权重，减少方向修正的过度反应
+        cost_weight: 20.0  # 大幅降低权重，减少方向修正的过度反应  #<- 【左右扭】权重40太高，稍微偏一点就大力修正，修正过头又反向修正，形成左右扭动(oscillation)。建议降至15.0
         cost_power: 4
         forward_preference: true
-        offset_from_furthest: 2  # 进一步减少前瞻距离，提高实时响应
+        offset_from_furthest: 4  # 进一步减少前瞻距离，提高实时响应
         threshold_to_consider: 0.5  # Distance (m) between robot and goal to stop considering path angles and allow goal critics to take over.
-        max_angle_to_furthest: 0.5  # 大幅减少最大角度阈值，避免过度修正
+        max_angle_to_furthest: 0.8  # 大幅减少最大角度阈值，避免过度修正  #<- 【左右扭】0.5(约28.6°)太小，稍微偏离路径方向就产生很大角速度修正，是扭动的主要原因之一。建议改为1.0
         # mode: 0
         
       PreferForwardCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 20.0
+        cost_weight: 30.0  #<- 【走慢】前进偏好权重20偏低，相比PathAngleCritic(40)和VelocityDeadbandCritic(40)无法有效压制转向倾向，导致机器人倾向转向而非直行。建议升至30.0
         threshold_to_consider: 1.0
       
       # TwirlingCritic:
@@ -175,7 +175,7 @@ controller_server:
 
       VelocityDeadbandCritic: 
         enabled: true
-        cost_weight: 40.0  # 增加死区评价器权重，减少低速抖动
+        cost_weight: 40.0  # 增加死区评价器权重，减少低速抖动  #<- 【左右扭+走慢】权重40太高，惩罚低速运动过重，导致需要低速精确控制时不断加速减速产生抖动，且不敢慢速行驶。建议降至10.0
         cost_power: 1
         deadband_velocities: [0.1, 0.1, 0.1]
         
@@ -183,13 +183,13 @@ controller_server:
         enabled: true
         cost_weight: 50.0  # 增加目标对齐评价器权重，强化终点减速
         cost_power: 3  # 增加成本幂次，使距离目标越近减速效果越明显
-        threshold_to_consider: 2.0  # Minimal distance (m) between robot and goal above which goal distance cost considered. It is wise to start with this as being the same as your prediction horizon to have a clean hand-off with the path follower critic.
+        threshold_to_consider: 1.0  # Minimal distance (m) between robot and goal above which goal distance cost considered. It is wise to start with this as being the same as your prediction horizon to have a clean hand-off with the path follower critic.  #<- 【走慢】距目标2m就开始受GoalCritic影响减速，权重50很高，导致过早减速走不快。建议改为1.0
 
       GoalAngleCritic:
         enabled: true
-        cost_weight: 35.0  
+        cost_weight: 35.0  #<- 【左右扭】角度对齐权重35偏高，在接近目标时产生过强的转向力，导致扭动。建议降至15.0
         cost_power: 3 
-        threshold_to_consider: 0.5 #Minimal distance (m) between robot and goal above which angle goal cost considered.
+        threshold_to_consider: 0.5 #Minimal distance (m) between robot and goal above which angle goal cost considered.  #<- 【左右扭】距目标0.5m就开始对齐角度，还没到达目标位置就开始转向，产生扭动。建议改为0.3
         
         
     # qos_overrides:
@@ -216,8 +216,8 @@ velocity_smoother:
     # bond_disable_heartbeat_timeout: false  # 新增参数
     
     use_sim_time: false
-    smoothing_frequency: 20.0
-    scale_velocities: true
+    smoothing_frequency: 10.0
+    scale_velocities: false
     feedback: "OPEN_LOOP" 
 
     # feedback: "CLOSED_LOOP"  
@@ -229,11 +229,11 @@ velocity_smoother:
     min_velocity: [-1.0, -1.5, -5.0]  # [vx_min, vy_min, vtheta_min] - 降低最小速度
     
     # 加速度限制 - 降低加速度避免急转急停
-    max_accel: [3.0, 2.0, 10.0]  # [ax_max, ay_max, atheta_max] - 降低加速度
-    max_decel: [-5.0, -2.0, -10.0]  # [ax_min, ay_min, atheta_min] - 降低减速度
+    max_accel: [5.0, 2.0, 10.0]  # [ax_max, ay_max, atheta_max] - 降低加速度  #<- 【走慢】线加速度3.0偏保守，机器狗加速慢导致整体速度上不去。建议改为5.0
+    max_decel: [-2.0, -2.0, -5.0]  # [ax_min, ay_min, atheta_min] - 降低减速度
     
     # 其他参数
-    deadband_velocity: [0.05, 0.1, 0.1]  # 设置死区速度，避免输出-0.01到+0.01之间的速度  被忽略
+    deadband_velocity: [0.1, 0.1, 0.1]  # 设置死区速度，避免输出-0.01到+0.01之间的速度  被忽略
     velocity_timeout: 1.0
     
     # qos_overrides:
@@ -258,46 +258,78 @@ planner_server:
   ros__parameters:
     use_sim_time: false
     expected_planner_frequency: 0.2
-    planner_plugins: ["GridBased"]
+    planner_plugins: ["LatticeBased", "GridBased", "HybridBased"]
 
-    GridBased:
-      plugin: "nav2_smac_planner/SmacPlannerHybrid"
-
-      # ---- 启用方向模型（禁止倒车）----
-      # motion_model_for_search: "REEDS_SHEPP"
-
-      # ---- 倒车代价（设置为极高值以禁止倒车）----
-      # reverse_penalty: 9.0
-
-      # ---- 切换前进/倒车的代价 ----
-      # change_penalty: 9.9
-
-      # # ---- 转弯代价（可稍微提高让路径更自然）----
-      non_straight_penalty: 1.2
-      cost_penalty: 2.0
-
-      # retrospective_penalty: 10.0
-
-      tolerance: 0.5
-      planner_timeout: 5.0
-      allow_unknown: true
-      max_iterations: 100000
+    LatticeBased:
+      plugin: "nav2_smac_planner/SmacPlannerLattice"
+      tolerance: 0.3
+      allow_unknown: false
+      max_iterations: 1000000
       max_on_approach_iterations: 10000
-      minimum_turning_radius: 0.05
-      angle_quantization_bins: 72
+      max_planning_time: 10.0
+      lattice_filepath: "/home/ztl/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/nav2_dog_slam/config/lattice_primitives.json"
+      minimum_turning_radius: 0.2
+      reverse_penalty: 2.0
+      change_penalty: 0.3
+      non_straight_penalty: 1.5
+      cost_penalty: 1.5
+      retrospective_penalty: 0.015
+      analytic_expansion_ratio: 3.5
+      analytic_expansion_max_length: 3.0
+      angle_quantization_bins: 16
       cache_obstacle_heuristic: true
-      cache_analytic_expansion: false
-      
+      cache_analytic_expansion: true
       downsample_costmap: false
-      downsampling_factor: 2
-      
+      downsampling_factor: 1
       smooth_path: true
       smoother:
         do_refinement: true
         max_iterations: 1000
         tolerance: 1.0e-10
-        w_data: 0.2
-        w_smooth: 0.3
+        w_data: 0.3
+        w_smooth: 0.2
+
+    GridBased:
+      plugin: "nav2_smac_planner/SmacPlanner2D"
+      tolerance: 0.3
+      allow_unknown: false
+      max_iterations: 1000000
+      max_on_approach_iterations: 1000
+      use_final_approach_orientation: false
+      downsample_costmap: false
+      downsampling_factor: 1
+      smooth_path: true
+      smoother:
+        do_refinement: true
+        max_iterations: 1000
+        tolerance: 1.0e-10
+        w_data: 0.3
+        w_smooth: 0.2
+
+    HybridBased:
+      plugin: "nav2_smac_planner/SmacPlannerHybrid"
+      non_straight_penalty: 3.0
+      cost_penalty: 2.0
+      tolerance: 0.5
+      planner_timeout: 10.0
+      allow_unknown: false
+      max_iterations: 500000
+      max_on_approach_iterations: 10000
+      minimum_turning_radius: 0.2
+      angle_quantization_bins: 48
+      cache_obstacle_heuristic: true
+      cache_analytic_expansion: true
+      analytic_expansion_max_length: 3.0
+      analytic_expansion_ratio: 3.5
+      downsample_costmap: true
+      downsampling_factor: 2
+      smooth_path: true
+      smoother:
+        do_refinement: true
+        max_iterations: 1000
+        tolerance: 1.0e-10
+        w_data: 0.3
+        w_smooth: 0.2
 
     # qos_overrides:
     #   /tf:
@@ -329,7 +361,7 @@ local_costmap:
       transform_tolerance: 0.5
       
       # 地图参数
-      footprint: "[[-0.8, -0.25], [-0.8, 0.25], [0.05, 0.25], [0.05, -0.25]]"  # 机器狗矩形footprint（base_link前移10cm）
+      footprint: "[[-0.7, -0.25], [-0.7, 0.25], [0.05, 0.25], [0.05, -0.25]]"  # 机器狗矩形footprint（base_link前移10cm）
       footprint_padding: 0.05  # footprint膨胀填充
       resolution: 0.05
       rolling_window: true
@@ -340,7 +372,7 @@ local_costmap:
       # footprint: ""  # 新增参数 - 使用robot_radius代替
       # footprint_padding: 0.01  # 新增参数
       # lethal_cost_threshold: 100  # 新增参数
-      map_topic: "/rkbot/map"  # 新增参数
+      map_topic: "map"  # 新增参数
       observation_sources: "scan"  # 新增参数
       origin_x: -6.0  # 新增参数
       origin_y: -6.0  # 新增参数
@@ -534,7 +566,7 @@ global_costmap:
       transform_tolerance: 0.5
       
       # 地图参数
-      footprint: "[[-0.8, -0.25], [-0.8, 0.25], [0.05, 0.25], [0.05, -0.25]]"  # 机器狗矩形footprint（base_link前移10cm）
+      footprint: "[[-0.7, -0.25], [-0.7, 0.25], [0.05, 0.25], [0.05, -0.25]]"  # 机器狗矩形footprint（base_link前移10cm）
       footprint_padding: 0.05  # footprint膨胀填充
       resolution: 0.05
       track_unknown_space: true
@@ -544,7 +576,7 @@ global_costmap:
       # footprint: ""  # 新增参数 - 使用robot_radius代替
       # footprint_padding: 0.01  # 新增参数
       # lethal_cost_threshold: 100  # 新增参数
-      map_topic: "/map"  # 新增参数
+      map_topic: "map"  # 新增参数
       # observation_sources: ""  # 新增参数
       # origin_x: 0.0  # 新增参数
       # origin_y: 0.0  # 新增参数
@@ -568,7 +600,7 @@ global_costmap:
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         enabled: true  # 新增参数
-        map_topic: "/map"  # 新增参数
+        map_topic: "map"  # 新增参数
         # subscribe_to_updates: false  # 新增参数
         map_subscribe_transient_local: true
         # transform_tolerance: 0.3  # 新增参数
@@ -580,7 +612,7 @@ global_costmap:
         enabled: true
         observation_sources: scan
         scan:
-          topic: /rkbot/scan
+          topic: scan
           max_obstacle_height: 1.8
           min_obstacle_height: -0.1
           clearing: true
@@ -653,11 +685,11 @@ amcl:
     map_topic: "/map"                       # 新增参数
     
     # 里程计运动模型噪声参数 - 室内环境优化
-    alpha1: 0.001            # 进一步降低旋转-旋转噪声，室内旋转需要更高精度
-    alpha2: 0.001           # 进一步降低平移-旋转噪声，室内直线运动更稳定
-    alpha3: 0.001            # 降低平移-平移噪声，室内环境减少位置漂移
-    alpha4: 0.001           # 进一步降低旋转-平移噪声，提高室内整体定位稳定性
-    alpha5: 0.005           # 降低额外噪声参数，室内环境更可预测
+    alpha1: 0.03            # 进一步降低旋转-旋转噪声，室内旋转需要更高精度
+    alpha2: 0.03           # 进一步降低平移-旋转噪声，室内直线运动更稳定
+    alpha3: 0.03            # 降低平移-平移噪声，室内环境减少位置漂移
+    alpha4: 0.03           # 进一步降低旋转-平移噪声，提高室内整体定位稳定性
+    alpha5: 0.7           # 降低额外噪声参数，室内环境更可预测
     
     # 机器人运动模型类型 - 全向移动
     robot_model_type: "nav2_amcl::OmniMotionModel"
@@ -692,7 +724,7 @@ amcl:
     #   yaw: -1.396 
 
     # 激光雷达配置
-    laser_min_range: 0.3
+    laser_min_range: 0.1
     laser_max_range: 100.0
     # laser_beam_step: 4
     max_beams: 180
@@ -998,7 +1030,7 @@ waypoint_follower:
     # 缺失的顶层参数
     # bond_disable_heartbeat_timeout: false  # 新增参数
     use_sim_time: false
-    loop_rate: 40
+    loop_rate: 10
     stop_on_failure: false
     waypoint_task_executor_plugin: "wait_at_waypoint"
     wait_at_waypoint:
@@ -1081,7 +1113,7 @@ slam_toolbox_node:
     # map_start_pose: [1.5, 1.5, 0.57]
 
     # 如果想以 dock（第一节点）作为启动位置，可以启用下一项
-    map_start_at_dock: true
+    map_start_at_dock: false
 
     # 坐标系
     # 里程计坐标系
@@ -1154,7 +1186,7 @@ slam_toolbox_node:
     
     # # 占用阈值 - 标记为占用的单元格的光束命中率与光束通过率的最小比率
     # 稀疏点云场景降低阈值，使障碍物更容易被标记（黑色区域）
-    occupancy_threshold: 0.2
+    occupancy_threshold: 0.1
     
     # # 地图名称
     map_name: "map"
@@ -1175,10 +1207,10 @@ slam_toolbox_node:
     scan_buffer_size: 2000
     
     # 扫描队列大小 - 控制扫描数据的处理队列
-    scan_queue_size: 10
+    scan_queue_size: 100
     
     # 扫描缓冲区最大扫描距离 - 增加匹配距离范围，提高重定位能力
-    scan_buffer_maximum_scan_distance: 20.0
+    scan_buffer_maximum_scan_distance: 50.0
     
     # # 最小通过距离 - 在单元格被标记为占用或未占用之前必须通过的光束数量
     # min_pass_through: 0.0
@@ -1190,19 +1222,19 @@ slam_toolbox_node:
     # link_scan_maximum_distance: 10.0
     
     # 闭环匹配最大方差（粗略） - 控制闭环检测的匹配阈值，值越小匹配越严格
-    loop_match_maximum_variance_coarse: 0.2
+    loop_match_maximum_variance_coarse: 0.4
     
     # 闭环匹配最小链大小 - 检测闭环所需的最小连续匹配数
     loop_match_minimum_chain_size: 3
     
     # 闭环匹配最小响应（粗略） - 粗略匹配的最小响应阈值
-    loop_match_minimum_response_coarse: 0.8
+    loop_match_minimum_response_coarse: 0.3
     
     # 闭环匹配最小响应（精细） - 精细匹配的最小响应阈值
     loop_match_minimum_response_fine: 0.1
     
     # 闭环搜索最大距离 - 增加搜索距离范围以支持更长的匹配，提高重定位能力
-    loop_search_maximum_distance: 6.0
+    loop_search_maximum_distance: 15.0
     
     # 闭环搜索空间维度 - 适当增加搜索空间尺寸以支持更长的匹配距离
     loop_search_space_dimension: 0.25
@@ -1235,7 +1267,7 @@ slam_toolbox_node:
     use_scan_barycenter: true
     
     # 是否使用响应扩展 - 如果未找到可行匹配，是否自动增加搜索网格大小，重定位时建议启用
-    use_response_expansion: false
+    use_response_expansion: true
     
     # # 是否启用调试日志
     debug_logging: false
