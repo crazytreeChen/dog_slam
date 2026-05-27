@@ -24,7 +24,7 @@ controller_server:
     min_y_velocity_threshold: 0.1
     min_theta_velocity_threshold: 0.1  # 提高最小角速度阈值，避免低速无法转动
 
-    odom_topic: "lio/odom"  # 新增参数
+    odom_topic: "/rkbot/front_lidar/odom"  # 新增参数
     # publish_zero_velocity: true  # 新增参数
     # speed_limit_topic: "/speed_limit"  # 新增参数
     
@@ -46,8 +46,8 @@ controller_server:
     # 目标检查器参数 - 优化终点减速和停止精度
     goal_checker:
       plugin: "nav2_controller::StoppedGoalChecker"
-      xy_goal_tolerance: 0.5  # 进一步减小位置容差，提高停止精度
-      yaw_goal_tolerance: 0.3  # 进一步减小角度容差，避免过度修正
+      xy_goal_tolerance: 0.3  # 进一步减小位置容差，提高停止精度
+      yaw_goal_tolerance: 0.15  # 进一步减小角度容差，避免过度修正
       trans_stopped_velocity: 1.5
       rot_stopped_velocity: 1.5
       stateful: true
@@ -59,7 +59,7 @@ controller_server:
       time_steps: 34
       # time_steps: 30
       model_dt: 0.1
-      batch_size: 300  # 大幅减少批量大小，从1500减到800，提高计算速度
+      batch_size: 500  # 大幅减少批量大小，从1500减到800，提高计算速度
       transform_tolerance: 0.5  # 减少变换容差，提高实时性
       
       # 全向移动速度限制 - 适应机器人结构特性
@@ -74,8 +74,8 @@ controller_server:
       # vx_max: 1.5
       # vx_max: 0.6
       vy_max: 0.2
-      vy_std: 0.1  # 降低横移速度采样标准差
-      vx_min: -0.5
+      vy_std: 0.2  # 降低横移速度采样标准差
+      vx_min: -1.0
       # wz_max: 2.0
       # wz_max: 1.2
       wz_max: 0.8
@@ -83,9 +83,9 @@ controller_server:
       
       
       # 温度参数
-      temperature: 0.2
-      # motion_model: "DiffDrive" 
-      motion_model: "Omni"  # 全向移动模型
+      temperature: 0.1
+      motion_model: "DiffDrive" 
+      # motion_model: "Omni"  # 全向移动模型
       reset_period: 0.5
 
       visualize: false
@@ -101,7 +101,7 @@ controller_server:
       # inversion_yaw_tolerance: 0.2
       # gamma: 0.015  # 新增参数
       # iteration_count: 1  # 新增参数
-      max_robot_pose_search_dist: 2.0  # Max integrated distance ahead of robot pose to search for nearest path point in case of path looping.
+      max_robot_pose_search_dist: 0.5  # Max integrated distance ahead of robot pose to search for nearest path point in case of path looping.
       # prune_distance: 1.0  # 新增参数
       # regenerate_noises: true  # 新增参数
       # retry_attempt_limit: 1  # 新增参数
@@ -116,13 +116,13 @@ controller_server:
       
       CostCritic:
         enabled: false
-        cost_weight: 30.0  # 大幅增加避障成本权重，强制避障
-        cost_power: 2      # 大幅增加成本幂次，使靠近障碍物时成本急剧增加
+        cost_weight: 20.0  # 大幅增加避障成本权重，强制避障
+        cost_power: 3      # 大幅增加成本幂次，使靠近障碍物时成本急剧增加
         collision_cost: 254.0  # 碰撞成本设为最大值
         consider_footprint: true  # 考虑机器人轮廓
         critical_cost: 254.0  # 临界成本设为最大值
         inflation_layer_name: "inflation_layer_local"
-        near_goal_distance: 1.5  # 近目标距离
+        near_goal_distance: 1.0  # 近目标距离
 
       ObstaclesCritic:
         enabled: true
@@ -135,7 +135,7 @@ controller_server:
         repulsion_weight: 5.0
         collision_margin_distance: 0.5
         inflation_layer_name: "inflation_layer_local"
-        inflation_radius: 0.5
+        inflation_radius: 0.25
         near_goal_distance: 1.5
         
       PathFollowCritic:
@@ -148,19 +148,19 @@ controller_server:
 
       PathAlignCritic:
         enabled: true
-        cost_weight: 10.0  #<- 【左右扭】横向对齐惩罚权重偏高，配合cost_power=4导致过度修正。建议降至5.0
-        cost_power: 4  #<- 【左右扭】4次幂！微小横向偏差被急剧放大(如偏离0.1m惩罚被放大10000倍)，是扭动的主要原因之一。建议改为2
-        forward_point_distance: 0.5
+        cost_weight: 5.0  #<- 【左右扭】横向对齐惩罚权重偏高，配合cost_power=4导致过度修正。建议降至5.0
+        cost_power: 2  #<- 【左右扭】4次幂！微小横向偏差被急剧放大(如偏离0.1m惩罚被放大10000倍)，是扭动的主要原因之一。建议改为2
+        forward_point_distance: 1.0
         threshold_to_consider: 1.0
 
       PathAngleCritic:
         enabled: true
-        cost_weight: 30.0  # 大幅降低权重，减少方向修正的过度反应  #<- 【左右扭】权重40太高，稍微偏一点就大力修正，修正过头又反向修正，形成左右扭动(oscillation)。建议降至15.0
+        cost_weight: 40.0  # 大幅降低权重，减少方向修正的过度反应  #<- 【左右扭】权重40太高，稍微偏一点就大力修正，修正过头又反向修正，形成左右扭动(oscillation)。建议降至15.0
         cost_power: 4
         forward_preference: true
-        offset_from_furthest: 2  # 进一步减少前瞻距离，提高实时响应
-        threshold_to_consider: 0.5  # Distance (m) between robot and goal to stop considering path angles and allow goal critics to take over.
-        max_angle_to_furthest: 0.5  # 大幅减少最大角度阈值，避免过度修正  #<- 【左右扭】0.5(约28.6°)太小，稍微偏离路径方向就产生很大角速度修正，是扭动的主要原因之一。建议改为1.0
+        offset_from_furthest: 4  # 进一步减少前瞻距离，提高实时响应
+        threshold_to_consider: 1.0  # Distance (m) between robot and goal to stop considering path angles and allow goal critics to take over.
+        max_angle_to_furthest: 1.0  # 大幅减少最大角度阈值，避免过度修正  #<- 【左右扭】0.5(约28.6°)太小，稍微偏离路径方向就产生很大角速度修正，是扭动的主要原因之一。建议改为1.0
         # mode: 0
         
       PreferForwardCritic:
@@ -183,7 +183,7 @@ controller_server:
         enabled: true
         cost_weight: 50.0  # 增加目标对齐评价器权重，强化终点减速
         cost_power: 3  # 增加成本幂次，使距离目标越近减速效果越明显
-        threshold_to_consider: 2.0  # Minimal distance (m) between robot and goal above which goal distance cost considered. It is wise to start with this as being the same as your prediction horizon to have a clean hand-off with the path follower critic.  #<- 【走慢】距目标2m就开始受GoalCritic影响减速，权重50很高，导致过早减速走不快。建议改为1.0
+        threshold_to_consider: 1.0  # Minimal distance (m) between robot and goal above which goal distance cost considered. It is wise to start with this as being the same as your prediction horizon to have a clean hand-off with the path follower critic.  #<- 【走慢】距目标2m就开始受GoalCritic影响减速，权重50很高，导致过早减速走不快。建议改为1.0
 
       GoalAngleCritic:
         enabled: true
@@ -229,8 +229,8 @@ velocity_smoother:
     min_velocity: [-1.0, -1.5, -5.0]  # [vx_min, vy_min, vtheta_min] - 降低最小速度
     
     # 加速度限制 - 降低加速度避免急转急停
-    max_accel: [5.0, 2.0, 10.0]  # [ax_max, ay_max, atheta_max] - 降低加速度  #<- 【走慢】线加速度3.0偏保守，机器狗加速慢导致整体速度上不去。建议改为5.0
-    max_decel: [-2.0, -2.0, -5.0]  # [ax_min, ay_min, atheta_min] - 降低减速度
+    max_accel: [2.0, 2.0, 10.0]  # [ax_max, ay_max, atheta_max] - 降低加速度  #<- 【走慢】线加速度3.0偏保守，机器狗加速慢导致整体速度上不去。建议改为5.0
+    max_decel: [-1.0, -2.0, -5.0]  # [ax_min, ay_min, atheta_min] - 降低减速度
     
     # 其他参数
     deadband_velocity: [0.1, 0.1, 0.1]  # 设置死区速度，避免输出-0.01到+0.01之间的速度  被忽略
@@ -441,7 +441,7 @@ local_costmap:
         plugin: "nav2_costmap_2d::InflationLayer"
         enabled: true
         inflation_radius: 1.0
-        cost_scaling_factor: 5.0
+        cost_scaling_factor: 10.0
         # inflate_unknown: false      # 新增参数
         # inflate_around_unknown: false  # 新增参数
       
@@ -488,7 +488,7 @@ global_costmap:
       # footprint: ""  # 新增参数 - 使用robot_radius代替
       # footprint_padding: 0.01  # 新增参数
       # lethal_cost_threshold: 100  # 新增参数
-      map_topic: "/map"  # 新增参数
+      map_topic: "map"  # 新增参数
       # observation_sources: ""  # 新增参数
       # origin_x: 0.0  # 新增参数
       # origin_y: 0.0  # 新增参数
@@ -540,7 +540,7 @@ global_costmap:
         plugin: "nav2_costmap_2d::InflationLayer"
         enabled: true
         inflation_radius: 1.0
-        cost_scaling_factor: 5.0
+        cost_scaling_factor: 10.0
         # inflate_unknown: false  # 新增参数
         # inflate_around_unknown: false  # 新增参数
       
@@ -597,15 +597,15 @@ amcl:
     map_topic: "map"                       # 新增参数
     
     # 里程计运动模型噪声参数 - 室内环境优化
-    alpha1: 0.02            # 进一步降低旋转-旋转噪声，室内旋转需要更高精度
-    alpha2: 0.02           # 进一步降低平移-旋转噪声，室内直线运动更稳定
-    alpha3: 0.02            # 降低平移-平移噪声，室内环境减少位置漂移
-    alpha4: 0.02           # 进一步降低旋转-平移噪声，提高室内整体定位稳定性
-    alpha5: 0.05           # 降低额外噪声参数，室内环境更可预测
+    alpha1: 0.03            # 进一步降低旋转-旋转噪声，室内旋转需要更高精度
+    alpha2: 0.03           # 进一步降低平移-旋转噪声，室内直线运动更稳定
+    alpha3: 0.03            # 降低平移-平移噪声，室内环境减少位置漂移
+    alpha4: 0.03           # 进一步降低旋转-平移噪声，提高室内整体定位稳定性
+    alpha5: 0.07           # 降低额外噪声参数，室内环境更可预测
     
     # 机器人运动模型类型 - 全向移动
-    robot_model_type: "nav2_amcl::OmniMotionModel"
-    # robot_model_type: "nav2_amcl::DifferentialMotionModel"
+    # robot_model_type: "nav2_amcl::OmniMotionModel"
+    robot_model_type: "nav2_amcl::DifferentialMotionModel"
     
     # 更新阈值 - 两个模型共用
     update_min_d: 0.1
@@ -942,7 +942,7 @@ waypoint_follower:
     # 缺失的顶层参数
     # bond_disable_heartbeat_timeout: false  # 新增参数
     use_sim_time: false
-    loop_rate: 40
+    loop_rate: 10
     stop_on_failure: false
     waypoint_task_executor_plugin: "wait_at_waypoint"
     wait_at_waypoint:
@@ -1029,7 +1029,7 @@ slam_toolbox_node:
 
     # 坐标系
     # 里程计坐标系
-    odom_frame: world
+    odom_frame: odom
     # 地图坐标系
     map_frame: map
     # 基座坐标系
@@ -1039,7 +1039,7 @@ slam_toolbox_node:
     # 扫描话题 - 绝对路径，即 /scan 而不是 scan
     scan_topic: /rkbot/scan
     # 里程计话题
-    odom_topic: /rkbot/front_lidar/robo/odom
+    odom_topic: /rkbot/front_lidar/odom
 
     # 保持 transform publish（map->odom 发布通常需要）
     # 地图到里程计变换的发布周期，0 表示不发布变换
@@ -1088,17 +1088,17 @@ slam_toolbox_node:
     # paused_processing: false
     
     # 位置协方差缩放 - 控制位置估计的不确定性，值越小表示对位置估计越自信
-    position_covariance_scale: 0.1
+    position_covariance_scale: 0.3
     
     # 偏航角协方差缩放 - 控制角度估计的不确定性，值越小表示对角度估计越自信
-    yaw_covariance_scale: 0.1
+    yaw_covariance_scale: 0.3
     
-    # # 分辨率 - 地图分辨率
+    # 分辨率 - 地图分辨率
     resolution: 0.05
     
     # 占用阈值 - 标记为占用的单元格的光束命中率与光束通过率的最小比率
     # 稀疏点云场景降低阈值，使障碍物更容易被标记（黑色区域）
-    occupancy_threshold: 0.02
+    occupancy_threshold: 0.1
     
     # # 地图名称
     map_name: "map"

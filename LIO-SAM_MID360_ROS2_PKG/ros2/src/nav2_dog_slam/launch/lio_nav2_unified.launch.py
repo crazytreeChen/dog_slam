@@ -369,7 +369,7 @@ def generate_launch_description():
         remappings=[
             ('/tf', '/tf'),
             ('/tf_static', '/tf_static'),
-            ('/initialpose', 'initialpose')
+            ('initialpose', '/initialpose')
         ],
         respawn=True,
         respawn_delay=2.0
@@ -437,7 +437,7 @@ def generate_launch_description():
         remappings=[
             ('/tf', '/tf'),
             ('/tf_static', '/tf_static'),
-            ('initialpose', 'initialpose')
+            ('initialpose', '/initialpose')
         ],
         prefix=['taskset -c 5,6']
     )

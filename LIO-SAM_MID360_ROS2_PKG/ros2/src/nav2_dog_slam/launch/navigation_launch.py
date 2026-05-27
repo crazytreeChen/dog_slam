@@ -57,9 +57,9 @@ def generate_launch_description():
 
     remappings = [('/tf', '/tf'),
                   ('/tf_static', '/tf_static'),
-                  ('/initialpose', '/initialpose'),
-                  ('/goal_pose', '/goal_pose'),
-                  ('/cmd_vel', '/cmd_vel')]
+                  ('initialpose', '/initialpose'),
+                  ('goal_pose', '/goal_pose'),
+                  ('cmd_vel', '/cmd_vel')]
 
     param_substitutions_local = {
         'use_sim_time': use_sim_time,
@@ -72,7 +72,7 @@ def generate_launch_description():
         'map_frame': map_frame,
         'odom_frame': odom_frame,
         'base_frame': base_frame,
-        # 'topic': scan_topic,
+        'topic': scan_topic,
         # 'topic': pointcloud_topic,
         'map_topic': map_topic
     }
