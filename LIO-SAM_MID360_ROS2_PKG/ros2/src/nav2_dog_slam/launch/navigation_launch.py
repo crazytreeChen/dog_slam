@@ -55,11 +55,11 @@ def generate_launch_description():
                        'waypoint_follower',  # 未使用，已注释
                        'velocity_smoother']
 
-    remappings = [('/tf', 'tf'),
-                  ('/tf_static', 'tf_static'),
-                  ('initialpose', 'initialpose'),
-                  ('goal_pose', 'goal_pose'),
-                  ('cmd_vel', 'cmd_vel')]
+    remappings = [('/tf', '/tf'),
+                  ('/tf_static', '/tf_static'),
+                  ('/initialpose', '/initialpose'),
+                  ('/goal_pose', '/goal_pose'),
+                  ('/cmd_vel', '/cmd_vel')]
 
     param_substitutions_local = {
         'use_sim_time': use_sim_time,

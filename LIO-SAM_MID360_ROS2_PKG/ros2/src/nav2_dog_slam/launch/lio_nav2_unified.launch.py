@@ -295,8 +295,8 @@ def generate_launch_description():
         remappings=[
             ('cloud_in', lio_config['pointcloud_topic']),
             ('scan', 'scan'),
-            ('/tf', 'tf'),
-            ('/tf_static', 'tf_static')
+            ('/tf', '/tf'),
+            ('/tf_static', '/tf_static')
         ],
         parameters=[{
             'transform_tolerance': 0.1,
@@ -367,8 +367,8 @@ def generate_launch_description():
         ],
         prefix=['taskset -c 5,6'],
         remappings=[
-            ('/tf', 'tf'),
-            ('/tf_static', 'tf_static'),
+            ('/tf', '/tf'),
+            ('/tf_static', '/tf_static'),
             ('/initialpose', 'initialpose')
         ],
         respawn=True,
@@ -395,8 +395,8 @@ def generate_launch_description():
         prefix=['taskset -c 4,5'],
         remappings=[
             ('cloud_in', lio_config['octomap_topic']),
-            ('/tf', 'tf'),
-            ('/tf_static', 'tf_static')
+            ('/tf', '/tf'),
+            ('/tf_static', '/tf_static')
         ]
     )
     
@@ -415,8 +415,8 @@ def generate_launch_description():
         ],
         prefix=['taskset -c 0,1,2,3'],
         remappings=[
-            ('/tf', 'tf'),
-            ('/tf_static', 'tf_static')
+            ('/tf', '/tf'),
+            ('/tf_static', '/tf_static')
         ]
     )
 
@@ -435,8 +435,8 @@ def generate_launch_description():
             }
         ],
         remappings=[
-            ('/tf', 'tf'),
-            ('/tf_static', 'tf_static'),
+            ('/tf', '/tf'),
+            ('/tf_static', '/tf_static'),
             ('initialpose', 'initialpose')
         ],
         prefix=['taskset -c 5,6']
@@ -506,8 +506,8 @@ def generate_launch_description():
     #     parameters=[os.path.join(bringup_dir, 'config', 'gps_ekf.yaml')],
     #     remappings=[
     #         ('/odometry/filtered', '/odometry/gps_fused'),  # GPS融合后的里程计
-    #         ('/tf', 'tf'),
-    #         ('/tf_static', 'tf_static')
+    #         ('/tf', '/tf'),
+    #         ('/tf_static', '/tf_static')
     #     ]
     # )
     
