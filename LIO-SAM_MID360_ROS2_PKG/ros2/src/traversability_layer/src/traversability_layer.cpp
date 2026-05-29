@@ -368,6 +368,9 @@ void TraversabilityLayer::incrementalUpdateVoxelGrid(
     int shift_y = static_cast<int>(std::round((voxel_oy_ - oy) / cell_resolution_));
     shiftVoxelGrid(shift_x, shift_y);
 
+    voxel_ox_ = ox;
+    voxel_oy_ = oy;
+
     bool z_expand = false;
     if (z_lo < voxel_z_origin_ - voxel_z_resolution_ * 0.5) z_expand = true;
     if (z_hi > voxel_z_origin_ + voxel_size_z_ * voxel_z_resolution_ + voxel_z_resolution_ * 0.5) z_expand = true;
@@ -383,6 +386,8 @@ void TraversabilityLayer::incrementalUpdateVoxelGrid(
 
   double inv_cell_res = 1.0 / cell_resolution_;
   double inv_vz_res = 1.0 / voxel_z_resolution_;
+  double vox_ox = voxel_ox_;
+  double vox_oy = voxel_oy_;
 
   int n_threads = omp_get_max_threads();
   struct ThreadLocalHit { size_t idx; bool is_hit; };
@@ -403,8 +408,8 @@ void TraversabilityLayer::incrementalUpdateVoxelGrid(
       const auto & pt = transformed_pts[pi];
       const auto & sp = sensor_pos;
 
-      int ix = static_cast<int>(std::floor((pt.x - ox) * inv_cell_res));
-      int iy = static_cast<int>(std::floor((pt.y - oy) * inv_cell_res));
+      int ix = static_cast<int>(std::floor((pt.x - vox_ox) * inv_cell_res));
+      int iy = static_cast<int>(std::floor((pt.y - vox_oy) * inv_cell_res));
       int iz = static_cast<int>(std::floor((pt.z - voxel_z_origin_) * inv_vz_res));
 
       if (ix < 0 || ix >= static_cast<int>(voxel_size_x_) ||
@@ -421,8 +426,8 @@ void TraversabilityLayer::incrementalUpdateVoxelGrid(
 
       local_buf.push_back({hit_idx, true});
 
-      int six = static_cast<int>(std::floor((sp.x - ox) * inv_cell_res));
-      int siy = static_cast<int>(std::floor((sp.y - oy) * inv_cell_res));
+      int six = static_cast<int>(std::floor((sp.x - vox_ox) * inv_cell_res));
+      int siy = static_cast<int>(std::floor((sp.y - vox_oy) * inv_cell_res));
       int siz = static_cast<int>(std::floor((sp.z - voxel_z_origin_) * inv_vz_res));
 
       six = std::max(0, std::min(six, static_cast<int>(voxel_size_x_) - 1));
@@ -449,8 +454,8 @@ void TraversabilityLayer::incrementalUpdateVoxelGrid(
         double cy = sp.y + s * step_dy;
         double cz = sp.z + s * step_dz;
 
-        int cix = static_cast<int>(std::floor((cx - ox) * inv_cell_res));
-        int ciy = static_cast<int>(std::floor((cy - oy) * inv_cell_res));
+        int cix = static_cast<int>(std::floor((cx - vox_ox) * inv_cell_res));
+        int ciy = static_cast<int>(std::floor((cy - vox_oy) * inv_cell_res));
         int ciz = static_cast<int>(std::floor((cz - voxel_z_origin_) * inv_vz_res));
 
         if (cix < 0 || cix >= static_cast<int>(voxel_size_x_) ||
@@ -537,11 +542,23 @@ void TraversabilityLayer::extractGround(double ox, double oy)
   double sensor_z = sensor_global_z_;
   int win = free_space_window_;
 
+  int vox_offset_x = static_cast<int>(std::round((voxel_ox_ - ox) * inv_cell_res));
+  int vox_offset_y = static_cast<int>(std::round((voxel_oy_ - oy) * inv_cell_res));
+
 #pragma omp parallel for collapse(2) schedule(static)
   for (int cy = 0; cy < static_cast<int>(ground_size_y_); cy++) {
     for (int cx = 0; cx < static_cast<int>(ground_size_x_); cx++) {
-      unsigned int uix = static_cast<unsigned int>(cx);
-      unsigned int uiy = static_cast<unsigned int>(cy);
+      int vix = cx + vox_offset_x;
+      int viy = cy + vox_offset_y;
+
+      if (vix < 0 || vix >= static_cast<int>(voxel_size_x_) ||
+          viy < 0 || viy >= static_cast<int>(voxel_size_y_))
+      {
+        continue;
+      }
+
+      unsigned int uix = static_cast<unsigned int>(vix);
+      unsigned int uiy = static_cast<unsigned int>(viy);
 
       int ground_iz = -1;
       float ground_z_val = 0.0f;
@@ -1049,7 +1066,8 @@ void TraversabilityLayer::updateCosts(
           pt.x = static_cast<float>(cx * cell_resolution_ + ox);
           pt.y = static_cast<float>(cy * cell_resolution_ + oy);
           pt.z = cell.ground_z;
-          pt.intensity = cell.slope_magnitude;
+          unsigned char cost = computeCost(cell);
+          pt.intensity = static_cast<float>(cost) / 254.0f;
           slope_cloud->push_back(pt);
         }
       }
