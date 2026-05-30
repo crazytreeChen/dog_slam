@@ -135,6 +135,8 @@ void TraversabilityLayer::matchSize()
 {
   nav2_costmap_2d::Costmap2D * master_grid = layered_costmap_->getCostmap();
 
+  setDefaultValue(nav2_costmap_2d::NO_INFORMATION);
+
   resizeMap(master_grid->getSizeInCellsX(), master_grid->getSizeInCellsY(),
             master_grid->getResolution(),
             master_grid->getOriginX(), master_grid->getOriginY());
@@ -335,6 +337,10 @@ void TraversabilityLayer::incrementalUpdateVoxelGrid(
   unsigned int new_size_x = ground_size_x_;
   unsigned int new_size_y = ground_size_y_;
 
+  if (observation_persistence_ <= 0.0 && voxel_grid_valid_) {
+    voxel_grid_.assign(voxel_grid_.size(), VoxelData{});
+  }
+
   double z_min_world = std::numeric_limits<double>::max();
   double z_max_world = std::numeric_limits<double>::lowest();
   double cur_sensor_z = sensor_global_z_;
@@ -511,7 +517,6 @@ void TraversabilityLayer::incrementalUpdateVoxelGrid(
 void TraversabilityLayer::decayVoxelGrid()
 {
   if (observation_persistence_ <= 0.0) {
-    voxel_grid_.assign(voxel_grid_.size(), VoxelData{});
     return;
   }
 
@@ -934,6 +939,11 @@ void TraversabilityLayer::updateCosts(
   {
     matchSize();
   }
+  else if (std::abs(getOriginX() - ox) > 1e-6 || std::abs(getOriginY() - oy) > 1e-6)
+  {
+    setDefaultValue(nav2_costmap_2d::NO_INFORMATION);
+    updateOrigin(ox, oy);
+  }
 
   double world_w = costmap_sx * costmap_res;
   double world_h = costmap_sy * costmap_res;
@@ -964,6 +974,12 @@ void TraversabilityLayer::updateCosts(
 
   int cells_with_cost = 0;
   int lethal_cells = 0;
+  int ground_has_ground = 0;
+  int ground_no_ground = 0;
+
+  unsigned char * master_array = master_grid.getCharMap();
+  unsigned int master_span = master_grid.getSizeInCellsX();
+  double inv_costmap_res = 1.0 / costmap_res;
 
   for (int cy = 0; cy < static_cast<int>(ground_size_y_); cy++) {
     for (int cx = 0; cx < static_cast<int>(ground_size_x_); cx++) {
@@ -972,8 +988,10 @@ void TraversabilityLayer::updateCosts(
       const auto & cell = ground_map_[idx];
 
       if (!cell.has_ground) {
+        ground_no_ground++;
         continue;
       }
+      ground_has_ground++;
 
       unsigned char cost = computeCost(cell);
 
@@ -989,28 +1007,45 @@ void TraversabilityLayer::updateCosts(
       double cell_wx = cx * cell_resolution_ + ox;
       double cell_wy = cy * cell_resolution_ + oy;
 
-      unsigned int mx, my;
-      if (!worldToMap(cell_wx, cell_wy, mx, my)) {
-        continue;
-      }
+      int mx_start = static_cast<int>(std::floor((cell_wx - master_grid.getOriginX()) * inv_costmap_res));
+      int my_start = static_cast<int>(std::floor((cell_wy - master_grid.getOriginY()) * inv_costmap_res));
+      int mx_end = static_cast<int>(std::floor((cell_wx + cell_resolution_ - master_grid.getOriginX() - 1e-6) * inv_costmap_res));
+      int my_end = static_cast<int>(std::floor((cell_wy + cell_resolution_ - master_grid.getOriginY() - 1e-6) * inv_costmap_res));
 
-      unsigned char old_cost = getCost(mx, my);
-      if (old_cost == nav2_costmap_2d::NO_INFORMATION || cost > old_cost) {
-        setCost(mx, my, cost);
+      mx_end = std::min(mx_end, static_cast<int>(master_grid.getSizeInCellsX()) - 1);
+      my_end = std::min(my_end, static_cast<int>(master_grid.getSizeInCellsY()) - 1);
+
+      for (int my = my_start; my <= my_end; my++) {
+        for (int mx = mx_start; mx <= mx_end; mx++) {
+          if (mx < 0 || my < 0) continue;
+
+          unsigned int mit = static_cast<unsigned int>(my) * master_span +
+                             static_cast<unsigned int>(mx);
+          unsigned char master_old = master_array[mit];
+          if (master_old == nav2_costmap_2d::NO_INFORMATION || cost > master_old) {
+            master_array[mit] = cost;
+          }
+        }
       }
     }
   }
-
-  updateWithMax(master_grid, min_i, min_j, max_i, max_j);
 
   current_ = true;
 
   RCLCPP_INFO_THROTTLE(
     rclcpp::get_logger("traversability_layer"), *clock, 2000,
-    "[TraversabilityLayer] updateCosts: %d cells with cost, %d lethal, "
-    "voxel_grid_valid=%d, ground_size=%dx%d, voxel_size=%dx%dx%d",
-    cells_with_cost, lethal_cells, voxel_grid_valid_,
-    ground_size_x_, ground_size_y_, voxel_size_x_, voxel_size_y_, voxel_size_z_);
+    "[TraversabilityLayer] updateCosts: cells_cost=%d lethal=%d "
+    "ground_ok=%d ground_empty=%d "
+    "bounds=[%d,%d %d,%d] origin=[%.2f,%.2f] "
+    "cmap=%dx%d@%.3f ground=%dx%d@%.3f voxel=%dx%dx%d vox_valid=%d",
+    cells_with_cost, lethal_cells,
+    ground_has_ground, ground_no_ground,
+    min_i, min_j, max_i, max_j,
+    ox, oy,
+    costmap_sx, costmap_sy, costmap_res,
+    ground_size_x_, ground_size_y_, cell_resolution_,
+    voxel_size_x_, voxel_size_y_, voxel_size_z_,
+    static_cast<int>(voxel_grid_valid_));
 
   rclcpp::Time frame_end = clock->now();
   double frame_ms = (frame_end - frame_start).seconds() * 1000.0;
