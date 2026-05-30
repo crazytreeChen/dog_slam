@@ -55,6 +55,7 @@ void TraversabilityLayer::onInitialize()
   declareParameter("min_interp_neighbors", rclcpp::ParameterValue(2));
   declareParameter("robot_height", rclcpp::ParameterValue(0.5));
   declareParameter("obstacle_ratio_threshold", rclcpp::ParameterValue(0.5));
+  declareParameter("obstacle_hit_threshold", rclcpp::ParameterValue(2));
 
   node->get_parameter(name_ + ".enabled", enabled_);
   node->get_parameter(name_ + ".pointcloud_topic", pointcloud_topic_);
@@ -84,6 +85,7 @@ void TraversabilityLayer::onInitialize()
   node->get_parameter(name_ + ".min_interp_neighbors", min_interp_neighbors_);
   node->get_parameter(name_ + ".robot_height", robot_height_);
   node->get_parameter(name_ + ".obstacle_ratio_threshold", obstacle_ratio_threshold_);
+  node->get_parameter(name_ + ".obstacle_hit_threshold", obstacle_hit_threshold_);
 
   if (num_threads_ > 0) {
     omp_set_num_threads(num_threads_);
@@ -106,14 +108,14 @@ void TraversabilityLayer::onInitialize()
     "TraversabilityLayer(v3d): step_height=%.3f, max_slope=%.1fdeg, slope_start=%.1fdeg, "
     "topic=%s, sensor_frame=%s, base_frame=%s, cell_res=%.3f, voxel_z_res=%.3f, z_range=[%.1f,%.1f], "
     "ground_hit_thr=%d, free_space_thr=%d, free_space_win=%d, "
-    "interp_radius=%d, min_interp=%d, robot_height=%.2f, obstacle_ratio_thr=%.2f, num_threads=%d",
+    "interp_radius=%d, min_interp=%d, robot_height=%.2f, obstacle_ratio_thr=%.2f, obstacle_hit_thr=%d, num_threads=%d",
     step_height_threshold_, max_slope_traversable_ * 180.0 / M_PI,
     slope_cost_start_ * 180.0 / M_PI, pointcloud_topic_.c_str(),
     sensor_frame_.c_str(), base_frame_.c_str(),
     cell_resolution_, voxel_z_resolution_, voxel_z_min_, voxel_z_max_,
     ground_hit_threshold_, free_space_threshold_, free_space_window_,
     interp_search_radius_, min_interp_neighbors_,
-    robot_height_, obstacle_ratio_threshold_, num_threads_);
+    robot_height_, obstacle_ratio_threshold_, obstacle_hit_threshold_, num_threads_);
 
   tf_buffer_ = std::make_shared<tf2_ros::Buffer>(node->get_clock());
   tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
@@ -656,28 +658,47 @@ void TraversabilityLayer::extractGround(double ox, double oy)
       }
 
       if (ground_iz >= 0) {
+        int ground_top_iz = ground_iz;
+        for (unsigned int tiz = static_cast<unsigned int>(ground_iz) + 1;
+             tiz < voxel_size_z_; tiz++) {
+          size_t tidx = voxelIndex(uix, uiy, tiz);
+          if (voxel_grid_[tidx].hit_count >= static_cast<uint16_t>(ground_hit_threshold_)) {
+            ground_top_iz = static_cast<int>(tiz);
+          } else {
+            break;
+          }
+        }
+
+        float ground_top_z = static_cast<float>(
+          voxel_z_origin_ + (ground_top_iz + 0.5) * voxel_z_resolution_);
+
         size_t gidx = groundIndex(static_cast<unsigned int>(cx),
                                   static_cast<unsigned int>(cy));
-        ground_map_[gidx].ground_z = ground_z_val;
+        ground_map_[gidx].ground_z = ground_top_z;
         ground_map_[gidx].has_ground = true;
         ground_found++;
 
-        double obs_z_start = ground_z_val + voxel_z_resolution_;
-        double obs_z_end = ground_z_val + static_cast<double>(robot_height_);
+        double obs_z_start = ground_top_z + voxel_z_resolution_;
+        double obs_z_end = ground_top_z + static_cast<double>(robot_height_);
         unsigned int iz_start = static_cast<unsigned int>(
           std::floor((obs_z_start - voxel_z_origin_) * inv_vz_res));
         unsigned int iz_end = static_cast<unsigned int>(
           std::ceil((obs_z_end - voxel_z_origin_) * inv_vz_res));
-        iz_start = std::max(iz_start, static_cast<unsigned int>(ground_iz) + 1);
+        iz_start = std::max(iz_start, static_cast<unsigned int>(ground_top_iz) + 1);
         iz_end = std::min(iz_end, voxel_size_z_);
 
         int obs_layers = 0;
         int total_layers = 0;
+        float max_obs_z = ground_top_z;
+        float min_obs_z = ground_top_z + static_cast<float>(robot_height_);
         for (unsigned int oiz = iz_start; oiz < iz_end; oiz++) {
           size_t oidx = voxelIndex(uix, uiy, oiz);
           total_layers++;
-          if (voxel_grid_[oidx].hit_count >= static_cast<uint8_t>(ground_hit_threshold_)) {
+          if (voxel_grid_[oidx].hit_count >= static_cast<uint8_t>(obstacle_hit_threshold_)) {
             obs_layers++;
+            float hit_z = static_cast<float>(voxel_z_origin_ + (oiz + 0.5) * voxel_z_resolution_);
+            if (hit_z > max_obs_z) max_obs_z = hit_z;
+            if (hit_z < min_obs_z) min_obs_z = hit_z;
           }
         }
 
@@ -686,6 +707,8 @@ void TraversabilityLayer::extractGround(double ox, double oy)
             static_cast<float>(obs_layers) / static_cast<float>(total_layers);
           if (ground_map_[gidx].obstacle_ratio > 0.0f) obs_ratio_nonzero++;
         }
+        ground_map_[gidx].max_obstacle_z = max_obs_z;
+        ground_map_[gidx].min_obstacle_z = min_obs_z;
       }
     }
   }
@@ -748,6 +771,7 @@ void TraversabilityLayer::interpolateGround()
       if (neighbor_count >= min_neighbors && sum_w > 1e-8f) {
         interpolated[idx].ground_z = sum_wz / sum_w;
         interpolated[idx].has_ground = true;
+        interpolated[idx].is_interpolated = true;
       }
     }
   }
@@ -851,61 +875,75 @@ void TraversabilityLayer::computeGroundSlope()
 
 unsigned char TraversabilityLayer::computeCost(const GroundCell & cell) const
 {
-  if (!cell.has_ground) {
+  if (!cell.has_ground || cell.is_interpolated) {
     return nav2_costmap_2d::NO_INFORMATION;
   }
 
-  if (cell.obstacle_ratio >= static_cast<float>(obstacle_ratio_threshold_)) {
+  float obstacle_height = cell.max_obstacle_z - cell.ground_z;
+  bool height_lethal = obstacle_height > static_cast<float>(step_height_threshold_);
+  bool ratio_lethal = cell.obstacle_ratio >= static_cast<float>(obstacle_ratio_threshold_);
+
+  if (height_lethal && ratio_lethal) {
     return nav2_costmap_2d::LETHAL_OBSTACLE;
   }
 
   unsigned char obstacle_cost = 0;
-  if (cell.obstacle_ratio > 0.0f) {
+
+  if (height_lethal && !ratio_lethal) {
+    float h_norm = obstacle_height / static_cast<float>(step_height_threshold_);
+    if (h_norm > 1.0f) h_norm = 1.0f;
+    obstacle_cost = static_cast<unsigned char>(std::min(252.0f, 128.0f + h_norm * 124.0f));
+  }
+
+  if (ratio_lethal && !height_lethal) {
+    float r_norm = cell.obstacle_ratio / static_cast<float>(obstacle_ratio_threshold_);
+    if (r_norm > 1.0f) r_norm = 1.0f;
+    unsigned char ratio_cost = static_cast<unsigned char>(std::min(252.0f, 128.0f + r_norm * 124.0f));
+    obstacle_cost = std::max(obstacle_cost, ratio_cost);
+  }
+
+  if (cell.obstacle_ratio > 0.0f && !ratio_lethal) {
     float obs_norm = cell.obstacle_ratio / static_cast<float>(obstacle_ratio_threshold_);
     if (obs_norm > 1.0f) obs_norm = 1.0f;
-    obstacle_cost = static_cast<unsigned char>(std::min(252.0f, obs_norm * 200.0f));
+    unsigned char ratio_cost = static_cast<unsigned char>(std::min(127.0f, obs_norm * 127.0f));
+    obstacle_cost = std::max(obstacle_cost, ratio_cost);
   }
 
-  float height_above_ground = cell.height_diff;
+  if (obstacle_height > static_cast<float>(height_cost_start_) && !height_lethal) {
+    float h_range = static_cast<float>(step_height_threshold_) - static_cast<float>(height_cost_start_);
+    float h_norm = obstacle_height - static_cast<float>(height_cost_start_);
 
-  if (height_above_ground <= static_cast<float>(height_cost_start_)) {
-    float slope_angle = std::atan(cell.slope_magnitude);
-    if (slope_angle <= static_cast<float>(slope_cost_start_)) {
-      return obstacle_cost;
+    unsigned char height_cost = 0;
+    if (h_range > 1e-6f) {
+      float ratio = h_norm / h_range;
+      if (ratio > 1.0f) ratio = 1.0f;
+      height_cost = static_cast<unsigned char>(std::min(127.0f, ratio * 127.0f));
+    } else {
+      height_cost = static_cast<unsigned char>(
+        std::min(127.0f, (obstacle_height / static_cast<float>(step_height_threshold_)) * 127.0f));
     }
-    float slope_range = static_cast<float>(max_slope_traversable_) - static_cast<float>(slope_cost_start_);
-    if (slope_range > 1e-6f) {
-      float slope_norm = (slope_angle - static_cast<float>(slope_cost_start_)) / slope_range;
-      if (slope_norm > 1.0f) slope_norm = 1.0f;
-      float cost_f = slope_norm * static_cast<float>(slope_cost_scale_) * 25.0f;
-      unsigned char slope_only = static_cast<unsigned char>(std::min(252.0f, cost_f));
-      return std::max(slope_only, obstacle_cost);
-    }
-    return obstacle_cost;
+    obstacle_cost = std::max(obstacle_cost, height_cost);
   }
 
-  float h_range = static_cast<float>(step_height_threshold_) - static_cast<float>(height_cost_start_);
-  float h_norm = height_above_ground - static_cast<float>(height_cost_start_);
+  float height_diff = cell.height_diff;
+  if (height_diff > static_cast<float>(height_cost_start_)) {
+    float h_range = static_cast<float>(step_height_threshold_) - static_cast<float>(height_cost_start_);
+    float h_norm = height_diff - static_cast<float>(height_cost_start_);
 
-  unsigned char height_cost = 0;
-  if (h_range > 1e-6f) {
-    float ratio = h_norm / h_range;
-    if (ratio > 1.0f) ratio = 1.0f;
-    float cost_f = 1.0f + ratio * 252.0f;
-    height_cost = static_cast<unsigned char>(std::min(253.0f, cost_f));
-  } else {
-    height_cost = static_cast<unsigned char>(
-      std::min(253.0f, (height_above_ground / static_cast<float>(step_height_threshold_)) * 253.0f));
-  }
-
-  if (height_above_ground > static_cast<float>(step_height_threshold_)) {
-    float slope_angle = std::atan(cell.slope_magnitude);
-    if (slope_angle > static_cast<float>(max_slope_traversable_)) {
-      return nav2_costmap_2d::LETHAL_OBSTACLE;
+    unsigned char diff_cost = 0;
+    if (h_range > 1e-6f) {
+      float ratio = h_norm / h_range;
+      if (ratio > 1.0f) ratio = 1.0f;
+      diff_cost = static_cast<unsigned char>(std::min(127.0f, ratio * 127.0f));
     }
+    obstacle_cost = std::max(obstacle_cost, diff_cost);
   }
 
   float slope_angle = std::atan(cell.slope_magnitude);
+  if (slope_angle > static_cast<float>(max_slope_traversable_)) {
+    return nav2_costmap_2d::LETHAL_OBSTACLE;
+  }
+
   if (slope_angle > static_cast<float>(slope_cost_start_)) {
     float slope_range = static_cast<float>(max_slope_traversable_) - static_cast<float>(slope_cost_start_);
     if (slope_range > 1e-6f) {
@@ -913,11 +951,11 @@ unsigned char TraversabilityLayer::computeCost(const GroundCell & cell) const
       if (slope_norm > 1.0f) slope_norm = 1.0f;
       float slope_cost_f = slope_norm * static_cast<float>(slope_cost_scale_) * 25.0f;
       unsigned char slope_cost = static_cast<unsigned char>(std::min(252.0f, slope_cost_f));
-      return std::max({height_cost, slope_cost, obstacle_cost});
+      obstacle_cost = std::max(obstacle_cost, slope_cost);
     }
   }
 
-  return std::max(height_cost, obstacle_cost);
+  return obstacle_cost;
 }
 
 void TraversabilityLayer::updateBounds(

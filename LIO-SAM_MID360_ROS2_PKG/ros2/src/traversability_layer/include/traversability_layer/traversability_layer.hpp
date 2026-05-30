@@ -39,11 +39,14 @@ struct GroundCell
 {
   float ground_z = 0.0f;
   bool has_ground = false;
+  bool is_interpolated = false;
   float height_diff = 0.0f;
   float slope_x = 0.0f;
   float slope_y = 0.0f;
   float slope_magnitude = 0.0f;
   float obstacle_ratio = 0.0f;
+  float max_obstacle_z = 0.0f;
+  float min_obstacle_z = 0.0f;
 };
 
 struct IncrementalRay
@@ -131,6 +134,7 @@ private:
   int min_interp_neighbors_;
   double robot_height_;
   double obstacle_ratio_threshold_;
+  int obstacle_hit_threshold_;
 
   rclcpp::Time last_perf_log_{0, 0, RCL_ROS_TIME};
   int perf_frame_count_ = 0;
