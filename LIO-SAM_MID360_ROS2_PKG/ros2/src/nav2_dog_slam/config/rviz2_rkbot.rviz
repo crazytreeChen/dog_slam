@@ -13,7 +13,7 @@ Panels:
         - /Map2/Topic1
         - /Map3/Topic1
         - /Pose1/Topic1
-        - /PointCloud21/Topic1
+        - /PointCloud21
       Splitter Ratio: 0.44117647409439087
     Tree Height: 639
   - Class: rviz_common/Selection
@@ -70,6 +70,24 @@ Visualization Manager:
           Value: true
         odom:
           Value: true
+        rkbot/base_footprint:
+          Value: true
+        rkbot/base_link:
+          Value: true
+        rkbot/imu:
+          Value: true
+        rkbot/livox_frame:
+          Value: true
+        rkbot/map:
+          Value: true
+        rkbot/odom:
+          Value: true
+        rkbot/world:
+          Value: true
+        rslidar_head:
+          Value: true
+        rslidar_tail:
+          Value: true
         world:
           Value: true
       Marker Scale: 5
@@ -78,7 +96,19 @@ Visualization Manager:
       Show Axes: true
       Show Names: true
       Tree:
-        {}
+        rkbot/map:
+          rkbot/odom:
+            rkbot/world:
+              rkbot/base_footprint:
+                {}
+              rkbot/imu:
+                rkbot/livox_frame:
+                  {}
+                rslidar_head:
+                  rkbot/base_link:
+                    {}
+                  rslidar_tail:
+                    {}
       Update Interval: 0
       Value: true
     - Alpha: 1
@@ -133,10 +163,10 @@ Visualization Manager:
       Color: 255; 255; 255
       Color Transformer: Intensity
       Decay Time: 1000
-      Enabled: true
+      Enabled: false
       Invert Rainbow: false
       Max Color: 255; 255; 255
-      Max Intensity: 144
+      Max Intensity: 181
       Min Color: 0; 0; 0
       Min Intensity: 2
       Name: PointCloud2_front
@@ -154,7 +184,7 @@ Visualization Manager:
         Value: /rkbot/front_lidar/cloud_world
       Use Fixed Frame: true
       Use rainbow: true
-      Value: true
+      Value: false
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -476,8 +506,8 @@ Visualization Manager:
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
-        Max Value: 3.630361557006836
-        Min Value: -0.5315915942192078
+        Max Value: -0.5141023993492126
+        Min Value: -0.5141026377677917
         Value: true
       Axis: Z
       Channel Name: intensity
@@ -574,25 +604,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 11.231922149658203
+      Distance: 29.69199562072754
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 25.87214469909668
-        Y: 32.27696990966797
-        Z: -0.0031366730108857155
+        X: 18.828550338745117
+        Y: 25.415918350219727
+        Z: -2.7970879077911377
       Focal Shape Fixed Size: false
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.9297966361045837
+      Pitch: 1.5697963237762451
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 4.400779724121094
+      Yaw: 4.767142295837402
     Saved: ~
 Window Geometry:
   Displays:
@@ -608,5 +638,5 @@ Window Geometry:
   Views:
     collapsed: false
   Width: 1850
-  X: 1212
-  Y: 623
+  X: 1772
+  Y: 447
