@@ -394,13 +394,13 @@ local_costmap:
         plugin: "traversability_layer::TraversabilityLayer"
         enabled: true
         # 点云话题
-        pointcloud_topic: /rkbot/front_lidar/cloud_world
+        pointcloud_topic: /rkbot/front_lidar/body/cloud
         # 传感器坐标系（为空则使用点云自带的 frame_id）
         # sensor_frame: ""
         # 机器人基准坐标系（高度截取和地面检测的参考高度）
         base_frame: base_footprint
         # 高度过滤（相对于 base_frame 的高度）
-        max_obstacle_height: 5.0    # 最大考虑高度(m)，高于此忽略
+        max_obstacle_height: 2.0    # 最大考虑高度(m)，高于此忽略
         min_obstacle_height: -1.0   # 最小考虑高度(m)，低于此忽略
         # 坡度参数（角度制）
         max_slope_traversable: 60.0   # 最大可通行坡度(°)，超过则直接 lethal
