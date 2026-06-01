@@ -403,9 +403,9 @@ local_costmap:
         max_obstacle_height: 1.0    # 最大考虑高度(m)，高于此忽略
         min_obstacle_height: -1.0   # 最小考虑高度(m)，低于此忽略
         # 坡度参数（角度制）
-        max_slope_traversable: 60.0   # 最大可通行坡度(°)，超过则直接 lethal
-        slope_cost_start: 45.0        # 开始产生坡度 cost 的坡度角(°)
-        slope_cost_scale: 3.0         # 坡度 cost 缩放系数
+        max_slope_traversable: 80.0   # 最大可通行坡度(°)，超过则直接 lethal
+        slope_cost_start: 70.0        # 开始产生坡度 cost 的坡度角(°)
+        slope_cost_scale: 1.0         # 坡度 cost 缩放系数
         # 高度差参数
         step_height_threshold: 0.5   # 台阶高度阈值(m)，超过此值 lethal
         height_cost_start: 0.3        # 产生 cost 的最小高度(m)
@@ -415,7 +415,7 @@ local_costmap:
         # 致命 cost 阈值
         lethal_cost_threshold: 254.0
         # 点云持久化
-        observation_persistence: 0.0  # 点云保留时间(s)。0=仅用最新帧；>0=累积并按时修剪过期点
+        observation_persistence: 1.0  # 点云保留时间(s)。0=仅用最新帧；>0=累积并按时修剪过期点
         # 点云缓冲
         cloud_buffer_size: 5          # 点云缓冲队列长度
         # 调试输出
