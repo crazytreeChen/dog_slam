@@ -46,14 +46,11 @@ void TraversabilityLayer::onInitialize()
   declareParameter("cell_resolution", rclcpp::ParameterValue(0.0));
   declareParameter("num_threads", rclcpp::ParameterValue(0));
   declareParameter("voxel_z_resolution", rclcpp::ParameterValue(0.1));
-  declareParameter("voxel_z_min", rclcpp::ParameterValue(-1.0));
-  declareParameter("voxel_z_max", rclcpp::ParameterValue(3.0));
   declareParameter("ground_hit_threshold", rclcpp::ParameterValue(1));
   declareParameter("free_space_threshold", rclcpp::ParameterValue(1));
   declareParameter("free_space_window", rclcpp::ParameterValue(3));
   declareParameter("interp_search_radius", rclcpp::ParameterValue(3));
   declareParameter("min_interp_neighbors", rclcpp::ParameterValue(2));
-  declareParameter("robot_height", rclcpp::ParameterValue(0.5));
   declareParameter("obstacle_ratio_threshold", rclcpp::ParameterValue(0.5));
   declareParameter("obstacle_hit_threshold", rclcpp::ParameterValue(2));
 
@@ -76,14 +73,11 @@ void TraversabilityLayer::onInitialize()
   node->get_parameter(name_ + ".cell_resolution", cell_resolution_);
   node->get_parameter(name_ + ".num_threads", num_threads_);
   node->get_parameter(name_ + ".voxel_z_resolution", voxel_z_resolution_);
-  node->get_parameter(name_ + ".voxel_z_min", voxel_z_min_);
-  node->get_parameter(name_ + ".voxel_z_max", voxel_z_max_);
   node->get_parameter(name_ + ".ground_hit_threshold", ground_hit_threshold_);
   node->get_parameter(name_ + ".free_space_threshold", free_space_threshold_);
   node->get_parameter(name_ + ".free_space_window", free_space_window_);
   node->get_parameter(name_ + ".interp_search_radius", interp_search_radius_);
   node->get_parameter(name_ + ".min_interp_neighbors", min_interp_neighbors_);
-  node->get_parameter(name_ + ".robot_height", robot_height_);
   node->get_parameter(name_ + ".obstacle_ratio_threshold", obstacle_ratio_threshold_);
   node->get_parameter(name_ + ".obstacle_hit_threshold", obstacle_hit_threshold_);
 
@@ -108,14 +102,14 @@ void TraversabilityLayer::onInitialize()
     "TraversabilityLayer(v3d): step_height=%.3f, max_slope=%.1fdeg, slope_start=%.1fdeg, "
     "topic=%s, sensor_frame=%s, base_frame=%s, cell_res=%.3f, voxel_z_res=%.3f, z_range=[%.1f,%.1f], "
     "ground_hit_thr=%d, free_space_thr=%d, free_space_win=%d, "
-    "interp_radius=%d, min_interp=%d, robot_height=%.2f, obstacle_ratio_thr=%.2f, obstacle_hit_thr=%d, num_threads=%d",
+    "interp_radius=%d, min_interp=%d, obstacle_ratio_thr=%.2f, obstacle_hit_thr=%d, num_threads=%d",
     step_height_threshold_, max_slope_traversable_ * 180.0 / M_PI,
     slope_cost_start_ * 180.0 / M_PI, pointcloud_topic_.c_str(),
     sensor_frame_.c_str(), base_frame_.c_str(),
-    cell_resolution_, voxel_z_resolution_, voxel_z_min_, voxel_z_max_,
+    cell_resolution_, voxel_z_resolution_, min_obstacle_height_, max_obstacle_height_,
     ground_hit_threshold_, free_space_threshold_, free_space_window_,
     interp_search_radius_, min_interp_neighbors_,
-    robot_height_, obstacle_ratio_threshold_, obstacle_hit_threshold_, num_threads_);
+    obstacle_ratio_threshold_, obstacle_hit_threshold_, num_threads_);
 
   tf_buffer_ = std::make_shared<tf2_ros::Buffer>(node->get_clock());
   tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
@@ -382,8 +376,8 @@ void TraversabilityLayer::incrementalUpdateVoxelGrid(
   if (sensor_pos.z < z_min_world) z_min_world = sensor_pos.z;
   if (sensor_pos.z > z_max_world) z_max_world = sensor_pos.z;
 
-  double z_lo = std::min(z_min_world, cur_base_z + voxel_z_min_) - voxel_z_resolution_;
-  double z_hi = std::max(z_max_world, cur_base_z + voxel_z_max_) + voxel_z_resolution_;
+  double z_lo = std::min(z_min_world, cur_base_z + min_obstacle_height_) - voxel_z_resolution_;
+  double z_hi = std::max(z_max_world, cur_base_z + max_obstacle_height_) + voxel_z_resolution_;
 
   if (!voxel_grid_valid_ ||
       new_size_x != voxel_size_x_ || new_size_y != voxel_size_y_) {
@@ -615,10 +609,6 @@ void TraversabilityLayer::extractGround(double ox, double oy)
 
         double voxel_world_z = voxel_z_origin_ + (iz + 0.5) * voxel_z_resolution_;
 
-        if (voxel_world_z > base_z) {
-          break;
-        }
-
         bool has_free_above = false;
         for (int w = 1; w <= win; w++) {
           unsigned int wiz = iz + static_cast<unsigned int>(w);
@@ -647,9 +637,6 @@ void TraversabilityLayer::extractGround(double ox, double oy)
           }
 
           double voxel_world_z = voxel_z_origin_ + (iz + 0.5) * voxel_z_resolution_;
-          if (voxel_world_z > base_z) {
-            break;
-          }
 
           ground_iz = static_cast<int>(iz);
           ground_z_val = static_cast<float>(voxel_world_z);
@@ -659,8 +646,10 @@ void TraversabilityLayer::extractGround(double ox, double oy)
 
       if (ground_iz >= 0) {
         int ground_top_iz = ground_iz;
+        unsigned int max_ground_voxels = static_cast<unsigned int>(std::ceil(0.5 / voxel_z_resolution_));
         for (unsigned int tiz = static_cast<unsigned int>(ground_iz) + 1;
-             tiz < voxel_size_z_; tiz++) {
+             tiz < voxel_size_z_ && (tiz - static_cast<unsigned int>(ground_iz) <= max_ground_voxels);
+             tiz++) {
           size_t tidx = voxelIndex(uix, uiy, tiz);
           if (voxel_grid_[tidx].hit_count >= static_cast<uint16_t>(ground_hit_threshold_)) {
             ground_top_iz = static_cast<int>(tiz);
@@ -679,7 +668,7 @@ void TraversabilityLayer::extractGround(double ox, double oy)
         ground_found++;
 
         double obs_z_start = ground_top_z + voxel_z_resolution_;
-        double obs_z_end = ground_top_z + static_cast<double>(robot_height_);
+        double obs_z_end = ground_top_z + max_obstacle_height_;
         unsigned int iz_start = static_cast<unsigned int>(
           std::floor((obs_z_start - voxel_z_origin_) * inv_vz_res));
         unsigned int iz_end = static_cast<unsigned int>(
@@ -690,9 +679,12 @@ void TraversabilityLayer::extractGround(double ox, double oy)
         int obs_layers = 0;
         int total_layers = 0;
         float max_obs_z = ground_top_z;
-        float min_obs_z = ground_top_z + static_cast<float>(robot_height_);
+        float min_obs_z = ground_top_z + static_cast<float>(max_obstacle_height_);
         for (unsigned int oiz = iz_start; oiz < iz_end; oiz++) {
           size_t oidx = voxelIndex(uix, uiy, oiz);
+          if (voxel_grid_[oidx].hit_count == 0 && voxel_grid_[oidx].pass_count == 0) {
+            continue;
+          }
           total_layers++;
           if (voxel_grid_[oidx].hit_count >= static_cast<uint8_t>(obstacle_hit_threshold_)) {
             obs_layers++;
@@ -1045,6 +1037,10 @@ void TraversabilityLayer::updateCosts(
   unsigned char * master_array = master_grid.getCharMap();
   unsigned int master_span = master_grid.getSizeInCellsX();
   double inv_costmap_res = 1.0 / costmap_res;
+  double inv_cell_res = 1.0 / cell_resolution_;
+
+  int vox_offset_x = static_cast<int>(std::round((voxel_ox_ - ox) * inv_cell_res));
+  int vox_offset_y = static_cast<int>(std::round((voxel_oy_ - oy) * inv_cell_res));
 
   for (int cy = 0; cy < static_cast<int>(ground_size_y_); cy++) {
     for (int cx = 0; cx < static_cast<int>(ground_size_x_); cx++) {
@@ -1069,8 +1065,8 @@ void TraversabilityLayer::updateCosts(
       }
       cells_with_cost++;
 
-      double cell_wx = cx * cell_resolution_ + ox;
-      double cell_wy = cy * cell_resolution_ + oy;
+      double cell_wx = voxel_ox_ + (cx + vox_offset_x) * cell_resolution_;
+      double cell_wy = voxel_oy_ + (cy + vox_offset_y) * cell_resolution_;
 
       int mx_start = static_cast<int>(std::floor((cell_wx - master_grid.getOriginX()) * inv_costmap_res));
       int my_start = static_cast<int>(std::floor((cell_wy - master_grid.getOriginY()) * inv_costmap_res));
@@ -1144,14 +1140,14 @@ void TraversabilityLayer::updateCosts(
           size_t idx = groundIndex(cx, cy);
           const auto & cell = ground_map_[idx];
 
-          if (!cell.has_ground) {
+          if (!cell.has_ground || cell.is_interpolated) {
             continue;
           }
 
           pcl::PointXYZI pt;
-          pt.x = static_cast<float>(cx * cell_resolution_ + ox);
-          pt.y = static_cast<float>(cy * cell_resolution_ + oy);
-          pt.z = cell.ground_z;
+          pt.x = static_cast<float>(voxel_ox_ + (cx + vox_offset_x) * cell_resolution_);
+          pt.y = static_cast<float>(voxel_oy_ + (cy + vox_offset_y) * cell_resolution_);
+          pt.z = cell.obstacle_ratio > 0.0f ? cell.min_obstacle_z : cell.ground_z;
           unsigned char cost = computeCost(cell);
           pt.intensity = static_cast<float>(cost) / 254.0f;
           slope_cloud->push_back(pt);
