@@ -17,10 +17,10 @@
 
     lio.sensor.lidar_type: 9
     lio.sensor.blind: 0.1
-    lio.sensor.maxrange: 100.0
-    lio.sensor.filter_rate: 1
+    lio.sensor.maxrange: 200.0
+    lio.sensor.filter_rate: 5
     lio.sensor.enable_downsample: true
-    lio.sensor.voxel_fliter_size: 0.25
+    lio.sensor.voxel_fliter_size: 0.05
     lio.sensor.intensity_filter_en: false
     lio.sensor.intensity_min: 10.0
     lio.sensor.gravity_norm: 9.81
@@ -36,7 +36,7 @@
                               0.0, 0.0, -1.0]
     lio.extrinsic.odom_robo: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
-    lio.hash_map.hash_capacity: 20000000
+    lio.hash_map.hash_capacity: 2000000
     lio.hash_map.vox_resolution: 0.25
 
     lio.kf.kf_type: 0
@@ -60,14 +60,14 @@
     lio.output.map_body: true
     lio.output.dense_body: true
     lio.output.pub_step: 1
-    lio.output.footprint_pub_en: true
+    lio.output.footprint_pub_en: false
     lio.output.tf_base_footprint_frame: "base_footprint"
     lio.output.world_frame: "world"
     lio.output.imu_frame: "imu"
 
     lio.eva.timer: true
 
-    lio.dynamic_removal.enable: false
+    lio.dynamic_removal.enable: true
     lio.dynamic_removal.method: 0
     lio.dynamic_removal.grid_size: 0.25
     lio.dynamic_removal.min_neighbors: 2

@@ -48,7 +48,8 @@ def generate_launch_description():
 
     ns_map_frame = PythonExpression(["'map' if '", ns, "' == '' else str('", ns, "/map')"])
     ns_odom_frame = PythonExpression(["'odom' if '", ns, "' == '' else str('", ns, "/odom')"])
-    ns_base_frame = PythonExpression(["'base_footprint' if '", ns, "' == '' else str('", ns, "/base_footprint')"])
+    ns_base_footprint_frame = PythonExpression(["'base_footprint' if '", ns, "' == '' else str('", ns, "/base_footprint')"])
+    ns_base_link_frame = PythonExpression(["'base_link' if '", ns, "' == '' else str('", ns, "/base_link')"])
     ns_world_frame = PythonExpression(["'world' if '", ns, "' == '' else str('", ns, "/world')"])
     ns_imu_frame = PythonExpression(["'imu' if '", ns, "' == '' else str('", ns, "/imu')"])
     # ns_base_rear_frame = PythonExpression(["'base_footprint_rear' if '", ns, "' == '' else str('", ns, "/base_footprint_rear')"])
@@ -74,116 +75,6 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time', default=DEFAULT_USE_SIM_TIME)
     ld.add_action(declare_use_sim_time_arg)
 
-
-
-
-
-    static_transform_map_to_odom = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='static_transform_map_to_odom',
-        parameters=[{'use_sim_time': DEFAULT_USE_SIM_TIME}],
-        arguments=['0.0', '0.0', '0.0', '0.0', '0.0', '0.0', ns_map_frame, ns_odom_frame],
-        remappings=[('/tf_static', '/tf_static')],
-        output='screen'
-    )
-    ld.add_action(static_transform_map_to_odom)
-
-    static_transform_odom_to_world = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='static_transform_odom_to_world',
-        parameters=[{'use_sim_time': DEFAULT_USE_SIM_TIME}],
-        arguments=['0.36615', '0.0', '0.0', '0.0', str(deg_to_rad(90)), '0.0', ns_odom_frame, ns_world_frame],
-        remappings=[('/tf_static', '/tf_static')],
-        output='screen'
-    )
-    ld.add_action(static_transform_odom_to_world)
-
-    # static_transform_odom_to_world_rear = Node(
-    #     package='tf2_ros',
-    #     executable='static_transform_publisher',
-    #     name='static_transform_odom_to_world_rear',
-    #     parameters=[{'use_sim_time': DEFAULT_USE_SIM_TIME}],
-    #     arguments=['-0.36615', '0.0', '0.0', '0.0', str(deg_to_rad(90)), str(deg_to_rad(180)), ns_odom_frame, ns_world_rear_frame],
-    #     output='screen'
-    # )
-    # ld.add_action(static_transform_odom_to_world_rear)
-
-    static_transform_world_to_imu = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='static_transform_world_to_imu',
-        parameters=[{'use_sim_time': DEFAULT_USE_SIM_TIME}],
-        arguments=['0.0', '0.0', '0.0', '0.0', '0.0', '0.0', ns_world_frame, ns_imu_frame],
-        remappings=[('/tf_static', '/tf_static')],
-        output='screen'
-    )
-    ld.add_action(static_transform_world_to_imu)
-
-    imu_to_rslidar_head_tf = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='imu_to_rslidar_head_tf',
-        parameters=[{'use_sim_time': DEFAULT_USE_SIM_TIME}],
-        arguments=['0.0', '0', '0.0', '0', '0.0', '0', ns_imu_frame, 'rslidar_head'],
-        remappings=[('/tf_static', '/tf_static')],
-        output='screen'
-    )
-    ld.add_action(imu_to_rslidar_head_tf)
-
-    # rslidar_head -> base_link (机器人基坐标系到雷达坐标系的静态变换)
-    rslidar_head_to_base_link_tf = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='rslidar_head_to_base_link_tf',
-        parameters=[{'use_sim_time': DEFAULT_USE_SIM_TIME}],
-        arguments=['0', '0', '-0.36615', '0.0', str(deg_to_rad(-90)), '0', 'rslidar_head', ns_base_link_frame],
-        remappings=[('/tf_static', '/tf_static')],
-        output='screen'
-    )
-    ld.add_action(rslidar_head_to_base_link_tf)
-
-    # rslidar_head -> rslidar_tail (雷达到雷达的静态变换)
-    rslidar_head_to_rslidar_tail_tf = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='rslidar_head_to_rslidar_tail_tf',
-        parameters=[{'use_sim_time': DEFAULT_USE_SIM_TIME}],
-        arguments=['0', '0', '-0.7323', str(deg_to_rad(180)), str(deg_to_rad(180)), str(deg_to_rad(0)), 'rslidar_head', 'rslidar_tail'],
-        remappings=[('/tf_static', '/tf_static')],
-        output='screen'
-    )
-    ld.add_action(rslidar_head_to_rslidar_tail_tf)
-
-    # # rslidar_head -> rslidar_tail (雷达到雷达的静态变换)
-    # rslidar_tail_to_imu_rear_tf = Node(
-    #     package='tf2_ros',
-    #     executable='static_transform_publisher',
-    #     name='rslidar_tail_to_imu_rear_tf',
-    #     parameters=[{'use_sim_time': DEFAULT_USE_SIM_TIME}],
-    #     arguments=['0', '0', '0', '0', '0', '0', 'rslidar_tail', ns_imu_rear_frame],
-    #     output='screen'
-    # )
-    # ld.add_action(rslidar_tail_to_imu_rear_tf)
-
-    static_transform_world_to_base_footprint = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='static_transform_world_to_base_footprint',
-        parameters=[{'use_sim_time': DEFAULT_USE_SIM_TIME}],
-        arguments=['0.0', '0.0', '0.0', '0.0', '0.0', '0.0', ns_world_frame, ns_base_frame],
-        remappings=[('/tf_static', '/tf_static')],
-        output='screen'
-    )
-    ld.add_action(static_transform_world_to_base_footprint)
-
-
-
-
-
-
-
     front_lidar_node = Node(
         package='super_lio',
         executable='super_lio_node',
@@ -192,7 +83,7 @@ def generate_launch_description():
         parameters=[
             front_config_yaml,
             {'use_sim_time': DEFAULT_USE_SIM_TIME},
-            {'lio.output.tf_base_footprint_frame': ns_base_frame},
+            {'lio.output.tf_base_footprint_frame': ns_base_footprint_frame},
             {'lio.output.world_frame': ns_world_frame},
             {'lio.output.imu_frame': ns_imu_frame},
         ],
@@ -219,7 +110,7 @@ def generate_launch_description():
         parameters=[
             rear_config_yaml,
             {'use_sim_time': DEFAULT_USE_SIM_TIME},
-            {'lio.output.tf_base_footprint_frame': ns_base_frame},
+            {'lio.output.tf_base_footprint_frame': ns_base_footprint_frame},
             {'lio.output.world_frame': ns_world_frame},
             {'lio.output.imu_frame': ns_imu_frame},
         ],
@@ -243,21 +134,21 @@ def generate_launch_description():
         executable='pointcloud_to_laserscan_node',
         name='front_pointcloud_to_laserscan',
         remappings=[
-            ('cloud_in', 'front_lidar/body/cloud'),
+            ('cloud_in', 'front_lidar/cloud_world'),
             ('scan', 'scan_front'),
         ],
         parameters=[
             {'use_sim_time': DEFAULT_USE_SIM_TIME},
-            {'target_frame': ns_base_frame},
+            {'target_frame': ns_base_footprint_frame},
             {'transform_tolerance': 0.03},
             {'min_height': -0.3},
-            {'max_height': 0.5},
+            {'max_height': 1.5},
             {'angle_min': -3.14159},
             {'angle_max': 3.14159},
             {'angle_increment': 0.00872},
             {'scan_time': 0.1},
             {'range_min': 0.1},
-            {'range_max': 50.0},
+            {'range_max': 200.0},
             {'use_inf': True},
             {'inf_epsilon': 1.0},
         ],
@@ -270,21 +161,21 @@ def generate_launch_description():
         executable='pointcloud_to_laserscan_node',
         name='rear_pointcloud_to_laserscan',
         remappings=[
-            ('cloud_in', 'rear_lidar/body/cloud'),
+            ('cloud_in', 'rear_lidar/cloud_world'),
             ('scan', 'scan_rear'),
         ],
         parameters=[
             {'use_sim_time': DEFAULT_USE_SIM_TIME},
-            {'target_frame': ns_base_frame},
+            {'target_frame': ns_base_footprint_frame},
             {'transform_tolerance': 0.03},
             {'min_height': -0.3},
-            {'max_height': 0.5},
+            {'max_height': 1.5},
             {'angle_min': -3.14159},
             {'angle_max': 3.14159},
             {'angle_increment': 0.00872},
             {'scan_time': 0.1},
             {'range_min': 0.1},
-            {'range_max': 50.0},
+            {'range_max': 200.0},
             {'use_inf': True},
             {'inf_epsilon': 1.0},
         ],
@@ -301,5 +192,98 @@ def generate_launch_description():
         prefix=['taskset -c 4,5'],
     )
     ld.add_action(scan_merger)
+
+    static_transform_map_to_odom = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='static_transform_map_to_odom',
+        parameters=[{'use_sim_time': DEFAULT_USE_SIM_TIME}],
+        arguments=['0.0', '0.0', '0.0', '0.0', '0.0', '0.0', ns_map_frame, ns_odom_frame],
+        output='screen'
+    )
+    ld.add_action(static_transform_map_to_odom)
+
+    static_transform_odom_to_world = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='static_transform_odom_to_world',
+        parameters=[{'use_sim_time': DEFAULT_USE_SIM_TIME}],
+        arguments=['0.36615', '0.0', '0.0', '0.0', str(deg_to_rad(90)), '0.0', ns_odom_frame, ns_world_frame],
+        output='screen'
+    )
+    ld.add_action(static_transform_odom_to_world)
+
+    # static_transform_odom_to_world_rear = Node(
+    #     package='tf2_ros',
+    #     executable='static_transform_publisher',
+    #     name='static_transform_odom_to_world_rear',
+    #     parameters=[{'use_sim_time': DEFAULT_USE_SIM_TIME}],
+    #     arguments=['-0.36615', '0.0', '0.0', '0.0', str(deg_to_rad(90)), str(deg_to_rad(180)), ns_odom_frame, ns_world_rear_frame],
+    #     output='screen'
+    # )
+    # ld.add_action(static_transform_odom_to_world_rear)
+
+    static_transform_world_to_imu = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='static_transform_world_to_imu',
+        parameters=[{'use_sim_time': DEFAULT_USE_SIM_TIME}],
+        arguments=['0.0', '0.0', '0.0', '0.0', '0.0', '0.0', ns_world_frame, ns_imu_frame],
+        output='screen'
+    )
+    ld.add_action(static_transform_world_to_imu)
+
+    imu_to_rslidar_head_tf = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='imu_to_rslidar_head_tf',
+        parameters=[{'use_sim_time': DEFAULT_USE_SIM_TIME}],
+        arguments=['0.0', '0', '0.0', '0', '0.0', '0', ns_imu_frame, 'rslidar_head'],
+        output='screen'
+    )
+    ld.add_action(imu_to_rslidar_head_tf)
+
+    # rslidar_head -> base_link (机器人基坐标系到雷达坐标系的静态变换)
+    rslidar_head_to_base_link_tf = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='rslidar_head_to_base_link_tf',
+        parameters=[{'use_sim_time': DEFAULT_USE_SIM_TIME}],
+        arguments=['0', '0', '-0.36615', '0.0', str(deg_to_rad(-90)), '0', 'rslidar_head', ns_base_link_frame],
+        output='screen'
+    )
+    ld.add_action(rslidar_head_to_base_link_tf)
+
+    # rslidar_head -> rslidar_tail (雷达到雷达的静态变换)
+    rslidar_head_to_rslidar_tail_tf = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='rslidar_head_to_rslidar_tail_tf',
+        parameters=[{'use_sim_time': DEFAULT_USE_SIM_TIME}],
+        arguments=['0', '0', '-0.7323', str(deg_to_rad(180)), str(deg_to_rad(180)), str(deg_to_rad(0)), 'rslidar_head', 'rslidar_tail'],
+        output='screen'
+    )
+    ld.add_action(rslidar_head_to_rslidar_tail_tf)
+
+    # # rslidar_head -> rslidar_tail (雷达到雷达的静态变换)
+    # rslidar_tail_to_imu_rear_tf = Node(
+    #     package='tf2_ros',
+    #     executable='static_transform_publisher',
+    #     name='rslidar_tail_to_imu_rear_tf',
+    #     parameters=[{'use_sim_time': DEFAULT_USE_SIM_TIME}],
+    #     arguments=['0', '0', '0', '0', '0', '0', 'rslidar_tail', ns_imu_rear_frame],
+    #     output='screen'
+    # )
+    # ld.add_action(rslidar_tail_to_imu_rear_tf)
+
+    static_transform_base_link_to_base_footprint = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='static_transform_base_link_to_base_footprint',
+        parameters=[{'use_sim_time': DEFAULT_USE_SIM_TIME}],
+        arguments=['0.0', '0.0', '0.0', '0.0', '0.0', '0.0', ns_base_link_frame, ns_base_footprint_frame],
+        output='screen'
+    )
+    ld.add_action(static_transform_base_link_to_base_footprint)
 
     return ld
