@@ -134,7 +134,7 @@ def generate_launch_description():
         executable='pointcloud_to_laserscan_node',
         name='front_pointcloud_to_laserscan',
         remappings=[
-            ('cloud_in', 'front_lidar/cloud_world'),
+            ('cloud_in', 'lio/cloud_world'),
             ('scan', 'scan_front'),
         ],
         parameters=[
