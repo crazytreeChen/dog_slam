@@ -98,6 +98,13 @@ LIO_TOPIC_CONFIGS = {
         'target_frame': 'base_footprint',
         'map_frame': 'map'
     },
+    'super_lio_zg': {
+        'pointcloud_topic': 'lio/body/cloud',
+        'odom_topic': 'lio/odom',
+        'octomap_topic': 'lio/cloud_world',
+        'target_frame': 'base_link',
+        'map_frame': 'map'
+    },
     'super_lio_gazebo': {
         'pointcloud_topic': 'livox/lidar',
         'odom_topic': 'lio/odom',
@@ -179,7 +186,7 @@ def generate_launch_description():
     
     # 根据SLAM_ALGORITHM参数选择启动不同的SLAM算法
     # 获取当前选择的LIO算法的话题配置
-    lio_config = LIO_TOPIC_CONFIGS.get(SLAM_ALGORITHM, LIO_TOPIC_CONFIGS['fast_lio'])
+    lio_config = LIO_TOPIC_CONFIGS.get(SLAM_ALGORITHM, LIO_TOPIC_CONFIGS['super_lio'])
     
     # FAST-LIO
     fast_lio_launch = IncludeLaunchDescription(
@@ -328,7 +335,7 @@ def generate_launch_description():
             'use_inf': True,
             'inf_epsilon': 1.0,
             'use_sim_time': use_sim_time,
-            'target_frame': ns_base_link_frame,
+            'target_frame': [ns, "/", lio_config['target_frame']],
             'concurrency_level': 1,
         }],
         output='screen',
