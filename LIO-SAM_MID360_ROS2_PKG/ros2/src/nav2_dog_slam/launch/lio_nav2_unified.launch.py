@@ -175,10 +175,10 @@ def generate_launch_description():
                 param_rewrites={
                     'global_frame_id': [ns, '/map'],
                     'odom_frame_id': [ns, '/odom'],
-                    'base_frame_id': [ns, '/base_footprint'],
+                    'base_frame_id': [ns, '/base_link'],
                     'map_frame': [ns, '/map'], 
                     'odom_frame': [ns, '/odom'],
-                    'base_frame': [ns, '/base_footprint'],
+                    'base_frame': [ns, '/base_link'],
                     'topic': [ns, '/scan']
                 },
                 convert_types=True),
