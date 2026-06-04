@@ -32,9 +32,9 @@ ps -ef | awk '/rosbridge/ {print $2}' | xargs -r kill
 ps -ef | awk '/publisher/ {print $2}' | xargs -r kill
 ps -ef | awk '/rclcpp/ {print $2}' | xargs -r kill
 
-echo "sleep 10"
+echo "sleep 3"
 
-sleep 10
+sleep 3
 
 echo "强制退出本地服务"
 
@@ -59,5 +59,5 @@ ps -ef | awk '/rclcpp/ {print $2}' | xargs -r kill -9
 # ros2 daemon stop 
 # ros2 daemon start
 
-echo "sleep 10"
-sleep 10
+echo "sleep 3"
+sleep 3

@@ -20,7 +20,7 @@ class UssRepublisher(Node):
         # 声明参数
         self.declare_parameter('min_range', 0.02)      # 最小检测距离 (m)
         self.declare_parameter('max_range', 2.0)       # 最大检测距离 (m)
-        self.declare_parameter('field_of_view', 0.5)   # 视野角度 (弧度)
+        self.declare_parameter('field_of_view', 0.2)   # 视野角度 (弧度)
         self.declare_parameter('radiation_type', 0)    # 辐射类型: 0=ultrasound, 1=infrared
         self.declare_parameter('namespace', '/rkbot')   # 目标命名空间
 

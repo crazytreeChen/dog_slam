@@ -193,10 +193,10 @@ def generate_launch_description():
     )
     ld.add_action(scan_merger)
 
-     # USS republisher - 修复Range消息的min_range/max_range并重发到/rkbot命名空间
+    # USS republisher - 修复Range消息的min_range/max_range并重发到/rkbot命名空间
     pkg_share = get_package_share_directory('zg_double_lidar')
     uss_republisher = ExecuteProcess(
-        cmd=['python3', os.path.join(pkg_share, 'lib', 'zg_double_lidar', 'uss_republisher.py')],
+        cmd=['python3', os.path.join(pkg_share, 'scripts', 'uss_republisher.py')],
         output='screen',
     )
     ld.add_action(uss_republisher)
