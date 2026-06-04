@@ -22,10 +22,6 @@ controller_server:
     # 控制器运行参数
     # 控制器运行频率（Hz）
     controller_frequency: 20.0
-    # 代价图完全更新后计算控制指令的超时时间（s）
-    costmap_update_timeout: 0.3
-    # 为控制器服务器添加软实时优先级，将控制器执行线程设为更高优先级（90），确保调度截止时间。需在 /etc/security/limits.conf 中设置 <username> softrtprio 99
-    use_realtime_priority: false
     # 目标退出时是否发布零速度命令，用于在目标终止时停止机器人
     publish_zero_velocity: true
 
@@ -42,29 +38,11 @@ controller_server:
     failure_tolerance: 3.0
     # 获取瞬时速度测量的里程计话题
     odom_topic: "/rkbot/lio/odom"
-    # 缓冲里程计命令以估计机器人速度的时间（s）
-    odom_duration: 0.3
 
     # 速度限制话题
     # 要订阅的速度限制话题名称，可由 Speed Filter 发布，也可由外部服务器提供
     speed_limit_topic: "/speed_limit"
 
-    # 路径搜索窗口
-    # 搜索算法沿路径向前查找最近点的距离（m）
-    search_window: 2.0
-
-    # 速度命令类型
-    # 是否使用 geometry_msgs::msg::TwistStamped（true）或 Twist（false）。Kilted 及更新版本默认 true，Jazzy 及更旧版本默认 false
-    enable_stamped_cmd_vel: true
-
-    # 系统配置
-    # 服务和动作的内省模式，可选 "disabled"、"metadata"、"contents"
-    introspection_mode: "disabled"
-    # 生命周期节点 bond 机制的发布周期（/bond 话题），<=0.0 禁用
-    bond_heartbeat_period: 0.25
-    # 是否允许通过参数化值覆盖 QoS 配置
-    allow_parameter_qos_overrides: true
-    
     # 插件配置
     # 映射的控制器插件名称列表，用于处理请求和参数
     controller_plugins: ["FollowPath"]
@@ -72,8 +50,6 @@ controller_server:
     goal_checker_plugins: ["goal_checker"]
     # 进度检查器插件名（Humble 及更旧版本使用单字符串插件）
     progress_checker_plugin: "progress_checker"
-    # 映射的路径处理器插件名称，用于处理规划器路径
-    path_handler_plugins: ["PathHandler"]
     
     # 进度检查器参数 - 配合新行为树优化
     progress_checker:
@@ -89,20 +65,15 @@ controller_server:
       # 目标检查器插件类型
       plugin: "nav2_controller::StoppedGoalChecker"
       # 到达目标的 XY 位置容差（m）
-      xy_goal_tolerance: 0.3
+      xy_goal_tolerance: 0.5
       # 到达目标的朝向容差（rad）
-      yaw_goal_tolerance: 0.2
+      yaw_goal_tolerance: 0.3
       # 判定为停止的线速度阈值（m/s）
       trans_stopped_velocity: 1.5
       # 判定为停止的角速度阈值（rad/s）
       rot_stopped_velocity: 1.5
       # 是否启用有状态检查（到达后不再重新评估）
       stateful: true
-
-    # 路径处理器参数
-    PathHandler:
-      # 路径处理器插件类型
-      plugin: "nav2_controller::FeasiblePathHandler"
 
     # MPPI控制器参数 - 全向移动配置（实时性优化）
     FollowPath:
@@ -114,7 +85,7 @@ controller_server:
       # 每个时间步的时长（s），time_steps * model_dt = 预测时域
       model_dt: 0.1
       # 每轮采样的候选轨迹数量
-      batch_size: 1000
+      batch_size: 500
       # TF 变换容差（s）
       transform_tolerance: 0.5
 
@@ -142,31 +113,11 @@ controller_server:
       # 重置优化器的非活跃超时时间（s），Humble only
       reset_period: 0.5
 
-      # 加速度限制
-      # 最大前向加速度（m/s^2）
-      ax_max: 1.0
-      # 最大减速度（m/s^2）
-      ax_min: -1.0
-      # 最大横向加速度（m/s^2，Omni 模型有效）
-      ay_max: 0.5
-      # 最小横向加速度（m/s^2，Omni 模型有效）
-      ay_min: -0.5
-      # 最大角加速度（rad/s^2）
-      az_max: 1.5
-
-      # 滤波器与控制模式
-      # Savitzky-Golay 滤波器阶数（1 或 2），用于平滑控制序列
-      sgf_order: 2
-      # 是否使用开环控制（false=闭环，使用里程计反馈）
-      open_loop: false
-
       # 可视化与调试
       # 是否发布调试轨迹可视化
       visualize: false
       # 是否发布最优轨迹（含位姿、速度、时间戳）
       publish_optimal_trajectory: false
-      # 可视化指定评价器的代价（0=全部代价，1-N=对应评价器）
-      critic_index_to_visualize: 0
       # 是否每轮重新生成噪声（false=复用初始噪声，减少计算抖动）
       regenerate_noises: false
 
@@ -187,10 +138,10 @@ controller_server:
       gamma: 0.015
       # MPPI 迭代次数，建议保持 1 并增大 batch_size
       iteration_count: 1
-      # 从最近路径点向前裁剪路径的距离（m），应与预测时域成比例
-      prune_distance: 2.0
       # 搜索路径最近点时沿路径向前搜索的最大距离（m）
       max_robot_pose_search_dist: 2.0
+      # 从最近路径点向前裁剪路径的距离（m），应与预测时域成比例
+      prune_distance: 2.0
       # 失败后重试次数（软重置）
       retry_attempt_limit: 3
   
@@ -224,19 +175,15 @@ controller_server:
         # 代价幂次
         cost_power: 1
         # 近碰撞区域惩罚代价（>= near_collision_cost 时触发）
-        critical_cost: 300.0
-        # 近碰撞代价阈值
-        near_collision_cost: 253
+        critical_cost: 250.0
         # 真实碰撞代价值
         collision_cost: 254.0
         # 是否使用完整 footprint 碰撞检测（false=使用圆心点）
         consider_footprint: false
         # 接近目标时停止避障偏好项的距离（m）
-        near_goal_distance: 0.5
+        near_goal_distance: 1.0
         # 膨胀层名称（为空则使用最后一个膨胀层）
-        inflation_layer_name: ""
-        # 轨迹点采样步长
-        trajectory_point_step: 2
+        inflation_layer_name: "inflation_layer_local"
 
       # =====================================================
       # ObstaclesCritic - 障碍物评价器
@@ -248,6 +195,8 @@ controller_server:
         enabled: true
         # 代价幂次
         cost_power: 2
+        # 评价器权重
+        cost_weight: 10.0
         # 是否使用 SE2 footprint 碰撞检测
         consider_footprint: true
         # 近碰撞区域（collision_margin_distance 内）的惩罚权重
@@ -258,10 +207,10 @@ controller_server:
         collision_cost: 254.0
         # 碰撞临界距离（m），类似 footprint 膨胀
         collision_margin_distance: 0.2
+        # 近碰撞代价阈值
+        critical_cost: 250.0
         # 接近目标时停止避障偏好项的距离（m），使机器人可平滑收敛到目标
         near_goal_distance: 1.0
-        # 膨胀层名称（为空则使用最后一个膨胀层）
-        inflation_layer_name: "inflation_layer_local"
         # 障碍物周围膨胀半径（m），应与代价图膨胀层一致，Humble only
         inflation_radius: 0.5
         # 跨膨胀半径的指数衰减因子，应与代价图膨胀层一致，Humble only
@@ -284,7 +233,7 @@ controller_server:
         # 从最远路径点算起的偏移量
         offset_from_furthest: 2
         # 距目标距离小于此值时停止路径跟随，交予目标评价器
-        threshold_to_consider: 1.0
+        threshold_to_consider: 1.5
 
       # =====================================================
       # PathAlignCritic - 路径对齐评价器
@@ -325,8 +274,8 @@ controller_server:
         cost_weight: 10.0
         # 代价幂次
         cost_power: 1
-        # 模式：0=前进偏好, 1=无方向偏好, 2=考虑可行路径朝向
-        mode: 0
+        # 前向偏好（true=偏好前进，false=无偏好）
+        forward_preference: true
         # 从最远路径点算起的偏移量
         offset_from_furthest: 2
         # 距目标距离小于此值时停止路径跟随
@@ -406,8 +355,6 @@ controller_server:
         cost_power: 1
         # 距目标小于此值时开始考虑目标朝向代价（m）
         threshold_to_consider: 1.0
-        # 是否启用对称目标朝向接受。启用时评价器偏好以目标朝向或目标朝向+180°接近目标的轨迹，适用于两端都有传感器的对称机器人
-        symmetric_yaw_tolerance: false
 
 
 # =============================================================================
@@ -424,15 +371,13 @@ velocity_smoother:
     # 是否使用仿真时间
     use_sim_time: false
 
-    # 平滑器核心参数
+    #平滑器核心参数
     # 使用最后收到的速度命令按速度、加速度和死区约束进行平滑的频率（Hz）。若设为局部轨迹规划器频率，应平滑加速度约束；若设得更高，将插值并生成平滑命令
     smoothing_frequency: 40.0
     # 是否按比例调整速度其他分量以匹配加速度限制导致的变化，使所有分量沿同一方向调整，但仍强制执行加速度限制
     scale_velocities: false
     # 反馈类型：OPEN_LOOP 使用上次命令速度作为当前速度；CLOSED_LOOP 使用 odom 话题里程计估计当前速度。闭环模式下里程计需高频率、低延迟
     feedback: "OPEN_LOOP"
-    # 为速度平滑器添加软实时优先级，将执行线程设为更高优先级（90），确保调度截止时间
-    use_realtime_priority: false
 
     # 里程计配置
     # 闭环模式下查找里程计的话题
@@ -448,7 +393,7 @@ velocity_smoother:
     
     # 加速度限制
     # 各轴最大加速度 [ax, ay, atheta]
-    max_accel: [5.0, 2.0, 0.5]
+    max_accel: [5.0, 2.0, 1.0]
     # 各轴最大减速度 [ax, ay, atheta]。此为有符号值，通常应为负数
     max_decel: [-5.0, -2.0, -2.0]
     
@@ -457,32 +402,6 @@ velocity_smoother:
     deadband_velocity: [0.1, 0.1, 0.1]
     # 速度超时时间（s），超过此时间无新命令则发送归零 Twist 命令并停止发布
     velocity_timeout: 1.0
-
-    # 速度命令类型
-    # 是否使用 geometry_msgs::msg::TwistStamped（true）或 Twist（false）。Kilted 及更新版本默认 true，Jazzy 及更旧版本默认 false
-    enable_stamped_cmd_vel: true
-    # 是否对平滑后的 TwistStamped cmd_vel 消息的时间戳进行插值（Jazzy 补丁版本中可用）
-    stamp_smoothed_velocity_with_smoothing_time: false
-
-    # 系统配置
-    # 生命周期节点 bond 机制的发布周期（/bond 话题），<=0.0 禁用
-    bond_heartbeat_period: 0.25
-    # 是否允许通过参数化值覆盖 QoS 配置
-    allow_parameter_qos_overrides: true
-    
-    # qos_overrides:
-    #   /tf:
-    #     subscription:
-    #       depth: 1
-    #       durability: "volatile"
-    #       history: "keep_last"
-    #       reliability: "best_effort"
-    #   /tf_static:
-    #     subscription:
-    #       depth: 1
-    #       durability: "transient_local"
-    #       history: "keep_last"
-    #       reliability: "reliable"
 
 
 # =============================================================================
@@ -497,20 +416,8 @@ planner_server:
     use_sim_time: false
     # 期望规划频率（Hz），若当前频率低于此值则显示警告
     expected_planner_frequency: 0.2
-    # 规划请求前代价图完全更新的超时时间（s）
-    costmap_update_timeout: 1.0
-    # 是否允许规划器在穿过位姿规划时，遇到障碍物时输出部分路径。默认情况下规划失败并中止规划请求
-    allow_partial_planning: false
     # 映射的规划器插件名称列表，用于参数和处理请求
     planner_plugins: ["LatticeBased", "GridBased", "HybridBased"]
-
-    # 系统配置
-    # 服务和动作的内省模式，可选 "disabled"、"metadata"、"contents"
-    introspection_mode: "disabled"
-    # 生命周期节点 bond 机制的发布周期（/bond 话题），<=0.0 禁用
-    bond_heartbeat_period: 0.25
-    # 是否允许通过参数化值覆盖 QoS 配置
-    allow_parameter_qos_overrides: true
 
     LatticeBased:
       # 规划器插件类型
@@ -525,17 +432,11 @@ planner_server:
       max_on_approach_iterations: 100000
       # 规划器最大规划时间（s）
       max_planning_time: 10.0
-      # 检查目标取消或规划超时的迭代间隔
-      terminal_checking_interval: 5000
       # 尝试解析展开的频率比例，值越大越频繁尝试直接用曲线到达目标
       analytic_expansion_ratio: 3.5
       # 解析展开的最大长度（m），防止从远处抄近路穿过高代价区域
       analytic_expansion_max_length: 3.0
       # 解析展开路径中允许的最大单点代价值，超过则认为无效（接近目标时除外）
-      analytic_expansion_max_cost: 200.0
-      # 在关键距离内是否覆盖最大代价限制（接近目标时允许高代价展开）
-      analytic_expansion_max_cost_override: false
-      # 倒车搜索的惩罚系数（仅 allow_reverse_expansion=true 时有效）
       reverse_penalty: 1.0
       # 切换方向（如左转→右转）的惩罚系数
       change_penalty: 0.3
@@ -554,7 +455,7 @@ planner_server:
       # 缓存障碍物距离启发式，加速同一目标的重规划（静态地图时效果显著）
       cache_obstacle_heuristic: true
       # 是否允许使用倒车原语进行搜索
-      allow_reverse_expansion: false
+      allow_reverse_expansion: true
       # 下采样障碍物启发式代价图以加速搜索（略微降低路径质量）
       downsample_obstacle_heuristic: true
       # 使用二次代价而非线性代价，加速搜索但路径更接近障碍物
@@ -588,8 +489,6 @@ planner_server:
       max_on_approach_iterations: 1000
       # 规划器最大规划时间（s）
       max_planning_time: 2.0
-      # 检查目标取消或规划超时的迭代间隔
-      terminal_checking_interval: 5000
       # 代价乘数，越大越倾向于走低代价区域（0.0=忽略代价仅做二值搜索）
       cost_travel_multiplier: 2.0
       # 是否将路径终点朝向设为接近方向（false=使用请求的目标朝向）
@@ -629,8 +528,6 @@ planner_server:
       max_iterations: 8000000
       # 进入容差范围后继续尝试精确匹配的最大迭代次数
       max_on_approach_iterations: 100000
-      # 检查目标取消或规划超时的迭代间隔
-      terminal_checking_interval: 5000
       # 车辆最小转弯半径（m）
       minimum_turning_radius: 0.05
       # 搜索用运动模型：DUBIN（仅前进）或 REEDS_SHEPP（可倒车）
@@ -648,9 +545,6 @@ planner_server:
       # 解析展开的最大长度（m），防止从远处抄近路穿过高代价区域
       analytic_expansion_max_length: 3.0
       # 解析展开路径中允许的最大单点代价值，超过则认为无效（接近目标时除外）
-      analytic_expansion_max_cost: 200.0
-      # 在关键距离内是否覆盖最大代价限制（接近目标时允许高代价展开）
-      analytic_expansion_max_cost_override: false
       # Dubin/Reeds-Sheep 距离窗口缓存大小（m）
       lookup_table_size: 20.0
       # 缓存障碍物距离启发式，加速同一目标的重规划（静态地图时效果显著）
@@ -714,10 +608,10 @@ local_costmap:
       publish_frequency: 10.0
       # TF 变换容差（s）
       transform_tolerance: 0.5
-      # 等待从 robot_base_frame 到 global_frame 的变换可用的时间（s），超时则中止配置阶段
-      initial_transform_timeout: 60.0
       
       # 地图参数
+      # 地图话题
+      map_topic: "/rkbot/map"
       # 是否使用滚动窗口（代价图跟随机器人移动，保持以机器人为中心的局部视图）
       rolling_window: true
       # 代价图宽度（m）
@@ -730,8 +624,6 @@ local_costmap:
       origin_x: -6.0
       # 代价图 Y 原点相对于高度的偏移（m）
       origin_y: -6.0
-      # 用于可视化的地图高度，帮助避免 RViz 闪烁问题（如设为 -0.008）
-      map_vis_z: 0.0
 
       # 足迹参数
       # 有序的足迹点集，以字符串形式传入，必须为闭合多边形。可通过 ~/footprint 话题动态调整
@@ -740,8 +632,6 @@ local_costmap:
       footprint_padding: 0.05
       # 若未提供足迹坐标，则使用此半径（m）。设置此参数时 isPathValid 使用圆形碰撞检查
       robot_radius: 0.35
-      # 是否订阅 PolygonStamped 足迹消息（而非 Polygon），允许足迹包含时间戳和帧信息
-      subscribe_to_stamped_footprint: false
 
       # 代价图行为参数
       # 是否每次更新发送完整代价图（而非仅增量更新）
@@ -754,20 +644,8 @@ local_costmap:
       unknown_cost_value: 255
       # 占位栅格地图中被视为致命障碍物的最小代价值
       lethal_cost_threshold: 100
-      # 代价图转换操作中表示 INSCRIBED_INFLATED_OBSTACLE 的占位栅格值
-      inscribed_obstacle_cost_value: 99
       # 组合多个代价图层时是否使用最大代价。true 保留最高代价确保障碍物不被覆盖，false 新层可能覆盖之前的代价值
       use_maximum: false
-
-      # 话题
-      # 地图话题
-      map_topic: "map"
-
-      # 系统配置
-      # 服务和动作的内省模式，可选 "disabled"、"metadata"、"contents"
-      introspection_mode: "disabled"
-      # 是否允许通过参数化值覆盖 QoS 配置
-      allow_parameter_qos_overrides: true
 
       # 插件配置
       # "voxel_layer", "stvl_layer",  # 映射的插件名称列表，用于参数命名空间和名称
@@ -841,8 +719,6 @@ local_costmap:
         max_obstacle_height: 100.0
         # 添加到占位栅格的最小高度（m）
         min_obstacle_height: -100.0
-        # tf2_ros::MessageFilter 的容差（s）
-        tf_filter_tolerance: 0.05
         
         scan_rear:
           # 数据话题。相对话题相对于节点父命名空间
@@ -924,8 +800,6 @@ local_costmap:
         inflate_unknown: false
         # 是否在未知单元格周围膨胀
         inflate_around_unknown: false
-        # 启用 OpenMP 时用于膨胀计算的线程数，-1 为自动检测（使用一半可用 CPU 核心），正整数指定显式线程数
-        num_threads: -1
       
 
       # STVL (Spatio-Temporal Voxel Layer) - 3D点云障碍物层
@@ -1025,8 +899,6 @@ global_costmap:
       publish_frequency: 0.1
       # TF 变换容差（s）
       transform_tolerance: 0.5
-      # 等待从 robot_base_frame 到 global_frame 的变换可用的时间（s），超时则中止配置阶段
-      initial_transform_timeout: 60.0
       
       # 地图参数
       # 是否使用滚动窗口。全局代价图通常为 false，使用静态地图的完整范围
@@ -1064,9 +936,7 @@ global_costmap:
       # 追踪未知空间时未知空间的代价值
       unknown_cost_value: 255
       # 占位栅格地图中被视为致命障碍物的最小代价值
-      lethal_cost_threshold: 200
-      # 代价图转换操作中表示 INSCRIBED_INFLATED_OBSTACLE 的占位栅格值
-      inscribed_obstacle_cost_value: 99
+      lethal_cost_threshold: 250
       # 组合多个代价图层时是否使用最大代价
       use_maximum: false
 
@@ -1074,12 +944,6 @@ global_costmap:
       # 静态地图话题
       map_topic: "map"
 
-      # 系统配置
-      # 服务和动作的内省模式
-      introspection_mode: "disabled"
-      # 是否允许通过参数化值覆盖 QoS 配置
-      allow_parameter_qos_overrides: true
-    
       # 插件配置
       # 映射的插件名称列表
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
@@ -1101,6 +965,7 @@ global_costmap:
         subscribe_to_updates: true
         # 使用 TRANSIENT_LOCAL 持久化进行地图订阅，使新订阅者能接收之前发布的地图
         map_subscribe_transient_local: true
+        footprint_clearing_enabled: true  # 新增参数
 
       # =====================================================
       # 障碍物层参数
@@ -1116,12 +981,6 @@ global_costmap:
         combination_method: 1
         # 是否清除机器人足迹下的占用单元格
         footprint_clearing_enabled: true
-        # 添加到占位栅格的最大高度（m）
-        max_obstacle_height: 2.0
-        # 添加到占位栅格的最小高度（m）
-        min_obstacle_height: -0.5
-        # tf2_ros::MessageFilter 的容差（s）
-        tf_filter_tolerance: 0.05
 
         scan:
           # 数据话题
@@ -1172,8 +1031,6 @@ global_costmap:
         inflate_unknown: true
         # 是否在未知单元格周围膨胀
         inflate_around_unknown: true
-        # 用于膨胀计算的线程数，-1 为自动检测
-        num_threads: -1
 
 # =============================================================================
 # Lifecycle Manager Configuration - 生命周期管理器
@@ -1229,28 +1086,28 @@ amcl:
     scan_topic: /rkbot/scan
     # 要订阅的地图话题
     map_topic: "map"
-    # 里程计话题
-    odom_topic: /rkbot/lio/odom
+    # TF 变换容差（s）
+    transform_tolerance: 0.5
+    # 设为 false 可阻止 AMCL 发布 global_frame 与 odom_frame 之间的变换
+    tf_broadcast: true
 
     # 粒子滤波器参数
     # 允许的最小粒子数
-    min_particles: 800
+    min_particles: 400
     # 允许的最大粒子数
     max_particles: 4000
     # 粒子滤波器种群误差
     pf_err: 0.05
     # 粒子滤波器种群密度，0.99 对应 99% 分位数
     pf_z: 0.99
-    # 粒子滤波器随机数种子，>=0 使用给定值（可复现），<0 使用时间种子（默认）
-    random_seed: -1
     # 重采样前所需的滤波器更新次数
-    resample_interval: 3
+    resample_interval: 1
 
     # 更新阈值 - 执行滤波器更新前需要的最小平移/旋转运动量
     # 执行滤波器更新前所需的最小平移运动量（m）
-    update_min_d: 0.05
+    update_min_d: 0.2
     # 执行滤波器更新前所需的最小旋转运动量（rad）
-    update_min_a: 0.05
+    update_min_a: 0.2
 
     # 恢复参数 - 用于决定何时通过添加随机位姿进行恢复的指数衰减率
     # 慢速平均权重滤波器的指数衰减率，用于决定何时通过添加随机位姿恢复。合理值约为 0.001
@@ -1278,11 +1135,16 @@ amcl:
     # 使 AMCL 从 initial_pose 参数设置初始位姿，而非等待 initial_pose 消息
     set_initial_pose: true
     # 要求 AMCL 在重置时必须通过话题或 initial_pose 参数提供初始位姿。否则 AMCL 默认使用上次已知位姿初始化
-    always_reset_initial_pose: false
+    always_reset_initial_pose: true
     # 是否仅接受第一张地图。设为 false 允许 AMCL 在 map_topic 上多次接收地图（使用 map_server 的 LoadMap 服务时特别有用）
     first_map_only: false
     # 存储最后估计位姿和协方差到参数服务器的最大频率（Hz），-1.0 禁用。后续运行将使用此保存的位姿初始化滤波器
     save_pose_rate: 0.3
+    # initial_pose:
+    #   x: 29.925  
+    #   y: 15.184 
+    #   z: 0.5
+    #   yaw: -1.396 
 
     # 激光雷达配置
     # 要考虑的最小扫描距离，-1.0 使用激光雷达报告的最小距离
@@ -1291,20 +1153,6 @@ amcl:
     laser_max_range: 100.0
     # 每次扫描中用于更新滤波器的均匀分布光束数量
     max_beams: 180
-
-    # TF 相关
-    # TF 变换容差（s）
-    transform_tolerance: 0.5
-    # 设为 false 可阻止 AMCL 发布 global_frame 与 odom_frame 之间的变换
-    tf_broadcast: true
-
-    # 系统配置
-    # 服务和动作的内省模式，可选 "disabled"、"metadata"、"contents"
-    introspection_mode: "disabled"
-    # 生命周期节点 bond 机制的发布周期（/bond 话题），<=0.0 禁用
-    bond_heartbeat_period: 0.25
-    # 是否允许通过参数化值覆盖 QoS 配置
-    allow_parameter_qos_overrides: true
 
     # =============================================================================
     # BEAM MODEL 参数 - 适用于结构化环境
@@ -1345,7 +1193,7 @@ amcl:
     beam_skip_distance: 0.4
     # 跳过所需的光束比例阈值
     beam_skip_threshold: 0.3
-    # beam_skip_error_threshold: 0.9                                                          # 光束未匹配地图的比例超过此值后强制进行完整更新（由于收敛不良）
+    # beam_skip_error_threshold: 0.1                                                          # 光束未匹配地图的比例超过此值后强制进行完整更新（由于收敛不良）
 
 # =============================================================================
 # BT Navigator Configuration - 行为树导航器
@@ -1376,56 +1224,14 @@ bt_navigator:
     bt_loop_duration: 100
     # BT 动作节点等待动作服务器确认的默认超时时间（ms），可通过输入端口 "server_timeout" 覆盖
     default_server_timeout: 200
-    # BT 动作节点在节点停止时取消请求的默认超时时间（ms），可通过输入端口 "cancel_timeout" 覆盖
-    default_cancel_timeout: 50
     # 动作或服务 BT 节点在 BT 初始化时等待服务或动作服务器确认的默认超时时间（ms），可通过输入端口 "wait_for_service_timeout" 覆盖
     wait_for_service_timeout: 100
 
     # 行为树 XML 配置
     # NavigateToPose 的默认行为树 XML 文件路径
     default_nav_to_pose_bt_xml: "/home/ztl/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/nav2_dog_slam/config/navigate_to_pose_w_replanning_and_recovery.xml"
-    # default_nav_through_poses_bt_xml: "/opt/ros/humble/share/nav2_bt_navigator/behavior_trees/navigate_to_pose_w_replanning_and_recovery.xml"  # NavigateThroughPoses 的默认行为树 XML 文件路径
     # 是否始终加载请求的行为树 XML，无论当前活跃 XML 名称如何
     always_reload_bt_xml: false
-
-    # BT 日志与搜索目录
-    # 是否将行为树中的空闲（无状态变化）转换记录到 /behavior_tree_log 话题。false 时仅记录状态变化，减少噪音
-    bt_log_idle_transitions: true
-    # 托管行为树 XML 文件的目录列表，用于注册所有行为树和子树
-    bt_search_directories:
-      - $(find-pkg-share nav2_bt_navigator)/behavior_trees
-
-    # 导航器抢占
-    # 控制新导航目标是否可以抢占当前活跃导航器。false=新目标被拒绝，true=新目标通知活跃导航器停止后接管
-    allow_navigator_preemption: false
-    # 等待当前活跃导航器停止的最大时间（ms），仅 allow_navigator_preemption=true 时有效
-    navigator_preemption_timeout: 500
-
-    # 导航器插件列表
-    # 实现 nav2_core::BehaviorTreeNavigator 接口的导航器类型插件列表
-    navigators: ['navigate_to_pose', 'navigate_through_poses']
-
-    # NavigateToPose 导航器参数
-    navigate_to_pose:
-      # 导航器插件类型
-      plugin: "nav2_bt_navigator::NavigateToPoseNavigator"
-      # 是否为此导航器启用 Groot2 监控
-      enable_groot_monitoring: false
-      # Groot2 服务器端口（Groot2 中只需指定服务器端口，发布端口始终为 server_port+1）
-      groot_server_port: 1667
-      # 搜索算法沿路径向前查找最近点的距离（m）
-      search_window: 2.0
-
-    # NavigateThroughPoses 导航器参数
-    navigate_through_poses:
-      # 导航器插件类型
-      plugin: "nav2_bt_navigator::NavigateThroughPosesNavigator"
-      # 是否为此导航器启用 Groot2 监控
-      enable_groot_monitoring: false
-      # Groot2 服务器端口
-      groot_server_port: 1669
-      # 搜索算法沿路径向前查找最近点的距离（m）
-      search_window: 2.0
 
     # 黑板书变量 ID
     # 用于向行为树提供目标的黑板变量，应与 BT XML 文件端口匹配
@@ -1434,38 +1240,14 @@ bt_navigator:
     goals_blackboard_id: "goals"
     # 从行为树获取路径反馈的黑板变量
     path_blackboard_id: "path"
-    # 从行为树获取航点状态反馈/结果的黑板变量
-    waypoint_statuses_blackboard_id: "waypoint_statuses"
 
-    # 速度平滑与错误码
-    # 机器人速度平滑的持续时间（s）
-    filter_duration: 0.3
-    # Kilted 及更新版本：错误码名称前缀列表，将被追加 '_error_code' 和 '_error_msg' 后缀，用于终止导航器错误处理
-    error_code_name_prefixes:
-      - assisted_teleop
-      - backup
-      - compute_path
-      - dock_robot
-      - drive_on_heading
-      - follow_path
-      - nav_thru_poses
-      - nav_to_pose
-      - spin
-      - route
-      - undock_robot
-      - wait
+    # Groot监控
+    enable_groot_monitoring: false
+    groot_zmq_publisher_port: 1666
+    groot_zmq_server_port: 1667
 
-    # 系统配置
-    # 服务和动作的内省模式，可选 "disabled"、"metadata"、"contents"
-    introspection_mode: "disabled"
-    # 生命周期节点 bond 机制的发布周期（/bond 话题），<=0.0 禁用
-    bond_heartbeat_period: 0.25
-    # 是否允许通过参数化值覆盖 QoS 配置
-    allow_parameter_qos_overrides: true
-    
     # 插件库
-    # BT 节点插件共享库列表。所有 Nav2 BT 库已自动包含，此处仅需添加自定义插件
-    plugin_lib_names:
+    plugin_lib_names: 
       - nav2_compute_path_to_pose_action_bt_node
       - nav2_compute_path_through_poses_action_bt_node
       - nav2_smooth_path_action_bt_node
@@ -1528,6 +1310,8 @@ map_server:
   ros__parameters:
     # 地图坐标系
     frame_id: map
+    # 地图话题名称
+    topic_name: "map"
     # 是否使用仿真时间
     use_sim_time: false
     # 要加载的地图 YAML 文件路径，包含地图图像路径、分辨率、原点等信息
@@ -1555,14 +1339,6 @@ smoother_server:
     transform_tolerance: 0.5
     # 平滑器插件名称列表
     smoother_plugins: ["simple_smoother"]
-    
-    # 系统配置
-    # 服务和动作的内省模式
-    introspection_mode: "disabled"
-    # 生命周期节点 bond 机制的发布周期
-    bond_heartbeat_period: 0.25
-    # 是否允许通过参数化值覆盖 QoS 配置
-    allow_parameter_qos_overrides: true
     
     # =====================================================
     # Simple Smoother 参数
@@ -1604,17 +1380,11 @@ behavior_server:
 
     # 代价图与足迹话题
     # 本地代价图原始代价图话题，用于碰撞检查
-    local_costmap_topic: "local_costmap/costmap_raw"
+    costmap_topic: "local_costmap/costmap_raw"
     # 本地代价图帧中的足迹话题
-    local_footprint_topic: "local_costmap/published_footprint"
-    # 全局代价图原始代价图话题，用于碰撞检查
-    global_costmap_topic: "global_costmap/costmap_raw"
-    # 全局代价图帧中的足迹话题
-    global_footprint_topic: "global_costmap/published_footprint"
+    footprint_topic: "local_costmap/published_footprint"
 
     # 坐标系
-    # 本地参考坐标系
-    local_frame: "odom"
     # 全局参考坐标系
     global_frame: "map"
     # 机器人基坐标系
@@ -1628,18 +1398,6 @@ behavior_server:
     # 碰撞检测前向模拟时间（s）
     simulate_ahead_time: 0.0
 
-    # 系统配置
-    # 服务和动作的内省模式，可选 "disabled"、"metadata"、"contents"
-    introspection_mode: "disabled"
-    # 生命周期节点 bond 机制的发布周期（/bond 话题），<=0.0 禁用
-    bond_heartbeat_period: 0.25
-    # 是否允许通过参数化值覆盖 QoS 配置
-    allow_parameter_qos_overrides: true
-
-    # 速度命令类型（所有行为共用）
-    # 是否使用 geometry_msgs::msg::TwistStamped（true）或 Twist（false）。Kilted 及更新版本默认 true，Jazzy 及更旧版本默认 false
-    enable_stamped_cmd_vel: true
-    
     # =====================================================
     # Spin 旋转行为参数
     # =====================================================
@@ -1647,14 +1405,6 @@ behavior_server:
     spin:
       # 旋转行为插件
       plugin: "nav2_behaviors/Spin"
-      # 碰撞检测前向模拟时间（s）
-      simulate_ahead_time: 0.0
-      # 最大旋转速度（rad/s）
-      max_rotational_vel: 1.0
-      # 最小旋转速度（rad/s）
-      min_rotational_vel: 0.4
-      # 最大旋转加速度（rad/s²）
-      rotational_acc_lim: 3.2
 
     # =====================================================
     # BackUp 后退行为参数
@@ -1663,16 +1413,12 @@ behavior_server:
     backup:
       # 后退行为插件
       plugin: "nav2_behaviors/BackUp"
-      # 碰撞检测前向模拟时间（s）
-      simulate_ahead_time: 0.0
-
-    # BackUp 参数（带前缀放在顶层，不在 backup 命名空间内）
-    # 后退最大加速度限制（m/s²），限制后退时速度增加的速率
-    backup.acceleration_limit: 1.5
-    # 后退最大减速度限制（m/s²），负值，限制后退时速度降低的速率
-    backup.deceleration_limit: -2.0
-    # 后退最小移动速度（m/s），机器人行为的死区速度，正值
-    backup.minimum_speed: 0.15
+      # 后退最大加速度限制（m/s²），限制后退时速度增加的速率
+      acceleration_limit: 0.5
+      # 后退最大减速度限制（m/s²），负值，限制后退时速度降低的速率
+      deceleration_limit: -0.5
+      # 后退最小移动速度（m/s），机器人行为的死区速度，正值
+      minimum_speed: 0.15
 
     # =====================================================
     # DriveOnHeading 方向驱动行为参数
@@ -1681,16 +1427,12 @@ behavior_server:
     drive_on_heading:
       # 方向驱动行为插件
       plugin: "nav2_behaviors/DriveOnHeading"
-      # 碰撞检测前向模拟时间（s）
-      simulate_ahead_time: 0.0
-
-    # DriveOnHeading 参数（带前缀放在顶层）
-    # 方向驱动最大加速度限制（m/s²）
-    drive_on_heading.acceleration_limit: 2.5
-    # 方向驱动最大减速度限制（m/s²），负值
-    drive_on_heading.deceleration_limit: -2.5
-    # 方向驱动最小移动速度（m/s），机器人行为的死区速度，正值
-    drive_on_heading.minimum_speed: 0.10
+      # 方向驱动最大加速度限制（m/s²）
+      acceleration_limit: 1.0
+      # 方向驱动最大减速度限制（m/s²），负值
+      deceleration_limit: -1.0
+      # 方向驱动最小移动速度（m/s），机器人行为的死区速度，正值
+      minimum_speed: 0.15
       
     # =====================================================
     # Wait 等待行为
