@@ -1054,13 +1054,6 @@ lifecycle_manager:
     # 是否尝试重新连接并重启崩溃的节点
     attempt_respawn_reconnection: true
 
-# # 单独的定位生命周期管理器配置
-# lifecycle_manager_localization:
-#   ros__parameters:
-#     use_sim_time: false
-#     autostart: true
-#     node_names: ['map_server', 'amcl']
-#     bond_timeout_ms: 10000
 
 # =============================================================================
 # AMCL Configuration - 自适应蒙特卡洛定位
@@ -1231,7 +1224,7 @@ bt_navigator:
     # NavigateToPose 的默认行为树 XML 文件路径
     default_nav_to_pose_bt_xml: "/home/ztl/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/nav2_dog_slam/config/navigate_to_pose_w_replanning_and_recovery.xml"
     # 是否始终加载请求的行为树 XML，无论当前活跃 XML 名称如何
-    always_reload_bt_xml: false
+    # always_reload_bt_xml: false
 
     # 黑板书变量 ID
     # 用于向行为树提供目标的黑板变量，应与 BT XML 文件端口匹配
