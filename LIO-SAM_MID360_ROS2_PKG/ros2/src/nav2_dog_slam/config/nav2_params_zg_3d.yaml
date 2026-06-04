@@ -771,7 +771,7 @@ amcl:
     # beam_skip_error_threshold: 0.1  # 新增参数
     
     # Likelihood距离参数
-    laser_likelihood_max_dist: 40.0
+    laser_likelihood_max_dist: 60.0
     
     # Beam跳过参数（Likelihood模型也使用）
     do_beamskip: true    #AMCL 会在计算权重时自动跳过异常束
@@ -955,7 +955,7 @@ behavior_server:
     # 缺失参数 - 根据系统输出添加
     # bond_disable_heartbeat_timeout: false  # 新增参数
     behavior_plugins: ["spin", "backup", "drive_on_heading", "wait"]  # 修正参数名：plugins -> behavior_plugins
-    costmap_topic: "local_costmap/costmap"  # 新增参数
+    costmap_topic: "local_costmap/costmap_raw"  # 新增参数
     footprint_topic: "local_costmap/published_footprint"  # 新增参数
     cycle_frequency: 10.0  # 新增参数
     global_frame: "odom"  # 新增参数
