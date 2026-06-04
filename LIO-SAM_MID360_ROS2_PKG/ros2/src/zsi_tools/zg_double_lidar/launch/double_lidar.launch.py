@@ -285,6 +285,16 @@ def generate_launch_description():
         output='screen'
     )
     ld.add_action(static_transform_base_link_to_base_footprint)
+
+    # USS republisher - 修复Range消息的min_range/max_range并重发到/rkbot命名空间
+    uss_republisher = Node(
+        package='zg_double_lidar',
+        executable='uss_republisher.py',
+        name='uss_republisher',
+        output='screen',
+        parameters=[{'use_sim_time': DEFAULT_USE_SIM_TIME}],
+    )
+    ld.add_action(uss_republisher)
     
     #static_transform_world_to_base_footprint = Node(
     #    package='tf2_ros',
