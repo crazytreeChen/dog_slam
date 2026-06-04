@@ -656,10 +656,10 @@ local_costmap:
         enabled: true
         topics: ["/rkbot/uss_left/range", "/rkbot/uss_right/range"]
         input_sensor_type: "VARIABLE"
-        no_readings_timeout: 0.0
+        no_readings_timeout: 1.0
         clear_threshold: 0.2
         mark_threshold: 0.8
-        clear_on_max_reading: false
+        clear_on_max_reading: true
         obstacle_range: 2.0
         raytrace_range: 3.0
         transform_tolerance: 0.5
