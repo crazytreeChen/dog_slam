@@ -44,11 +44,12 @@ ps -ef | awk '/rosbridge/ {print $2}' | xargs -r kill
 ps -ef | awk '/publisher/ {print $2}' | xargs -r kill
 ps -ef | awk '/rclcpp/ {print $2}' | xargs -r kill
 
+
+
+ros2 daemon stop 
+pkill zenoh
 echo "sleep 3"
 sleep 3
-
-pkill zenoh
-# ros2 daemon stop 
 ros2 daemon start
 
 echo "强制退出本地服务"

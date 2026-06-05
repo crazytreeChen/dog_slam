@@ -24,8 +24,9 @@
   connect: {
     timeout_ms: { router: -1, peer: -1, client: 0 },
     endpoints: [
-      // "tcp/<其他机器IP>:7447",
-      "tcp/192.168.144.144:7447",
+      // "<proto>/<address>"
+      // "tcp/192.168.144.144:7447",
+      "tcp/192.168.168.151:7447"
     ],
     exit_on_failure: { router: false, peer: false, client: true },
     retry: {
@@ -85,7 +86,7 @@
   // ---------- 时间戳 ----------
   // Router 需要 timestamping 以支持 transient_local durability (PublicationCache)
   timestamping: {
-    enabled: { router: true, peer: false, client: false },
+    enabled: { router: false, peer: false, client: false },
     drop_future_timestamp: false,
   },
 
@@ -157,12 +158,12 @@
           //   control=2 → 128KB,  data_high=8 → 512KB
           size: {
             control: 2,            // 控制消息（小量）
-            real_time: 4,          // TF 等实时数据
-            interactive_high: 4,   // Service 请求/响应
-            interactive_low: 4,
-            data_high: 8,          // 点云等大数据（高优先级）
-            data: 8,               // 普通 topic 数据
-            data_low: 4,
+            real_time: 2,          // TF 等实时数据
+            interactive_high: 2,   // Service 请求/响应
+            interactive_low: 2,
+            data_high: 2,          // 点云等大数据（高优先级）
+            data: 2,               // 普通 topic 数据
+            data_low: 2,
             background: 2,         // 后台数据
           },
           congestion_control: {
@@ -196,7 +197,7 @@
         //   大点云消息分片后需要足够缓冲容纳
         buffer_size: 1048576,
         // 最大消息大小：512MB（支持极端大的点云）
-        max_message_size: 536870912,
+        max_message_size: 1073741824,
       },
 
       tls: {
