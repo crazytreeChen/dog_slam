@@ -1,5 +1,16 @@
 #!/bin/bash
 
+# 检查是否已加载ROS2环境
+if [ -z "$ROS_DISTRO" ]; then
+    echo "加载ROS2环境..."
+    source /opt/ros/humble/setup.bash
+
+    if [ $? -ne 0 ]; then
+        echo "错误: 无法加载ROS2环境"
+        exit 1
+    fi
+fi
+
 REMOTE_IP="192.168.168.100"
 REMOTE_USER="robot"
 REMOTE_PASS="1"
@@ -36,9 +47,9 @@ ps -ef | awk '/rclcpp/ {print $2}' | xargs -r kill
 echo "sleep 3"
 sleep 3
 
-systemctl restart rmw_control.service
+pkill zenoh
 # ros2 daemon stop 
-# ros2 daemon start
+ros2 daemon start
 
 echo "强制退出本地服务"
 
