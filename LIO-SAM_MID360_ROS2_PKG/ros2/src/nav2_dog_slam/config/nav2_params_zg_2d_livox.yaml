@@ -81,13 +81,13 @@ controller_server:
       plugin: "nav2_mppi_controller::MPPIController"
 
       # 轨迹时间步数
-      time_steps: 56
+      time_steps: 32
       # 每个时间步的时长（s），time_steps * model_dt = 预测时域
       model_dt: 0.05
       # 每轮采样的候选轨迹数量
-      batch_size: 500
+      batch_size: 1000
       # TF 变换容差（s）
-      transform_tolerance: 0.2
+      transform_tolerance: 0.3
 
       # 最大前向速度（m/s）
       vx_max: 1.2
@@ -119,9 +119,9 @@ controller_server:
         trajectory_step: 20  
 
       # # 缺失的MPPI参数
-      enforce_path_inversion: false
-      inversion_xy_tolerance: 0.3
-      inversion_yaw_tolerance: 0.4
+      enforce_path_inversion: true
+      inversion_xy_tolerance: 0.5
+      inversion_yaw_tolerance: 0.3
       # gamma: 0.015  
       # iteration_count: 1  
       max_robot_pose_search_dist: 1.0  # Max integrated distance ahead of robot pose to search for nearest path point in case of path looping.
@@ -163,7 +163,7 @@ controller_server:
         # 是否启用
         enabled: true
         # 代价幂次
-        cost_power: 3
+        cost_power: 4
         # 评价器权重
         cost_weight: 6.0
         # 是否使用 SE2 footprint 碰撞检测
@@ -175,7 +175,7 @@ controller_server:
         # 真实碰撞代价值
         collision_cost: 253.0
         # 碰撞临界距离（m），类似 footprint 膨胀
-        collision_margin_distance: 0.3
+        collision_margin_distance: 0.4
         # 近碰撞代价阈值
         critical_cost: 100.0
         # 接近目标时停止避障偏好项的距离（m），使机器人可平滑收敛到目标
@@ -196,9 +196,9 @@ controller_server:
         # 是否启用
         enabled: true
         # 评价器权重
-        cost_weight: 30.0
+        cost_weight: 40.0
         # 代价幂次
-        cost_power: 2
+        cost_power: 1
         # 从最远路径点算起的偏移量
         offset_from_furthest: 1
         # 距目标距离小于此值时停止路径跟随，交予目标评价器
@@ -215,7 +215,7 @@ controller_server:
         # 是否启用
         enabled: true
         # 评价器权重
-        cost_weight: 5.0
+        cost_weight: 10.0
         # 代价幂次
         cost_power: 1
         # 路径占用比例上限
@@ -238,9 +238,9 @@ controller_server:
         # 是否启用
         enabled: true
         # 评价器权重
-        cost_weight: 5.0
+        cost_weight: 10.0
         # 代价幂次
-        cost_power: 2
+        cost_power: 4
         # 前向偏好（true=偏好前进，false=无偏好）
         forward_preference: true
         # 从最远路径点算起的偏移量
@@ -517,7 +517,7 @@ planner_server:
       max_planning_time: 10.0
       lattice_filepath: "/home/ztl/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/nav2_dog_slam/config/lattice_primitives.json"
       minimum_turning_radius: 0.02
-      reverse_penalty: 1.0
+      reverse_penalty: 9.0
       change_penalty: 0.3
       non_straight_penalty: 9.0
       cost_penalty: 1.5
