@@ -272,7 +272,7 @@ controller_server:
       # =====================================================
       TwirlingCritic:
         # 是否启用
-        enabled: true
+        enabled: false
         # 代价幂次
         cost_power: 1
         # 评价器权重
