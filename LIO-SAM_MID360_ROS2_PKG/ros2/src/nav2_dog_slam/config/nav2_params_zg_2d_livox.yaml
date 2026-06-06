@@ -37,7 +37,7 @@ controller_server:
     # 被调用控制器插件连续失败（computeVelocityCommands 抛出异常）的最大持续时间（s），-1.0 无限，0 禁用
     failure_tolerance: 3.0
     # 获取瞬时速度测量的里程计话题
-    odom_topic: "/rkbot/lio/robo/odom"
+    odom_topic: "/rkbot/lio/odom"
 
     # 速度限制话题
     # 要订阅的速度限制话题名称，可由 Speed Filter 发布，也可由外部服务器提供
@@ -65,9 +65,9 @@ controller_server:
       # 目标检查器插件类型
       plugin: "nav2_controller::StoppedGoalChecker"
       # 到达目标的 XY 位置容差（m）
-      xy_goal_tolerance: 0.3
+      xy_goal_tolerance: 0.5
       # 到达目标的朝向容差（rad）
-      yaw_goal_tolerance: 0.2
+      yaw_goal_tolerance: 0.3
       # 判定为停止的线速度阈值（m/s）
       trans_stopped_velocity: 1.5
       # 判定为停止的角速度阈值（rad/s）
@@ -81,11 +81,11 @@ controller_server:
       plugin: "nav2_mppi_controller::MPPIController"
 
       # 轨迹时间步数
-      time_steps: 32
+      time_steps: 56
       # 每个时间步的时长（s），time_steps * model_dt = 预测时域
       model_dt: 0.05
       # 每轮采样的候选轨迹数量
-      batch_size: 1000
+      batch_size: 500
       # TF 变换容差（s）
       transform_tolerance: 0.2
 
@@ -198,7 +198,7 @@ controller_server:
         # 评价器权重
         cost_weight: 30.0
         # 代价幂次
-        cost_power: 1
+        cost_power: 2
         # 从最远路径点算起的偏移量
         offset_from_furthest: 1
         # 距目标距离小于此值时停止路径跟随，交予目标评价器
@@ -240,7 +240,7 @@ controller_server:
         # 评价器权重
         cost_weight: 5.0
         # 代价幂次
-        cost_power: 4
+        cost_power: 2
         # 前向偏好（true=偏好前进，false=无偏好）
         forward_preference: true
         # 从最远路径点算起的偏移量
@@ -272,7 +272,7 @@ controller_server:
       # =====================================================
       TwirlingCritic:
         # 是否启用
-        enabled: false
+        enabled: true
         # 代价幂次
         cost_power: 1
         # 评价器权重
@@ -287,9 +287,9 @@ controller_server:
         # 是否启用
         enabled: true
         # 评价器权重
-        cost_weight: 50.0
+        cost_weight: 20.0
         # 代价幂次
-        cost_power: 3
+        cost_power: 1
         # 速度死区 [vx, vy, wz]，低于此的速度被忽略
         deadband_velocities: [0.2, 0.1, 0.2]
       
@@ -613,8 +613,8 @@ local_costmap:
       footprint_padding: 0.05  # footprint膨胀填充
       resolution: 0.05
       rolling_window: true
-      width: 8
-      height: 8
+      width: 12
+      height: 12
       
       # # 其他缺失参数
       # footprint: ""  # 新增参数 - 使用robot_radius代替
@@ -622,8 +622,8 @@ local_costmap:
       # lethal_cost_threshold: 100  # 新增参数
       map_topic: "map"  # 新增参数
       observation_sources: "scan"  # 新增参数
-      origin_x: -4.0  # 新增参数
-      origin_y: -4.0  # 新增参数
+      origin_x: -6.0  # 新增参数
+      origin_y: -6.0  # 新增参数
       track_unknown_space: true  # 新增参数
       # trinary_costmap: true  # 新增参数
       # unknown_cost_value: 255  # 新增参数
