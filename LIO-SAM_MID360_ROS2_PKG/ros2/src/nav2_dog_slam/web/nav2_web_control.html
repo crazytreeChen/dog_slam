@@ -489,6 +489,9 @@
       laserCanvas = document.getElementById('laser-canvas');
       laserCtx = laserCanvas.getContext('2d');
       
+      // 确保激光Canvas不会拦截鼠标事件，让点击事件穿透到地图Canvas
+      laserCanvas.style.pointerEvents = 'none';
+      
       // 设置Canvas大小为地图容器的完整大小
       const mapContainer = document.getElementById('map-container');
       canvas.width = mapContainer.clientWidth;
@@ -1257,6 +1260,9 @@
     // 独立的激光扫描渲染循环 - 高频率更新
     function startLaserRenderLoop() {
       function renderLoop() {
+        // 每次渲染前确保激光Canvas不会拦截鼠标事件
+        laserCanvas.style.pointerEvents = 'none';
+        
         if (laserRenderPending) {
           laserRenderPending = false;
           // 清空激光Canvas
@@ -2734,6 +2740,8 @@
         // 调整激光Canvas
         laserCanvas.width = mapContainer.clientWidth;
         laserCanvas.height = mapContainer.clientHeight;
+        // 确保调整大小后激光Canvas仍然不会拦截鼠标事件
+        laserCanvas.style.pointerEvents = 'none';
         // 重绘地图
         drawMap();
       });
