@@ -18,7 +18,9 @@
     lio.sensor.lidar_type: 9
     lio.sensor.blind: 0.1
     lio.sensor.maxrange: 200.0
-    lio.sensor.filter_rate: 5
+    lio.sensor.filter_rate: 17
+    # 是否启用filter_rate的对称震荡offset，false则每帧固定取同一子集
+    lio.sensor.enable_filter_offset: true
     lio.sensor.enable_downsample: true
     lio.sensor.voxel_fliter_size: 0.2
     lio.sensor.intensity_filter_en: false
@@ -95,10 +97,10 @@
     lio.degeneracy.threshold: 100.0
     # Tikhonov正则化强度，lambda * trace(H)/6 加到 Hessian 对角
     # 0.1 = 添加 10% Hessian 量级的对角正则化，越大退化方向越依赖IMU预测
-    lio.degeneracy.tikhonov_lambda: 0.1
+    lio.degeneracy.tikhonov_lambda: 0.3
 
     # ======================== 自适应观测权重 ========================
-    lio.adaptive_weight.en: true
+    lio.adaptive_weight.en: false
     lio.adaptive_weight.sigma: 30.0
     
     # IMU订阅的QoS可靠性设置。true: reliable(可靠传输); false: best_effort(尽力传输)
