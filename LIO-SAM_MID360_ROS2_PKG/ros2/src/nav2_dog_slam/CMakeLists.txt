@@ -62,6 +62,12 @@ install(
   DESTINATION lib/${PROJECT_NAME}
 )
 
+# Install AMCL initial pose estimator script as executable
+install(
+  PROGRAMS scripts/amcl_initial_pose_estimator.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 # Install dynamic base footprint script as executable
 install(
   PROGRAMS scripts/dynamic_base_footprint.py

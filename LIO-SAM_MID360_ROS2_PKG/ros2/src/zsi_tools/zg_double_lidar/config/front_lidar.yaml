@@ -1,6 +1,6 @@
 /**:
   ros__parameters:
-    lio.map.save_map: false
+    lio.map.save_map: true
     lio.map.if_filter: false
     lio.map.save_map_dir: "/home/robot/slam_data/pcd"
     lio.map.map_name: "front_lidar_map.pcd"
@@ -87,7 +87,7 @@
 
     # ======================== 快速Odom模式 ========================
     # 是否发布IMU预测位姿（低延迟，不经过ESKF更新）
-    lio.fast_odom: false
+    lio.fast_odom: true
 
     # ======================== 退化检测与正则化 ========================
     # 是否启用观测Hessian退化检测，在病态方向上添加Tikhonov正则化
@@ -100,7 +100,7 @@
     lio.degeneracy.tikhonov_lambda: 0.3
 
     # ======================== 自适应观测权重 ========================
-    lio.adaptive_weight.en: false
+    lio.adaptive_weight.en: true
     lio.adaptive_weight.sigma: 30.0
     
     # IMU订阅的QoS可靠性设置。true: reliable(可靠传输); false: best_effort(尽力传输)
@@ -112,7 +112,7 @@
 
     # ======================== SC-PGO 离线处理参数 ========================
     # 是否启用 SC-PGO 兼容数据输出（输出 body-frame 扫描 + KITTI 位姿到 Scans/ 目录）
-    lio.sc_pgo.enable: false
+    lio.sc_pgo.enable: true
     # 关键帧平移距离阈值(米)，累计平移超过此值抽取一帧
     lio.sc_pgo.keyframe_gap: 5.0
     # 关键帧旋转角度阈值(度)，累计旋转超过此值抽取一帧
