@@ -104,6 +104,18 @@ install(
   DESTINATION lib/${PROJECT_NAME}
 )
 
+# Install set_initial_pose script as executable
+install(
+  PROGRAMS scripts/set_initial_pose.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+# Install auto_initial_pose_calibrator script as executable
+install(
+  PROGRAMS src/auto_initial_pose_calibrator.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 # Install web interface files
 install(
   DIRECTORY web

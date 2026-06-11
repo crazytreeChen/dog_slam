@@ -1,0 +1,67 @@
+# =============================================================================
+# 自动初始位姿校准器配置
+# 室内: 旋转180°+粗匹配→topN候选→前进1m→odom约束筛选→唯一Pose→/initialpose
+# 室外: RTK(GPS+双天线航向)+校准→/initialpose
+# =============================================================================
+auto_initial_pose_calibrator:
+  ros__parameters:
+    # ────── 话题 ──────
+    rtk_topic: "/rtk"
+    rtk_topic_type: "common_msgs.msg.RTK"
+    gps_topic: "/gps"
+    map_topic: "/map"
+    scan_topic: "/scan"
+    odom_topic: "/odom"
+
+    # ────── 坐标系 ──────
+    map_frame: "map"
+
+    # ────── 模式 ──────
+    outdoor_mode: true
+    indoor_mode: true
+
+    # ────── 旋转阶段 ──────
+    rotation_min_deg: 180.0
+    rotation_scan_interval_deg: 15.0
+
+    # ────── 粗匹配 ──────
+    rough_match_particles: 3000
+    rough_match_max_beams: 60
+    rough_top_n: 10
+
+    # ────── 运动/筛选 ──────
+    motion_distance: 0.8          # 基准探索距离
+    motion_angle_threshold_deg: 10.0
+    filter_min_score_ratio: 0.3
+    max_active_retry: 5           # 最大探索移动轮数
+
+    # ────── 主动控制与避障 ──────
+    max_linear_vel: 0.15          # 最大线速度 (m/s)
+    max_angular_vel: 0.25         # 最大角速度 (rad/s)
+    kp_linear: 0.8                # 线速度 P 增益
+    kp_angular: 1.0               # 角速度 P 增益
+    min_safe_distance: 0.5        # 避障紧急停机距离 (m)
+    collision_sector_angle_deg: 45.0 # 前进避障监测扇区宽度 (度)
+
+    # ────── 主动探索 (信息增益) ──────
+    ig_sample_dist_1: 1.0         # 似然场特征提取的内圈采样半径 (m)
+    ig_sample_dist_2: 2.0         # 似然场特征提取的外圈采样半径 (m)
+
+    # ────── 局部子图 ──────
+    submap_scan_count: 20         # 构建单次子图所需的雷达帧数
+    submap_angle_resolution: 0.5  # 子集合成 Scan 的角分辨率 (度)
+
+    # ────── 似然场 ──────
+    likelihood_max_dist: 2.0
+    sigma_hit: 0.2
+    z_hit: 0.8
+    z_rand: 0.1
+
+    # ────── RTK ──────
+    min_soln_svs: 4
+    valid_pos_types: [34, 50]
+    valid_heading_types: [34, 50]
+    publish_rate: 0.5
+
+    use_sim_time: false
+    calibration_file: ""

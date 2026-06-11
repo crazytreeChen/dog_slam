@@ -1,0 +1,79 @@
+# =============================================================================
+# AMCL 室内定位配置 - 人工手动设置初始位姿
+# 适用于已建好地图、重新开机后通过 /initialpose 手动设置初始位姿的场景
+# =============================================================================
+amcl:
+  ros__parameters:
+    use_sim_time: false
+
+    # -------- 坐标系 --------
+    global_frame_id: "map"
+    odom_frame_id: "odom"
+    base_frame_id: "base_link"
+
+    scan_topic: "scan"
+
+    # -------- TF 广播 --------
+    tf_broadcast: true
+    transform_tolerance: 1.0
+
+    # -------- 初始位姿策略 --------
+    # 关键：设为 false，等待人工通过 /initialpose 手动设置初始位姿
+    set_initial_pose: false
+    always_reset_initial_pose: false
+    first_map_only: false
+
+    # -------- 粒子滤波参数（室内优化）--------
+    min_particles: 500
+    max_particles: 3000
+    pf_err: 0.05
+    pf_z: 0.99
+    resample_interval: 1
+
+    # -------- 更新阈值 --------
+    update_min_d: 0.05
+    update_min_a: 0.05
+
+    # -------- 恢复参数 --------
+    recovery_alpha_slow: 0.0
+    recovery_alpha_fast: 0.0
+
+    # -------- 里程计运动模型（室内差分/全向）--------
+    # robot_model_type: "nav2_amcl::OmniMotionModel"
+    robot_model_type: "nav2_amcl::DifferentialMotionModel"
+
+    alpha1: 0.2
+    alpha2: 0.2
+    alpha3: 0.2
+    alpha4: 0.2
+    alpha5: 0.2
+
+    # -------- 激光似然场模型（室内推荐）--------
+    laser_model_type: "likelihood_field"
+
+    laser_min_range: -1.0
+    laser_max_range: 100.0
+    max_beams: 60
+
+    z_hit: 0.8
+    z_short: 0.05
+    z_max: 0.05
+    z_rand: 0.1
+    sigma_hit: 0.2
+    lambda_short: 0.1
+    laser_likelihood_max_dist: 2.0
+
+    # -------- Beam 跳过 --------
+    do_beamskip: true
+    beam_skip_distance: 0.5
+    beam_skip_threshold: 0.3
+
+    # -------- 位姿保存 --------
+    save_pose_rate: 0.5
+
+    # -------- 默认初始位姿（仅当 set_initial_pose=true 时有效）--------
+    initial_pose:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+      yaw: 0.0
