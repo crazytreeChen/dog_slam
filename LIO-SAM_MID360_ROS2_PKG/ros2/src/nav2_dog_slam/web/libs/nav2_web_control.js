@@ -656,6 +656,68 @@
       } : { r: 0, g: 0, b: 0 };
     }
     
+    // 直接从原始地图数据渲染（缩放较大时使用，以获得清晰细节）
+    // 仅渲染画布可见区域，逐行扫描合并同色像素以减少 fillRect 调用
+    function drawMapDirectFromData(ctx, map, scale, offsetX, offsetY, canvasW, canvasH) {
+      const info = map.info;
+      const data = map.data;
+      const originX = info.origin.position.x;
+      const originY = info.origin.position.y;
+      const cellSize = info.resolution * scale; // 每个地图格子在画布上的像素大小
+
+      // 缓存颜色字符串
+      const obsColor = mapColors.obstacle;
+      const posObsColor = mapColors.possibleObstacle;
+      const unkColor = mapColors.unknown;
+      const freeColor = mapColors.free;
+
+      // 计算可见区域的地图格子范围
+      // canvasX = offsetX + (worldX - originX) * scale
+      // worldX = originX + col * resolution
+      // => col = (canvasX - offsetX) / cellSize
+      const startCol = Math.max(0, Math.floor((-offsetX) / cellSize));
+      const endCol = Math.min(info.width, Math.ceil((canvasW - offsetX) / cellSize));
+      const startRow = Math.max(0, Math.floor((offsetY - canvasH) / cellSize));
+      const endRow = Math.min(info.height, Math.ceil(offsetY / cellSize));
+
+      // 逐行扫描，合并同色连续像素
+      for (let row = startRow; row < endRow; row++) {
+        const flippedRow = info.height - 1 - row; // 地图数据Y轴翻转
+        const dataRowBase = flippedRow * info.width;
+        // canvasY 是当前行 cell 的左上角Y坐标（fillRect 从左上角绘制）
+        const wy = originY + row * info.resolution; // 当前行底部在世界坐标系的Y值
+        const cy = offsetY - (wy - originY) * scale - cellSize;
+
+        let runStartCol = startCol;
+        let prevColor = null;
+
+        for (let col = startCol; col <= endCol; col++) {
+          let color;
+          if (col < endCol) {
+            const value = data[dataRowBase + col];
+            if (value === -1) color = unkColor;
+            else if (value > 50) color = obsColor;
+            else if (value > 0) color = posObsColor;
+            else color = freeColor;
+          } else {
+            color = null; // 哨兵值，触发最后一次绘制
+          }
+
+          if (color !== prevColor) {
+            if (prevColor !== null && col > runStartCol) {
+              const wx = originX + runStartCol * info.resolution;
+              const cx = offsetX + (wx - originX) * scale;
+              const runWidth = (col - runStartCol) * cellSize;
+              ctx.fillStyle = prevColor;
+              ctx.fillRect(cx, cy, runWidth, cellSize);
+            }
+            runStartCol = col;
+            prevColor = color;
+          }
+        }
+      }
+    }
+
     // 同步绘制地图（用于性能计数）
     function drawMapSync() {
       const drawStartTime = performance.now();
@@ -692,8 +754,18 @@
       const startX = offsetX;
       const startY = offsetY - mapHeightPixels;
       
-      // 使用drawImage直接绘制缓存的地图
-      if (mapCacheCanvas && mapCacheValid) {
+      // 判断是否需要直接从原始数据渲染（缩放较大时缓存分辨率不足）
+      // 条件：当地图在画布上的像素尺寸超过缓存图像尺寸的1.2倍时，直渲染以获得清晰细节
+      const cacheTooSmall = mapCacheCanvas && mapCacheValid && (
+        mapWidthPixels > mapCacheCanvas.width * 1.2 ||
+        mapHeightPixels > mapCacheCanvas.height * 1.2
+      );
+
+      if (cacheTooSmall) {
+        // 直接从原始地图数据渲染可见区域，避免缓存拉伸导致的模糊
+        drawMapDirectFromData(ctx, currentMap, scale, offsetX, offsetY, canvas.width, canvas.height);
+      } else if (mapCacheCanvas && mapCacheValid) {
+        // 使用drawImage直接绘制缓存的地图
         ctx.imageSmoothingEnabled = true;
         ctx.drawImage(mapCacheCanvas, startX, startY, mapWidthPixels, mapHeightPixels);
       }
