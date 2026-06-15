@@ -9,9 +9,9 @@ set -e
 # =============================================================================
 # 配置区 —— 请修改为你的机器人实际 IP、用户名和路径
 # =============================================================================
-ROBOT_IP="10.44.10.142"          # 机器人 IP 地址
-ROBOT_USER="agi"                  # 机器人登录用户名
-ROBOT_PATH="/data/rkrobot/dog_slam/LIO-SAM_MID360_ROS2_PKG"  # 机器人上的工程目录
+ROBOT_IP="10.44.10.160"          # 机器人 IP 地址
+ROBOT_USER="ztl"                  # 机器人登录用户名
+ROBOT_PATH="/home/ztl/dog_slam/LIO-SAM_MID360_ROS2_PKG"  # 机器人上的工程目录
 ROBOT_PORT="22"                   # SSH 端口（默认 22）
 
 # =============================================================================
@@ -61,7 +61,7 @@ for arg in "$@"; do
             echo ""
             echo "同步逻辑:"
             echo "  - 远程无工程目录 → 自动全量首次同步"
-            echo "  - 远程已有工程   → 仅同步 git 未提交的修改文件（不含新增未跟踪文件）"
+            echo "  - 远程已有工程   → 仅同步 git 未提交的修改文件（含暂存和未暂存的修改，不含未跟踪新文件）"
             echo "  - 自动排除构建产物 (build/, install/, log/ 等)"
             exit 0
             ;;
@@ -222,9 +222,14 @@ do_incremental_sync() {
     echo "目标: ${ROBOT_USER}@${ROBOT_IP}:${ROBOT_PATH}"
     echo ""
 
-    # 获取 git 变更文件（仅 Added 和 Modified，不含 Deleted 和 Renamed）
+    # 获取 git 变更文件（同时覆盖未暂存和已暂存的修改，仅 Added 和 Modified）
     info "检查本地 git 变更..."
-    RAW_FILES=$(git diff --name-only --diff-filter=AM HEAD 2>/dev/null || true)
+    RAW_FILES=$(
+        {
+            git diff --name-only --diff-filter=AM HEAD 2>/dev/null
+            git diff --cached --name-only --diff-filter=AM HEAD 2>/dev/null
+        } | sort -u
+    )
 
     if [[ -z "$RAW_FILES" ]]; then
         echo ""

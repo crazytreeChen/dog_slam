@@ -34,7 +34,7 @@ from std_srvs.srv import Trigger
 
 try:
     from ament_index_python.packages import get_package_share_directory
-    global_config_path = os.path.join(get_package_share_directory('global_config'), '../src/global_config')
+    global_config_path = os.path.join(get_package_share_directory('global_config'), '../../src/global_config')
     if global_config_path not in sys.path:
         sys.path.insert(0, global_config_path)
     from global_config import NAV2_DEFAULT_MAP_FILE
@@ -60,16 +60,19 @@ class AutoInitialPoseCalibrator(Node):
 
         # ────── 声明与读取参数 ──────
         self.declare_parameter('rtk_topic', '/rtk')
-        self.declare_parameter('rtk_topic_type', 'common_msgs.msg.RTK')
+        self.declare_parameter('rtk_topic_type', 'robots_dog_msgs.msg.UniRtkPvh')
         self.declare_parameter('gps_topic', '/gps')
-        self.declare_parameter('map_topic', '/map')
-        self.declare_parameter('scan_topic', '/scan')
-        self.declare_parameter('odom_topic', '/odom')
+        self.declare_parameter('map_topic', 'map')
+        self.declare_parameter('scan_topic', 'scan')
+        self.declare_parameter('odom_topic', 'lio/odom')
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('outdoor_mode', True)
         self.declare_parameter('indoor_mode', True)
-        self.declare_parameter('use_sim_time', False)
+        if not self.has_parameter('use_sim_time'):
+            self.declare_parameter('use_sim_time', False)
         self.declare_parameter('calibration_file', '')
+        self.declare_parameter('map_file', NAV2_DEFAULT_MAP_FILE)
+        self.declare_parameter('cmd_vel_topic', '/cmd_vel')
 
         # 粗匹配/粒子匹配参数
         self.declare_parameter('rough_match_particles', 1500)
@@ -118,9 +121,24 @@ class AutoInitialPoseCalibrator(Node):
         self.scan_topic = self.get_parameter('scan_topic').value
         self.odom_topic = self.get_parameter('odom_topic').value
         self.map_frame = self.get_parameter('map_frame').value
+        # 自动适配命名空间下的 topic 和 frame (例如 rkbot/map, rkbot/odom)
+        ns = self.get_namespace().strip('/')
+        if ns:
+            if not self.map_frame.startswith(ns + '/'):
+                self.map_frame = f"{ns}/{self.map_frame}"
+            if not self.map_topic.startswith('/'):
+                self.map_topic = f"/{ns}/{self.map_topic}"
+            if not self.scan_topic.startswith('/'):
+                self.scan_topic = f"/{ns}/{self.scan_topic}"
+            if not self.odom_topic.startswith('/'):
+                self.odom_topic = f"/{ns}/{self.odom_topic}"
         self.outdoor_mode = self.get_parameter('outdoor_mode').value
         self.indoor_mode = self.get_parameter('indoor_mode').value
         self.use_sim_time = self.get_parameter('use_sim_time').value
+        self.map_file = self.get_parameter('map_file').value
+        if not self.map_file:
+            self.map_file = NAV2_DEFAULT_MAP_FILE
+        self.cmd_vel_topic = self.get_parameter('cmd_vel_topic').value
 
         self.rough_particles = self.get_parameter('rough_match_particles').value
         self.fine_particles_per_cluster = self.get_parameter('fine_match_particles_per_cluster').value
@@ -198,6 +216,9 @@ class AutoInitialPoseCalibrator(Node):
         self.gt_received = False
         self.gt_pose = None             # (x, y, yaw) in map
         self.gt_ref_odom = None         # (x, y, yaw) in odom
+        
+        # ────── 上次校准结果（用于与手动设置对比） ──────
+        self.last_calibrated_pose = None  # (x, y, yaw) in map
 
         # ────── QoS 配置 ──────
         be_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -213,29 +234,113 @@ class AutoInitialPoseCalibrator(Node):
         self._setup_rtk_sub(be_qos)
 
         # 校对 AMCL 话题
-        self.amcl_sub = self.create_subscription(PoseWithCovarianceStamped, '/amcl_pose', self._amcl_cb, 10)
+        self.amcl_sub = self.create_subscription(PoseWithCovarianceStamped, 'amcl_pose', self._amcl_cb, 10)
         # 监听 RViz 2D Pose Estimate 触发真值标记或常规设置
         self.initialpose_sub = self.create_subscription(PoseWithCovarianceStamped, '/initialpose', self._initialpose_cb, 10)
 
         # ────── 发布器 ──────
         self.initialpose_pub = self.create_publisher(PoseWithCovarianceStamped, '/initialpose', 10)
-        self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.cmd_vel_pub = self.create_publisher(Twist, self.cmd_vel_topic, 10)
         
         # 调试/可视化发布器
-        self.candidates_pub = self.create_publisher(PoseArray, '/debug/candidates', 10)
-        self.submap_scan_pub = self.create_publisher(LaserScan, '/debug/submap_scan', 10)
-        self.odom_est_pose_pub = self.create_publisher(PoseStamped, '/debug/odom_est_pose', 10)
+        self.candidates_pub = self.create_publisher(PoseArray, 'debug/candidates', 10)
+        self.submap_scan_pub = self.create_publisher(LaserScan, 'debug/submap_scan', 10)
+        self.odom_est_pose_pub = self.create_publisher(PoseStamped, 'debug/odom_est_pose', 10)
 
         # ────── 服务 ──────
         self.srv_start = self.create_service(Trigger, 'start_auto_calibration', self._srv_start)
         self.srv_status = self.create_service(Trigger, 'auto_calibration_status', self._srv_status)
         self.srv_reset = self.create_service(Trigger, 'reset_calibration', self._srv_reset)
 
+        self.detected_mode = None
+        self.startup_time = self.get_clock().now()
+
         # ────── 定时器主循环 ──────
         self.indoor_timer = self.create_timer(0.1, self._indoor_loop)
         self.outdoor_timer = self.create_timer(self.publish_rate, self._outdoor_loop)
+        self.mode_timer = self.create_timer(1.0, self._check_auto_mode)
 
-        self.get_logger().info('自动初始位姿校准器已就绪。支持实时避障与安全主动探索。')
+        # 延迟 1.5 秒检查是否订阅到网格地图，若无则使用本地地图文件进行回退加载
+        self.map_check_timer = self.create_timer(1.5, self._check_map_and_fallback)
+
+        self.get_logger().info('自动初始位姿校准器已就绪，正在自动检测并识别定位模式中...')
+
+    def _check_map_and_fallback(self):
+        # 销毁该定时器使其仅执行一次
+        if hasattr(self, 'map_check_timer') and self.map_check_timer is not None:
+            self.map_check_timer.cancel()
+            self.destroy_timer(self.map_check_timer)
+            self.map_check_timer = None
+
+        if self.map_data is None:
+            self.get_logger().info('启动后 1.5 秒内未接收到 ROS 话题地图数据，正在尝试从本地配置文件加载地图作为回退...')
+            if self.map_file and os.path.exists(self.map_file):
+                self._load_map_from_file(self.map_file)
+            else:
+                self.get_logger().warn(f'未找到本地地图文件: {self.map_file}，将继续等待 ROS 网格地图话题订阅发布...')
+
+    def _load_map_from_file(self, yaml_path):
+        if not os.path.exists(yaml_path):
+            self.get_logger().error(f'地图配置文件不存在: {yaml_path}')
+            return False
+        try:
+            with open(yaml_path, 'r') as f:
+                config = yaml.safe_load(f)
+            
+            image_name = config.get('image', '')
+            if not image_name:
+                self.get_logger().error('地图配置文件未指定图像名称')
+                return False
+                
+            img_path = os.path.join(os.path.dirname(yaml_path), image_name)
+            if not os.path.exists(img_path):
+                self.get_logger().error(f'地图图像文件不存在: {img_path}')
+                return False
+                
+            import cv2
+            img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                self.get_logger().error(f'读取地图图像失败: {img_path}')
+                return False
+                
+            # 获取参数
+            res = float(config.get('resolution', 0.05))
+            origin = config.get('origin', [0.0, 0.0, 0.0])
+            negate = int(config.get('negate', 0))
+            occ_thresh = float(config.get('occupied_thresh', 0.65))
+            free_thresh = float(config.get('free_thresh', 0.196))
+            
+            # ROS 2 栅格地图中，左下角为 (0,0)。而普通图像文件左上角为 (0,0)。
+            # 需要上下翻转图像以与坐标系对齐。
+            img_flipped = cv2.flip(img, 0)
+            
+            # 像素转换：
+            # 黑色 0 -> p = 1.0 (占用)
+            # 白色 255 -> p = 0.0 (空闲)
+            # 计算概率 p
+            p = (255.0 - img_flipped.astype(np.float32)) / 255.0
+            
+            map_data = np.full(img.shape, -1, dtype=np.int8)
+            map_data[p > occ_thresh] = 100
+            map_data[p < free_thresh] = 0
+            
+            from nav_msgs.msg import MapMetaData
+            self.map_info = MapMetaData()
+            self.map_info.resolution = res
+            self.map_info.width = img.shape[1]
+            self.map_info.height = img.shape[0]
+            self.map_info.origin.position.x = float(origin[0])
+            self.map_info.origin.position.y = float(origin[1])
+            self.map_info.origin.position.z = float(origin[2])
+            
+            self.map_data = map_data
+            self._build_likelihood()
+            self._find_free_space()
+            self.get_logger().info(f'从文件成功加载地图: {self.map_info.width}x{self.map_info.height} @ {res}m ({yaml_path})')
+            return True
+        except Exception as e:
+            self.get_logger().error(f'从文件加载地图出错: {e}')
+            return False
 
     # ================================================================
     #  回调与基本数据读取
@@ -321,30 +426,107 @@ class AutoInitialPoseCalibrator(Node):
             self.odom_est_pose_pub.publish(est_msg)
 
     def _amcl_cb(self, msg):
-        # 如果已标记真值，计算 AMCL 估计值与 Odom 推算值的偏差
-        if self.gt_received and self.gt_pose is not None:
-            # 订阅 /debug/odom_est_pose 的末端数据进行计算
-            pass
+        # 如果已标记真值且里程计基准存在，实时计算当前定位与里程计递推位姿的偏差
+        if self.gt_received and self.gt_pose is not None and self.gt_ref_odom is not None and self.current_odom is not None:
+            # 1. 获取当前定位点 (x, y, yaw)
+            amcl_pos = msg.pose.pose.position
+            amcl_yaw = self._quat_to_yaw(msg.pose.pose.orientation)
+
+            # 2. 计算此时由 odom 递推出来的理论位姿
+            curr_pos = self.current_odom.pose.pose.position
+            curr_yaw = self._quat_to_yaw(self.current_odom.pose.pose.orientation)
+            
+            ref_x, ref_y, ref_yaw = self.gt_ref_odom
+            dx = curr_pos.x - ref_x
+            dy = curr_pos.y - ref_y
+            
+            rel_x = dx * math.cos(ref_yaw) + dy * math.sin(ref_yaw)
+            rel_y = -dx * math.sin(ref_yaw) + dy * math.cos(ref_yaw)
+            rel_yaw = self._norm_angle(curr_yaw - ref_yaw)
+            
+            gt_x, gt_y, gt_yaw = self.gt_pose
+            est_x = gt_x + rel_x * math.cos(gt_yaw) - rel_y * math.sin(gt_yaw)
+            est_y = gt_y + rel_x * math.sin(gt_yaw) + rel_y * math.cos(gt_yaw)
+            est_yaw = self._norm_angle(gt_yaw + rel_yaw)
+
+            # 3. 计算两者在 Map 坐标系下的绝对偏差
+            err_dist = math.sqrt((amcl_pos.x - est_x)**2 + (amcl_pos.y - est_y)**2)
+            err_yaw = abs(self._norm_angle(amcl_yaw - est_yaw))
+
+            # 4. 频率限幅输出，避免刷屏 (1Hz 打印一次)
+            if not hasattr(self, '_last_print_time'):
+                self._last_print_time = 0.0
+            now_sec = self.get_clock().now().nanoseconds / 1e9
+            if now_sec - self._last_print_time > 1.0:
+                self.get_logger().info(
+                    f'[偏差对齐监测] 里程计递推: ({est_x:.2f}, {est_y:.2f}, {math.degrees(est_yaw):.1f}°), '
+                    f'算法实际定位: ({amcl_pos.x:.2f}, {amcl_pos.y:.2f}, {math.degrees(amcl_yaw):.1f}°), '
+                    f'累计偏差: 距离={err_dist:.3f}m, 角度={math.degrees(err_yaw):.1f}°'
+                )
+                self._last_print_time = now_sec
 
     def _initialpose_cb(self, msg):
         """若节点处于空闲状态，将手动标记作为 Ground Truth 用于偏差校准与调试"""
         if self.indoor_phase == IndoorPhase.IDLE:
             pos = msg.pose.pose.position
             yaw = self._quat_to_yaw(msg.pose.pose.orientation)
-            self.gt_pose = (pos.x, pos.y, yaw)
             
-            if self.current_odom is not None:
-                opos = self.current_odom.pose.pose.position
-                oyaw = self._quat_to_yaw(self.current_odom.pose.pose.orientation)
-                self.gt_ref_odom = (opos.x, opos.y, oyaw)
-                self.gt_received = True
-                self.get_logger().info(f'[校对工具] 标记真值起点: Map({pos.x:.2f}, {pos.y:.2f}, {math.degrees(yaw):.1f}°), '
-                                       f'记录基准 Odom({opos.x:.2f}, {opos.y:.2f})。后续将实时输出 odom 递推偏差。')
+            if self.gt_received and self.gt_pose is not None:
+                # 已经有真值起点，这次点击代表用户在终点进行二次人工校对
+                if self.current_odom is not None and self.gt_ref_odom is not None:
+                    curr_pos = self.current_odom.pose.pose.position
+                    curr_yaw = self._quat_to_yaw(self.current_odom.pose.pose.orientation)
+                    
+                    ref_x, ref_y, ref_yaw = self.gt_ref_odom
+                    dx = curr_pos.x - ref_x
+                    dy = curr_pos.y - ref_y
+                    
+                    rel_x = dx * math.cos(ref_yaw) + dy * math.sin(ref_yaw)
+                    rel_y = -dx * math.sin(ref_yaw) + dy * math.cos(ref_yaw)
+                    rel_yaw = self._norm_angle(curr_yaw - ref_yaw)
+                    
+                    gt_x, gt_y, gt_yaw = self.gt_pose
+                    est_x = gt_x + rel_x * math.cos(gt_yaw) - rel_y * math.sin(gt_yaw)
+                    est_y = gt_y + rel_x * math.sin(gt_yaw) + rel_y * math.cos(gt_yaw)
+                    est_yaw = self._norm_angle(gt_yaw + rel_yaw)
+                    
+                    err_dist = math.sqrt((pos.x - est_x)**2 + (pos.y - est_y)**2)
+                    err_yaw = abs(self._norm_angle(yaw - est_yaw))
+                    
+                    self.get_logger().info(
+                        f'[人工终点核对] 第二次手动标记坐标: ({pos.x:.2f}, {pos.y:.2f}, {math.degrees(yaw):.1f}°), '
+                        f'里程计递推理论坐标: ({est_x:.2f}, {est_y:.2f}, {math.degrees(est_yaw):.1f}°), '
+                        f'实测累计偏差：距离={err_dist:.3f}m, 角度={math.degrees(err_yaw):.1f}°'
+                    )
+            else:
+                # 初次点击，设定真值起点
+                if self.current_odom is not None:
+                    opos = self.current_odom.pose.pose.position
+                    oyaw = self._quat_to_yaw(self.current_odom.pose.pose.orientation)
+                    self.gt_pose = (pos.x, pos.y, yaw)
+                    self.gt_ref_odom = (opos.x, opos.y, oyaw)
+                    self.gt_received = True
+                    self.get_logger().info(f'[校对工具] 标记真值起点: Map({pos.x:.2f}, {pos.y:.2f}, {math.degrees(yaw):.1f}°), '
+                                           f'记录基准 Odom({opos.x:.2f}, {opos.y:.2f})。后续将实时输出 odom 递推偏差。')
+                    
+                    # 如果之前有校准结果，自动对比偏差
+                    if self.last_calibrated_pose is not None:
+                        cal_x, cal_y, cal_yaw = self.last_calibrated_pose
+                        err_x = pos.x - cal_x
+                        err_y = pos.y - cal_y
+                        err_dist = math.sqrt(err_x**2 + err_y**2)
+                        err_yaw = abs(self._norm_angle(yaw - cal_yaw))
+                        self.get_logger().info(
+                            f'[校准精度对比] '
+                            f'校准结果: ({cal_x:.2f}, {cal_y:.2f}, {math.degrees(cal_yaw):.1f}°), '
+                            f'手动标记: ({pos.x:.2f}, {pos.y:.2f}, {math.degrees(yaw):.1f}°), '
+                            f'偏差: Δx={err_x:.3f}m, Δy={err_y:.3f}m, 距离={err_dist:.3f}m, 角度={math.degrees(err_yaw):.1f}°'
+                        )
 
     def _setup_rtk_sub(self, qos):
         try:
-            from common_msgs.msg import RTK
-            self.rtk_sub = self.create_subscription(RTK, self.rtk_topic, self._rtk_cb, qos)
+            from robots_dog_msgs.msg import UniRtkPvh
+            self.rtk_sub = self.create_subscription(UniRtkPvh, self.rtk_topic, self._rtk_cb, qos)
         except ImportError:
             try:
                 parts = self.rtk_topic_type.rsplit('.', 1)
@@ -357,6 +539,9 @@ class AutoInitialPoseCalibrator(Node):
 
     def _rtk_cb(self, msg):
         self.current_rtk = msg
+
+    def _gps_cb(self, msg):
+        self.current_gps = msg
 
     # ================================================================
     #  核心：子图拼接与合成
@@ -939,7 +1124,18 @@ class AutoInitialPoseCalibrator(Node):
         msg.pose.covariance = cov
         
         self.initialpose_pub.publish(msg)
+        self.last_calibrated_pose = (x, y, yaw)
         self.get_logger().info(f'[主动定位] 成功唯一收敛！发布初始位姿: x={x:.3f}, y={y:.3f}, yaw={math.degrees(yaw):.1f}°')
+        
+        # 将收敛得到的校准起点自动设为对比真值基准，激活 _amcl_cb 的实时偏差对比监测
+        if self.current_odom is not None:
+            opos = self.current_odom.pose.pose.position
+            oyaw = self._quat_to_yaw(self.current_odom.pose.pose.orientation)
+            self.gt_pose = (x, y, yaw)
+            self.gt_ref_odom = (opos.x, opos.y, oyaw)
+            self.gt_received = True
+            self.get_logger().info(f'[校对工具] 已自动将校准结果设为偏差比对基准。Map 起点: ({x:.2f}, {y:.2f}, {math.degrees(yaw):.1f}°)，基准 Odom: ({opos.x:.2f}, {opos.y:.2f})。后续将以 1Hz 实时输出 AMCL 与里程计递推的偏差。')
+
         self.indoor_phase = IndoorPhase.DONE
         self.cmd_vel_pub.publish(Twist())
 
@@ -959,9 +1155,16 @@ class AutoInitialPoseCalibrator(Node):
 
     def _srv_start(self, req, resp):
         if self.map_data is None:
-            resp.success = False
-            resp.message = '全局栅格地图未就绪，校准失败'
-            return resp
+            # 话题未收到地图，做最后一次尝试从本地加载
+            if self.map_file and os.path.exists(self.map_file):
+                self.get_logger().info('服务启动但话题未接收到地图，尝试从本地配置文件加载地图...')
+                self._load_map_from_file(self.map_file)
+            
+            # 如果仍为 None，则返回失败
+            if self.map_data is None:
+                resp.success = False
+                resp.message = '全局栅格地图未就绪，且本地加载失败，校准失败'
+                return resp
         if self.current_scan is None:
             resp.success = False
             resp.message = '激光雷达数据未就绪，校准失败'
@@ -1073,6 +1276,58 @@ class AutoInitialPoseCalibrator(Node):
         else:
             self.get_logger().warning(f'校准文件不存在: {self.calibration_file}')
 
+    def _check_auto_mode(self):
+        # 仅在启用自动识别（即配置里 outdoor_mode=True 且 indoor_mode=True）时进行判断
+        # 如果配置里只开启了一个，则强制为该模式
+        if not self.outdoor_mode and self.indoor_mode:
+            current_mode = "INDOOR"
+        elif self.outdoor_mode and not self.indoor_mode:
+            current_mode = "OUTDOOR"
+        elif not self.outdoor_mode and not self.indoor_mode:
+            current_mode = "NONE"
+        else:
+            # 双模开启时，进行自动识别
+            # 判断 RTK 是否有效
+            is_rtk_valid = False
+            if self.current_rtk is not None:
+                try:
+                    heading = self.current_rtk.heading
+                    bestnav = self.current_rtk.bestnav
+                    if (heading.heading_type in [34, 50] and bestnav.pos_type in [34, 50] and
+                        heading.sol_status == 0 and bestnav.p_sol_status == 0):
+                        is_rtk_valid = True
+                except Exception:
+                    pass
+            
+            # 判断 GPS 是否有效
+            is_gps_valid = False
+            if self.current_gps is not None:
+                try:
+                    # status >= 0 代表有普通定位或更高级的定位
+                    if self.current_gps.status.status >= 0:
+                        is_gps_valid = True
+                except Exception:
+                    pass
+            
+            if is_rtk_valid or is_gps_valid:
+                current_mode = "OUTDOOR"
+            else:
+                # 如果从启动到现在未满 5 秒，我们先保持 UNKNOWN 状态，避免传感器数据尚未接收完全时产生误判
+                elapsed = (self.get_clock().now() - self.startup_time).nanoseconds / 1e9
+                if elapsed < 5.0:
+                    return
+                current_mode = "INDOOR"
+
+        # 如果检测到的模式发生改变，则打印日志
+        if current_mode != self.detected_mode:
+            self.detected_mode = current_mode
+            if current_mode == "OUTDOOR":
+                self.get_logger().info("[模式自动识别] 检测到有效 RTK/GPS 信号，系统当前运行于【室外模式】")
+            elif current_mode == "INDOOR":
+                self.get_logger().info("[模式自动识别] 未检测到有效 RTK/GPS 信号，系统当前运行于【室内模式】")
+            elif current_mode == "NONE":
+                self.get_logger().warn("[模式自动识别] 室内与室外模式均已关闭！")
+
 
 def main(args=None):
     rclpy.init(args=args)
@@ -1083,7 +1338,8 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

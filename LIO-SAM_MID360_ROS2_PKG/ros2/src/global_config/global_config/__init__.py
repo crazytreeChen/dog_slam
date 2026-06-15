@@ -271,6 +271,45 @@ config_by_machine = {
 
         #SC-PGO
         'SC_PGO_SAVE_DIRECTORY': '/home/ztl/save_data/',
+    },
+    'CrazyTreeChen': {
+        # CrazyTreeChen主机配置 - 全局配置
+        'DEFAULT_NAMESPACE': '',
+        'DEFAULT_USE_SIM_TIME': False,
+        'ONLINE_LIDAR': True,
+        
+        # CrazyTreeChen主机配置 - LIO-SAM
+        'LIO_SAM_BASE_CODE_PATH': '/home/crazytree/ros_ws/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/LIO-SAM_MID360_ROS2_DOG/',
+        'DEFAULT_BAG_PATH': '/home/crazytree/slam_data/livox_record_new/',
+        'DEFAULT_RELIABILITY_OVERRIDE': '/home/crazytree/slam_data/reliability_override.yaml',
+        'LIO_SAM_DEFAULT_LOAM_SAVE_DIR': '/home/crazytree/slam_data/loam/',
+        
+        # CrazyTreeChen主机配置 - Nav2
+        'NAV2_BASE_CODE_PATH': '/home/crazytree/ros_ws/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/nav2_dog_slam/',
+        'NAV2_DEFAULT_MAP_FILE': "/home/crazytree/slam_data/grid_map/map.yaml",
+        'NAV2_DEFAULT_WEB_SCRIPT_PATH': '/home/crazytree/ros_ws/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/nav2_dog_slam/web/run_web.sh',
+        'NAV2_DEFAULT_BT_XML_PATH': '/home/crazytree/ros_ws/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/nav2_dog_slam/config/navigate_to_pose_w_replanning_and_recovery.xml',
+        'NAV2_DEFAULT_PARAMS_FILE': '/home/crazytree/ros_ws/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/nav2_dog_slam/config/nav2_params.yaml',
+        
+        # CrazyTreeChen主机配置 - FAST-LIO
+        'FAST_LIO_BASE_CODE_PATH': '/home/crazytree/ros_ws/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/FAST_LIO_ROS2_edit/',
+        'FAST_LIO_LIDAR_TYPE': 1,  # 默认lidar_type为1
+        'FAST_LIO_MAP_FILE_PATH': '/home/crazytree/slam_data/pcd/test.pcd',  # 默认地图文件路径
+        
+        # CrazyTreeChen主机配置 - Livox MID360
+        'LIVOX_MID360_CONFIG': '/home/crazytree/ros_ws/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/livox_ros_driver2/config/MID360_config.json',
+        'LIVOX_MID360_CONFIG_NO_TILT': '/home/crazytree/ros_ws/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/livox_ros_driver2/config/MID360_config.json',
+        
+        # CrazyTreeChen主机配置 - Super-LIO
+        'SUPER_LIO_BASE_CODE_PATH': '/home/crazytree/ros_ws/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/Super-LIO/',
+        'SUPER_LIO_SAVE_MAP': True,  # 默认保存地图
+        'SUPER_LIO_SAVE_MAP_DIR': '/home/crazytree/slam_data/pcd',
+        'SUPER_LIO_LIDAR_X': -0.07,  # 雷达x轴偏移量
+        'SUPER_LIO_LIDAR_Z': -0.1,  # 雷达z轴偏移量
+        'SUPER_LIO_LIDAR_TILT_ANGLE': -0.0,  # 雷达倾斜角度
+        
+        #SC-PGO
+        'SC_PGO_SAVE_DIRECTORY': '/home/crazytree/save_data/',
     }
 }
 

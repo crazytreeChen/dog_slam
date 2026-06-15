@@ -14,19 +14,22 @@ try:
         sys.path.insert(0, global_config_path)
     from global_config import (
         DEFAULT_USE_SIM_TIME_STRING,
+        DEFAULT_NAMESPACE,
     )
 except Exception as e:
     print(f"导入global_config失败: {e}")
     DEFAULT_USE_SIM_TIME_STRING = 'false'
+    DEFAULT_NAMESPACE = ''
 
 
 def generate_launch_description():
     # -------- 获取包路径 --------
-    pkg_share = get_package_share_directory('nav2_dog_slam')
+    pkg_share = get_package_share_directory('auto_initial_pose_calibrator')
 
     # -------- 启动参数 --------
     params_file = LaunchConfiguration('params_file')
     use_sim_time = LaunchConfiguration('use_sim_time')
+    ns = LaunchConfiguration('ns')
 
     declare_params_file = DeclareLaunchArgument(
         'params_file',
@@ -40,11 +43,18 @@ def generate_launch_description():
         description='Use simulation (Gazebo) clock'
     )
 
+    declare_ns = DeclareLaunchArgument(
+        'ns',
+        default_value=DEFAULT_NAMESPACE,
+        description='ROS namespace'
+    )
+
     # -------- 自动校准节点 --------
     auto_calibrator = Node(
-        package='nav2_dog_slam',
+        package='auto_initial_pose_calibrator',
         executable='auto_initial_pose_calibrator.py',
         name='auto_initial_pose_calibrator',
+        namespace=ns,
         output='screen',
         parameters=[params_file, {'use_sim_time': use_sim_time}]
     )
@@ -52,6 +62,7 @@ def generate_launch_description():
     ld = LaunchDescription()
     ld.add_action(declare_params_file)
     ld.add_action(declare_use_sim_time)
+    ld.add_action(declare_ns)
     ld.add_action(auto_calibrator)
 
     return ld

@@ -20,6 +20,8 @@ source ros2/install/setup.bash
 
 `livox_gazebo_ros2_gpu_simulation` is intentionally skipped in `build_ros2.sh`.
 
+Note: `build_ros2.sh` references `faster_lio` and `direct_lidar_inertial_odometry` packages that no longer exist in the source tree — the build will emit warnings for these but continue. Ignore them.
+
 Submodules (`Super-LIO`, `zsi_tools/fast_lio_robosenseAiry`) must be initialized: `git submodule update --init --recursive`.
 
 ## Run
@@ -72,11 +74,12 @@ Custom Nav2 costmap plugin (`traversability_layer::TraversabilityLayer`) for 3D 
 ### Other packages
 
 - `LIO-SAM_MID360_ROS2_DOG`, `FAST_LIO_ROS2_edit`, `point_lio_ros2`, `Super-LIO` (submodule) — the four LIO implementations.
+- `auto_initial_pose_calibrator` — automatic initial pose calibration using scan matching + AMCL convergence. Depends on `global_config` and `robots_dog_msgs`.
 - `SC_PGO_ROS2` — pose-graph optimization. Super-LIO can output SC-PGO-compatible `Scans/NNNNNN.pcd` + KITTI-format `odom_poses.txt` via `lio.sc_pgo.enable: true` in `livox_360.yaml` / `livox_360_zg.yaml`.
 - `lidar_localization_ros2` + `ndt_omp_ros2` — re-localization on a saved PCD.
 - `livox_ros_driver2` — Livox SDK2 ROS2 wrapper. Per-host JSON config selected by `LIVOX_MID360_CONFIG` (e.g., `MID360_config_zg.json` for the ZG dog with two lidars).
 - `livox_gazebo_garden` — Gazebo Garden simulation worlds + URDF.
-- `zsi_tools/` contains the `zg_double_lidar` front+back lidar fusion package and the Robosense Airy LIO submodule.
+- `zsi_tools/` contains the `zg_double_lidar` front+back lidar fusion package, the Robosense Airy LIO submodule, and `d1max` board configs (RK3588/Orin).
 - `m-explore` — frontier-based autonomous exploration (`ros2 launch m-explore explore.launch.py`).
 
 ### Map saving

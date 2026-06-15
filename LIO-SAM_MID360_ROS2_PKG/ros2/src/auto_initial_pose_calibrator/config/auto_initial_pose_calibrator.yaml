@@ -3,15 +3,17 @@
 # 室内: 旋转180°+粗匹配→topN候选→前进1m→odom约束筛选→唯一Pose→/initialpose
 # 室外: RTK(GPS+双天线航向)+校准→/initialpose
 # =============================================================================
-auto_initial_pose_calibrator:
+/**:
   ros__parameters:
     # ────── 话题 ──────
-    rtk_topic: "/rtk"
-    rtk_topic_type: "common_msgs.msg.RTK"
-    gps_topic: "/gps"
-    map_topic: "/map"
-    scan_topic: "/scan"
-    odom_topic: "/odom"
+    rtk_topic: "/rtk_pvh"
+    rtk_topic_type: "robots_dog_msgs.msg.UniRtkPvh"
+    gps_topic: "/fix"
+    map_topic: "map"
+    scan_topic: "scan"
+    odom_topic: "lio/odom"
+    map_file: ""
+    cmd_vel_topic: "/cmd_vel"
 
     # ────── 坐标系 ──────
     map_frame: "map"
@@ -36,8 +38,8 @@ auto_initial_pose_calibrator:
     max_active_retry: 5           # 最大探索移动轮数
 
     # ────── 主动控制与避障 ──────
-    max_linear_vel: 0.15          # 最大线速度 (m/s)
-    max_angular_vel: 0.25         # 最大角速度 (rad/s)
+    max_linear_vel: 0.3          # 最大线速度 (m/s)
+    max_angular_vel: 0.5         # 最大角速度 (rad/s)
     kp_linear: 0.8                # 线速度 P 增益
     kp_angular: 1.0               # 角速度 P 增益
     min_safe_distance: 0.5        # 避障紧急停机距离 (m)
