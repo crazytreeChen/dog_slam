@@ -147,10 +147,14 @@ def merge_scans(frame_ranges, frame_tfs, angle_min, angle_inc):
 # 3. Likelihood Field
 # ============================================================
 def build_likelihood_field(map_data, info, max_dist=3.0):
+    """构建障碍物距离场, 未知区域设为max_dist作为惩罚"""
     obs = (map_data == 100).astype(np.uint8)
     dist_px = cv2.distanceTransform(1 - obs, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
     max_px = max_dist / info['resolution']
-    return np.clip(dist_px, 0, max_px).astype(np.float32) * info['resolution']
+    lf = np.clip(dist_px, 0, max_px).astype(np.float32) * info['resolution']
+    # 惩罚未知区域: 设为大距离值, 阻止优化器把扫描藏进灰色区域
+    lf[map_data == -1] = max_dist
+    return lf
 
 
 def score_at_pose(points_c, cx, cy, yaw, lf, info):
@@ -193,9 +197,14 @@ def global_likelihood_search(points_c, lf, map_data, info,
     mh_m = info['height'] * res
     H, W = info['height'], info['width']
 
-    # 降采样 (搜1000个点即可)
+    # 随机降采样 (保留约1000点, 避免系统采样偏差)
     ds = max(1, len(points_c) // 1000)
-    pts_ds = points_c[::ds]
+    if ds > 1:
+        rng = np.random.default_rng(42)
+        indices = rng.choice(len(points_c), size=min(len(points_c)//ds, 2000), replace=False)
+        pts_ds = points_c[indices]
+    else:
+        pts_ds = points_c
 
     xs = np.arange(ox + 2, ox + mw_m - 2, coarse_step)
     ys = np.arange(oy + 2, oy + mh_m - 2, coarse_step)
@@ -255,7 +264,7 @@ def fine_search_refine(candidates, points_c, lf, map_data, info,
     t0 = time.time()
     angle_step_int = int(angle_step_deg)
 
-    ds = max(1, len(points_c) // 800)
+    ds = max(1, len(points_c) // 1000)
     pts_ds = points_c[::ds]
 
     refined = []

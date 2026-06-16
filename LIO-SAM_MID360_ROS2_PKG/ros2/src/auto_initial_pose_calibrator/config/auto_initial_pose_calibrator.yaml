@@ -45,7 +45,13 @@
     auto_start: true              # 开机收到地图+scan+odom后自动触发校准
     auto_start_delay: 3.0         # 数据就绪后等待延迟 (秒)
     quick_mode: true              # 快速模式：跳过旋转+运动探索，仅做一次全局匹配
-    auto_publish_initial_pose: true  # 自动发布 /initialpose 给 AMCL
+    auto_publish_initial_pose: false  # 自动发布 /initialpose (false=仅输出日志+debug话题, 供验证)
+
+    # ────── 被动持续定位模式 ──────
+    passive_mode_enabled: true     # 启用被动持续定位 (服务启动即进入)
+    passive_interval: 60.0         # 被动匹配间隔 (秒), 默认1分钟
+    passive_frame_count: 30        # 每次匹配使用最近N帧 (通过ICP拼接)
+    passive_buffer_max: 300        # 循环缓冲区最大帧数
 
     # ────── 旋转采集 ──────
     rotation_min_deg: 180.0
@@ -119,3 +125,18 @@
 
     # ────── 调试对比模式参数 ──────
     debug_comparison_mode: true      # 是否启用调试对比模式
+
+    # ────── 改进匹配参数 (v2) ──────
+    grid_search_step: 1.5           # 网格全局搜索步长 (m)
+    grid_search_angle_step: 10.0    # 网格全局搜索角度步长 (deg)
+    fine_search_radius: 2.5         # 精细局部搜索半径 (m)
+    fine_search_pos_step: 0.3       # 精细搜索位置步长 (m)
+    fine_search_angle_step: 3.0     # 精细搜索角度步长 (deg)
+    min_match_wall_coverage: 0.50   # 最低墙壁覆盖率阈值
+    min_match_coverage: 0.15        # 最低有效区域覆盖率
+
+    # ────── 偏差监控 ──────
+    deviation_monitor_enabled: true  # 是否启用偏差监控
+    deviation_check_interval: 2.0    # 偏差检查间隔 (秒)
+    deviation_alert_threshold: 0.5   # 偏差告警阈值 (m)
+    deviation_alert_window: 180.0    # 开机告警窗口 (秒, 前3分钟严格)

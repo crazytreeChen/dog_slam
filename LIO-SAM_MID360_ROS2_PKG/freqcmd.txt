@@ -304,3 +304,48 @@ sudo systemctl start zg_pointcloud.service
 sudo systemctl stop lio_sam_nav2.service  && sudo systemctl restart rmw_control.service
 
 sudo systemctl start lio_sam_nav2.service && sudo journalctl -u lio_sam_nav2 -f
+
+
+# ════════════════════════════════════════════════════════════
+#  自动初始位姿校准 (auto_initial_pose_calibrator)
+# ════════════════════════════════════════════════════════════
+
+# 编译
+cd ~/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/ && source install/setup.bash
+colcon build --symlink-install --packages-select auto_initial_pose_calibrator
+
+# ── 被动持续定位 (推荐: 不控制机器人, 后台定时匹配) ──
+# 启动
+./scripts/start_passive_calibration.sh           # 小狗
+./scripts/start_passive_calibration.sh rkbot     # 中狗
+
+# 或直接调服务
+ros2 service call /start_passive_calibration std_srvs/srv/Trigger
+ros2 service call /rkbot/start_passive_calibration std_srvs/srv/Trigger
+
+# 停止
+ros2 service call /stop_passive_calibration std_srvs/srv/Trigger
+
+# 查看状态 (含被动最佳估计位姿)
+ros2 service call /auto_calibration_status std_srvs/srv/Trigger
+
+# 可视化被动匹配结果
+ros2 topic echo /debug/auto_initial_pose
+
+# ── 主动校准 (旋转360° + 8方向移动探索 + 避障) ──
+# 启动
+./scripts/start_active_calibration.sh
+ros2 service call /start_active_calibration std_srvs/srv/Trigger
+
+# 查看候选位姿
+ros2 topic echo /debug/candidates
+
+# ── 配置 (auto_initial_pose_calibrator.yaml) ──
+# passive_mode_enabled: true    # 启用被动模式
+# passive_interval: 60.0        # 匹配间隔(秒)
+# passive_frame_count: 30       # 每次匹配用最近N帧
+# passive_buffer_max: 300       # 循环缓冲区
+# auto_publish_initial_pose: false  # 只输出日志+debug, 不发/initialpose
+
+# ── 查看日志 ──
+sudo journalctl -u lio_sam_nav2.service -f | grep -E "被动|主动|偏差|校准|匹配"
