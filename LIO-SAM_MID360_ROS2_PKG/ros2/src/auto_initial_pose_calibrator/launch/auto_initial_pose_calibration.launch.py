@@ -1,5 +1,6 @@
 import os
 import sys
+import yaml
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
@@ -25,6 +26,14 @@ except Exception as e:
 def generate_launch_description():
     # -------- 获取包路径 --------
     pkg_share = get_package_share_directory('auto_initial_pose_calibrator')
+    yaml_path = os.path.join(pkg_share, 'config', 'auto_initial_pose_calibrator.yaml')
+
+    # -------- 从 yaml 加载机器人差异化配置 --------
+    robot_configs = {}
+    with open(yaml_path, 'r') as f:
+        raw = yaml.safe_load(f)
+        params = raw['/**']['ros__parameters']
+        robot_configs = params.get('robot_configs', {})
 
     # -------- 启动参数 --------
     params_file = LaunchConfiguration('params_file')
@@ -33,7 +42,7 @@ def generate_launch_description():
 
     declare_params_file = DeclareLaunchArgument(
         'params_file',
-        default_value=os.path.join(pkg_share, 'config', 'auto_initial_pose_calibrator.yaml'),
+        default_value=yaml_path,
         description='Full path to auto calibration parameter yaml file'
     )
 
@@ -46,17 +55,29 @@ def generate_launch_description():
     declare_ns = DeclareLaunchArgument(
         'ns',
         default_value=DEFAULT_NAMESPACE,
-        description='ROS namespace'
+        description='ROS namespace (rkbot=中狗ZG, 空=小狗)'
     )
+
+    # -------- 根据 namespace 选择机器人差异化参数 --------
+    # ns 为空 → 用 default 配置，节点在 namespace 下，topic 自动拼接
+    # ns=rkbot → 用 rkbot 配置，节点无 namespace，直接使用绝对 topic
+    effective_ns = DEFAULT_NAMESPACE.strip()
+    config_key = effective_ns if effective_ns else 'default'
+    if config_key not in robot_configs:
+        print(f"[WARN] 未找到机器人配置 '{config_key}'，使用 default")
+        config_key = 'default'
+
+    robot_params = robot_configs.get(config_key, {})
+    print(f"[INFO] 机器人配置: {config_key} → {robot_params}")
 
     # -------- 自动校准节点 --------
     auto_calibrator = Node(
         package='auto_initial_pose_calibrator',
         executable='auto_initial_pose_calibrator.py',
         name='auto_initial_pose_calibrator',
-        namespace=ns,
+        namespace=ns if effective_ns != 'rkbot' else '',
         output='screen',
-        parameters=[params_file, {'use_sim_time': use_sim_time}]
+        parameters=[params_file, robot_params, {'use_sim_time': use_sim_time}]
     )
 
     ld = LaunchDescription()

@@ -1,7 +1,12 @@
 # =============================================================================
 # 自动初始位姿校准器配置
-# 室内: 旋转180°+粗匹配→topN候选→前进1m→odom约束筛选→唯一Pose→/initialpose
+# 室内: 旋转360°+粗匹配→topN候选→前进1m→odom约束筛选→唯一Pose→/initialpose
 # 室外: RTK(GPS+双天线航向)+校准→/initialpose
+# 快速模式: 开机静止采集数帧→全局粒子匹配→直接发布最佳位姿给AMCL
+#
+# 通过 launch 参数 ns 自动切换机器人配置:
+#   ns 为空 → 小狗（LIO/scan 话题在 namespace 下，如 /rkbot/scan）
+#   ns=rkbot → 中狗（LIO/scan 话题为全局，如 /laser_scan）
 # =============================================================================
 /**:
   ros__parameters:
@@ -9,30 +14,53 @@
     rtk_topic: "/rtk_pvh"
     rtk_topic_type: "robots_dog_msgs.msg.UniRtkPvh"
     gps_topic: "/fix"
-    map_topic: "map"
-    scan_topic: "scan"
-    odom_topic: "lio/odom"
-    map_file: ""
     cmd_vel_topic: "/cmd_vel"
+    map_file: ""
 
     # ────── 坐标系 ──────
     map_frame: "map"
+
+    # ────── 机器人差异化配置（根据 ns 自动选择）──────
+    # 小狗 (ns 为空): 话题在 namespace 下，如 scan → /ns/scan
+    # 中狗 (ns=rkbot): LIO 话题为全局，如 /laser_scan, /odom/slam_odom
+    robot_configs:
+      default:   # 小狗
+        map_topic: "map"
+        scan_topic: "scan"
+        odom_topic: "lio/robo/odom"
+      rkbot:     # 中狗 ZG
+        map_topic: "/rkbot/map"
+        scan_topic: "/rkbot/scan"
+        odom_topic: "/odom/slam_odom"
 
     # ────── 模式 ──────
     outdoor_mode: true
     indoor_mode: true
 
-    # ────── 旋转阶段 ──────
+    # ────── 日志 ──────
+    log_dir: "/home/ztl/slam_data/logs"  # 日志持久化目录（为空则不写入文件）
+    log_level: "INFO"                    # 文件日志级别: DEBUG/INFO/WARN/ERROR
+
+    # ────── 开机自动启动 ──────
+    auto_start: true              # 开机收到地图+scan+odom后自动触发校准
+    auto_start_delay: 3.0         # 数据就绪后等待延迟 (秒)
+    quick_mode: true              # 快速模式：跳过旋转+运动探索，仅做一次全局匹配
+    auto_publish_initial_pose: true  # 自动发布 /initialpose 给 AMCL
+
+    # ────── 旋转采集 ──────
     rotation_min_deg: 180.0
     rotation_scan_interval_deg: 15.0
+    rotation_enabled: true          # 是否启用旋转360°全覆盖采集 (quick_mode=true时跳过)
+    rotation_total_deg: 360.0       # 旋转总角度（覆盖完整闭环空间）
+    rotation_angular_vel: 0.3       # 旋转角速度 (rad/s)
 
     # ────── 粗匹配 ──────
-    rough_match_particles: 3000
-    rough_match_max_beams: 60
+    rough_match_particles: 5000     # 粗匹配全局粒子数（提高覆盖率）
+    rough_match_max_beams: 120      # 匹配用的最大光束数（提高匹配精度）
     rough_top_n: 10
 
     # ────── 运动/筛选 ──────
-    motion_distance: 0.8          # 基准探索距离
+    motion_distance: 1.0          # 基准探索距离（增大以提升消歧能力）
     motion_angle_threshold_deg: 10.0
     filter_min_score_ratio: 0.3
     max_active_retry: 5           # 最大探索移动轮数
@@ -50,8 +78,18 @@
     ig_sample_dist_2: 2.0         # 似然场特征提取的外圈采样半径 (m)
 
     # ────── 局部子图 ──────
-    submap_scan_count: 20         # 构建单次子图所需的雷达帧数
+    submap_scan_count: 160         # 构建单次子图所需的雷达帧数（多帧增加密度+时序过滤效果）
     submap_angle_resolution: 0.5  # 子集合成 Scan 的角分辨率 (度)
+
+    # ────── 多帧时序一致性过滤 ──────
+    temporal_merge_enabled: true    # 是否启用多帧时序一致性过滤（剔除人/动物/动态障碍物）
+    temporal_merge_min_frames: 5    # 至少来自多少不同帧才认定为静态墙壁
+    temporal_merge_radius: 0.15     # 判断邻域一致性用的搜索半径 (m)
+
+    # ────── 扫描离群点过滤 ──────
+    scan_outlier_filter: true       # 是否启用半径离群点过滤（去除动态障碍物/杂点）
+    scan_outlier_radius: 0.3        # 邻域搜索半径 (m)
+    scan_outlier_min_neighbors: 3   # 最少邻居点数（低于此数视为离群点）
 
     # ────── 似然场 ──────
     likelihood_max_dist: 2.0
@@ -67,3 +105,17 @@
 
     use_sim_time: false
     calibration_file: ""
+
+    # ────── ICP 参数 ──────
+    icp_max_iterations: 15          # ICP 最大迭代次数
+    icp_tolerance_trans: 0.01      # ICP 平移收敛阈值 (m)
+    icp_tolerance_rot_deg: 0.1     # ICP 旋转收敛阈值 (度)
+    icp_downsample_step: 5          # ICP 降采样步长
+
+    # ────── 运动验证参数 ──────
+    motion_verification_enabled: true  # 是否启用运动验证
+    motion_verification_threshold: 0.3 # 运动验证距离误差阈值 (m)
+    motion_verification_angle_threshold_deg: 15.0  # 运动验证角度误差阈值 (度)
+
+    # ────── 调试对比模式参数 ──────
+    debug_comparison_mode: true      # 是否启用调试对比模式
