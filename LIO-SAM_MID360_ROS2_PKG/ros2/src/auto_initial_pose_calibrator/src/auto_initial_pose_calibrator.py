@@ -5,11 +5,11 @@
 主要流程：
   ① 开启服务 → 调用 /start_auto_calibration
   ② 进入 BOOT_DELAY 状态，静止等待 2 秒稳定数据
-  ③ 进入 COLLECTING_SUBMAP1 状态，收集 20 帧雷达数据结合 Odom 合成 Submap 1
+  ③ 进入 COLLECTING_SUBMAP1 状态，收集 30 帧雷达数据结合 Odom 合成 Submap 1
   ④ 进入 ROUGH_MATCHING 状态，使用分层粗精两阶段粒子搜索计算 Top N 候选位姿
   ⑤ 进入 SELECTING_ACTIVE_MOTION 状态，计算各安全方向的信息增益，选择最优探索动作
   ⑥ 进入 MOVING 状态，执行局部 P 控制器，并在运动中实时通过雷达避障监控
-  ⑦ 运动结束（或因避障提前终止）进入 COLLECTING_SUBMAP2 状态，收集 20 帧合成 Submap 2
+  ⑦ 运动结束（或因避障提前终止）进入 COLLECTING_SUBMAP2 状态，收集 30 帧合成 Submap 2
   ⑧ 进入 FILTERING 状态，传播候选位姿，利用 Submap 2 重新评分，判断是否唯一收敛
   ⑨ 若唯一收敛，发布 /initialpose 并转换到 DONE 状态；若未收敛，依据动态步长继续进行下轮探索
 """
@@ -107,7 +107,7 @@ class AutoInitialPoseCalibrator(Node):
         self.declare_parameter('ig_sample_dist_2', 2.0)
 
         # 局部子图参数
-        self.declare_parameter('submap_scan_count', 20)
+        self.declare_parameter('submap_scan_count', 30)
         self.declare_parameter('submap_angle_resolution', 0.5)
         
         # 旋转全覆盖采集参数
@@ -945,7 +945,7 @@ class AutoInitialPoseCalibrator(Node):
                 if len(self.scan_buffer) == 1:
                     phase_name = '旋转采集' if self.indoor_phase == IndoorPhase.ROTATING_360 else '子图构建'
                     self._logger.info(f'[{phase_name}] 开始累积扫描帧，使用 ICP 帧间匹配拼接（不依赖 odom）...')
-                if len(self.scan_buffer) % 20 == 0:
+                if len(self.scan_buffer) % 10 == 0:
                     self._logger.info(f'[子图构建] 已累积 {len(self.scan_buffer)} 帧')
                 if len(self.scan_buffer) >= self.submap_scan_count:
                     self.submap_ready = True

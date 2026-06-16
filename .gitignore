@@ -218,3 +218,23 @@ LIO-SAM_MID360_ROS2_PKG/ros2/install/
 LIO-SAM_MID360_ROS2_PKG/ros2/log/
 LIO-SAM_MID360_ROS2_PKG/ros2/src/Super-LIO/src/super_lio/map/
 
+.codebuddy/plans/remove_odom_dependency_e8f53571(未完成).md
+.codebuddy/plans/remove_odom_dependency_v2_d564b0a8.md
+.mimocode/plans/1781507354163-playful-otter.md
+.reasonix/desktop-topic-created-at.json
+.reasonix/desktop-topic-title-sources.json
+.reasonix/desktop-topic-titles.json
+.omo/run-continuation/ses_130431eaeffeGDq6EgSQLVxPu0.json
+.mimocode/plans/1781526187481-kind-engine.md
+.codegraph/.gitignore
+.codegraph/daemon.pid
+LIO-SAM_MID360_ROS2_PKG/ros2/src/auto_initial_pose_calibrator/scan_viz/aa34812001c24bb3b047ebce08eca6be.png
+LIO-SAM_MID360_ROS2_PKG/ros2/src/auto_initial_pose_calibrator/scan_viz/area_segment_match.png
+LIO-SAM_MID360_ROS2_PKG/ros2/src/auto_initial_pose_calibrator/scan_viz/contour_hu_match.png
+LIO-SAM_MID360_ROS2_PKG/ros2/src/auto_initial_pose_calibrator/scan_viz/corner_graph_match.png
+LIO-SAM_MID360_ROS2_PKG/ros2/src/auto_initial_pose_calibrator/scan_viz/corner_match_result.png
+LIO-SAM_MID360_ROS2_PKG/ros2/src/auto_initial_pose_calibrator/scan_viz/debug_match_data.npz
+LIO-SAM_MID360_ROS2_PKG/ros2/src/auto_initial_pose_calibrator/scan_viz/simple_loc_result.png
+LIO-SAM_MID360_ROS2_PKG/ros2/src/auto_initial_pose_calibrator/scan_viz/test.py
+LIO-SAM_MID360_ROS2_PKG/ros2/src/auto_initial_pose_calibrator/scan_viz/test2.py
+.codegraph/codegraph.lock

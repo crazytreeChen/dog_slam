@@ -1,0 +1,130 @@
+# Reasonix configuration.
+# Resolution order: flag > ./reasonix.toml > ~/AppData/Roaming/reasonix/config.toml > built-in defaults.
+# Secrets come from the environment via api_key_env; never put keys here.
+
+config_version = 2   # schema marker for diagnostics; old versions may ignore it
+default_model = "deepseek-flash"
+# language      = "zh"   # ui/model language; empty = auto-detect from $LANG / $REASONIX_LANG
+
+[agent]
+# system_prompt = """..."""   # omit to use the built-in prompt for this version
+# system_prompt_file = "prompts/system.md"   # overrides system_prompt when set
+# max_steps         = 0   # executor tool-call rounds; 0 = no limit
+# planner_max_steps = 12   # planner read-only tool-call rounds; 0 = no limit
+temperature       = 0.0
+auto_plan   = "off"   # off|on; off keeps plan mode manual
+# reasoning_language = "zh"   # visible reasoning language: auto|zh|en
+# auto_plan_classifier = "deepseek-flash"   # optional; only used for borderline tasks
+soft_compact_ratio  = 0.5   # notice only; keeps cache-first prefix intact
+compact_ratio       = 0.8   # try compacting when prompt reaches this fraction
+compact_force_ratio = 0.9   # force compacting at this high-water mark
+cold_resume_prune   = true   # elide stale tool results when reopening a session past the provider cache window
+# planner_model = "mimo"   # optional: enable two-model collaboration
+# subagent_model = "deepseek-pro"   # optional default for runAs=subagent skills
+# subagent_models = { review = "deepseek-pro", security_review = "deepseek-pro" }   # per-skill overrides
+# subagent_effort = "high"   # optional default effort for subagents
+# subagent_efforts = { review = "max", task = "high" }   # per-tool/skill effort overrides
+# output_style = "explanatory"   # explanatory | learning | concise | custom; empty = default
+
+[[providers]]
+name        = "deepseek-flash"
+kind        = "openai"
+base_url    = "https://api.deepseek.com"
+model       = "deepseek-v4-flash"
+api_key_env = "DEEPSEEK_API_KEY"
+balance_url = "https://api.deepseek.com/user/balance"   # optional; wallet-balance endpoint shown in the status bar
+context_window = 1000000   # tokens; compaction triggers near this limit
+price       = { cache_hit = 0.0028, input = 0.14, output = 0.28, currency = "$" }   # provider-wide fallback, per 1M tokens
+prices      = { "deepseek-v4-flash" = { cache_hit = 0.0028, input = 0.14, output = 0.28, currency = "$" } }   # per-model prices, per 1M tokens
+
+[[providers]]
+name        = "deepseek-pro"
+kind        = "openai"
+base_url    = "https://api.deepseek.com"
+model       = "deepseek-v4-pro"
+api_key_env = "DEEPSEEK_API_KEY"
+balance_url = "https://api.deepseek.com/user/balance"   # optional; wallet-balance endpoint shown in the status bar
+context_window = 1000000   # tokens; compaction triggers near this limit
+price       = { cache_hit = 0.003625, input = 0.435, output = 0.87, currency = "$" }   # provider-wide fallback, per 1M tokens
+prices      = { "deepseek-v4-pro" = { cache_hit = 0.003625, input = 0.435, output = 0.87, currency = "$" } }   # per-model prices, per 1M tokens
+
+[[providers]]
+name        = "mimo-pro"
+kind        = "openai"
+base_url    = "https://token-plan-cn.xiaomimimo.com/v1"
+model       = "mimo-v2.5-pro"
+api_key_env = "MIMO_API_KEY"
+context_window = 1000000   # tokens; compaction triggers near this limit
+price       = { cache_hit = 0.025, input = 3, output = 6, currency = "¥" }   # provider-wide fallback, per 1M tokens
+no_proxy    = true   # reach this base_url directly, never via the proxy
+
+[[providers]]
+name        = "mimo-flash"
+kind        = "openai"
+base_url    = "https://token-plan-cn.xiaomimimo.com/v1"
+model       = "mimo-v2.5"
+api_key_env = "MIMO_API_KEY"
+context_window = 1000000   # tokens; compaction triggers near this limit
+price       = { cache_hit = 0.02, input = 1, output = 2, currency = "¥" }   # provider-wide fallback, per 1M tokens
+no_proxy    = true   # reach this base_url directly, never via the proxy
+
+[tools]
+enabled = []   # empty = all built-in tools
+bash_timeout_seconds = 120   # foreground safety cap; set 0 for no tool-local cap
+
+[codegraph]
+enabled      = true   # built-in MCP server; off by default for first-run sessions
+auto_install = true   # fetch the runtime when CodeGraph is enabled but missing
+# path       = ""   # empty = cache, then PATH, then a bundle beside reasonix
+
+[builtin_mcp]
+time_enabled = true   # built-in Time MCP; off until manually enabled
+context7_enabled = false   # built-in Context7 MCP; off until manually enabled
+
+[lsp]
+enabled = true   # language server tools; servers launch lazily when used
+# [lsp.servers.go]
+# command = "gopls"
+# args = []
+# extensions = [".go"]
+
+[skills]
+# paths = ["~/my-skills", "../shared/skills"]   # extra custom skill roots
+# excluded_paths = ["~/.agents/skills"]   # hide convention roots without deleting folders
+# max_depth = 3   # nested scan depth; set 1 for legacy root-only discovery
+# disabled_skills = ["review"]   # hide noisy or unwanted skills
+
+[permissions]
+# Per-call gating. mode = writer fallback when no rule matches: ask|allow|deny.
+# Readers always default to allow. Precedence: deny > ask > allow > fallback.
+# Rules are "Tool" or "Tool(specifier)"; e.g. Bash(go test:*), Edit(src/**).
+mode  = "ask"
+# deny = ["Bash(rm -rf*)", "Bash(git push*)"]   # hard-blocked in every mode
+allow = ["Edit", "Bash(python3 -c \"import ast; ast.parse(open('LIO-SAM_MID360_ROS2_PKG/ros2/src/auto_initial_pose_calibrator/scripts/corner_graph_matcher.py').read()); print('OK')\")", "Bash(cd LIO-SAM_MID360_ROS2_PKG/ros2/src/auto_initial_pose_calibrator && timeout 120 python3 scripts/corner_graph_matcher.py --data scan_viz/debug_match_data.npz --output scan_viz 2>&1 | grep -v 'UserWarning\\|Glyph\\|missing from\\|plt\\.\\|plt.savefig')", "Bash(cd LIO-SAM_MID360_ROS2_PKG/ros2/src/auto_initial_pose_calibrator && timeout 30 python3 -c \"\nimport numpy as np, cv2, math, time\ndata = np.load('scan_viz/debug_match_data.npz', allow_pickle=True)\nmd = data['map_data']\nwall = (md == 100).astype(np.uint8)*255\nt0 = time.time()\nedges = cv2.Canny(wall, 50, 150)\nlines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=25, minLineLength=20, maxLineGap=15)\nprint(f'Canny+HoughLinesP: {time.time()-t0:.1f}s, lines={len(lines) if lines is not None else 0}')\n\" 2>&1)", "Bash(cd LIO-SAM_MID360_ROS2_PKG/ros2/src/auto_initial_pose_calibrator && timeout 30 python3 -c \"\nimport numpy as np, math, time\nfrom scripts.corner_graph_matcher import *\nimport sys\n\n# quick test: just precompute + run 10 positions\ndata = np.load('scan_viz/debug_match_data.npz', allow_pickle=True)\nmd = data['map_data']\ninfo = {'resolution': float(data['map_resolution']), 'width': int(data['map_width']),\n        'height': int(data['map_height']), 'origin_x': float(data['map_origin_x']),\n        'origin_y': float(data['map_origin_y'])}\nfts = data['frame_tfs']\namin = float(data['frame_angle_min'])\nainc = float(data['frame_angle_increment'])\nfrs = [np.array(data[f'frame_ranges_{i}'], dtype=np.float64) for i in range(30)]\n\npts, st = merge_and_filter(frs, fts, amin, ainc)\nprint(f'Filtered: {len(pts)} pts')\n\n# Time precompute\nt0 = time.time()\nall_c = extract_all_map_corners_precomputed(md, info, min_corner_angle_deg=25)\nprint(f'Precompute: {time.time()-t0:.1f}s, {len(all_c)} corners')\n\n# Time scan corners\nt0 = time.time()\nsc = extract_scan_corners(pts, min_corner_angle_deg=25, epsilon_m=0.2)\nprint(f'Scan corners: {time.time()-t0:.1f}s, {len(sc)}')\n\n# Time 5 random positions\nimport random\nt0 = time.time()\nfor _ in range(5):\n    x, y = random.uniform(5,40), random.uniform(5,40)\n    nearby = query_nearby_corners(all_c, x, y, 10.0)\n    result, score = match_corner_sets(sc, nearby, max_residual=2.0)\n    pairs = result['n_pairs'] if result else 0\nprint(f'5 positions: {time.time()-t0:.1f}s')\n\" 2>&1)"]
+# ask = ["Edit(src/**)"]   # force a prompt even if otherwise allowed
+
+[sandbox]
+# Confine tool blast radius. File-writers (write_file/edit_file/multi_edit/move_file)
+# may only write under workspace_root (empty = current dir) + allow_write.
+# bash = "enforce" (default) jails each command in an OS sandbox (macOS now;
+# graceful fallback elsewhere); "off" disables it. network allows egress.
+# workspace_root = ""            # default: current working directory
+# allow_write = ["/tmp"]          # extra dirs writers may also modify
+bash    = "enforce"
+network = true
+
+[statusline]
+# A custom status line: a command whose first stdout line replaces the built-in
+# data row. It receives {"model","contextUsed","contextWindow","cwd"} as JSON on stdin.
+# command = "my-statusline.sh"
+
+# External MCP servers. type: "stdio" (default, a subprocess) | "http" | "sse".
+# ${VAR} / ${VAR:-default} are expanded from the environment in command/args/env/url/headers.
+# [[plugins]]
+# name    = "example"
+# command = "reasonix-plugin-example"
+# [[plugins]]                                  # a remote server over Streamable HTTP
+# name    = "stripe"
+# type    = "http"
+# url     = "https://mcp.stripe.com"
+# headers = { Authorization = "Bearer ${STRIPE_KEY}" }
