@@ -268,9 +268,13 @@ def local_search_constrained(pts, cx, cy, yaw, lf, map_data, info, ms,
 # 单候选完整递推 (复刻 MultiStepLocalizer 的逐帧逻辑, 种子由外部给定)
 # ============================================================
 def recurse_from_seed(frames, seed_pose, ms, lf, map_data, info, decay=0.7, min_sigma=0.5,
-                      constrained=False):
+                      constrained=True, verbose=False):
     """
     从指定首帧种子位姿出发, 逐帧 ICP + 局部搜索递推。
+
+    constrained=True → 使用 local_search_constrained (墙穿惩罚),
+                       防止轨迹滑入几何相似但错误的房间。数据4这类多房间场景必备。
+    verbose → 逐帧打印 ICP/local_search/reject 详情。
 
     返回:
       final_pose (x,y,yaw), history[(i,x,y,yaw,sigma,wall%,score)],
@@ -289,11 +293,14 @@ def recurse_from_seed(frames, seed_pose, ms, lf, map_data, info, decay=0.7, min_
         if i > 0:
             prev = frames[i - 1][0]
             R, t = np.eye(2), np.zeros(2)
+            icp_used = False
             if len(pts) > 10 and len(prev) > 10:
                 R, t = ms.icp_scan_to_scan(pts, prev)
                 dyaw_icp = math.atan2(R[1, 0], R[0, 0])
                 if abs(dyaw_icp) >= math.radians(30):  # 旋转过快 ICP 不可靠
                     R, t = np.eye(2), np.zeros(2)
+                else:
+                    icp_used = True
             dyaw_icp = math.atan2(R[1, 0], R[0, 0])
 
             c_m, s_m = math.cos(mu[2]), math.sin(mu[2])
@@ -310,9 +317,47 @@ def recurse_from_seed(frames, seed_pose, ms, lf, map_data, info, decay=0.7, min_
             else:
                 pose, _ = ms.local_search(pts, pred_x, pred_y, pred_yaw, lf, info,
                                           radius=search_radius, angle_range=int(angle_range))
+
+            # ── ICP 失败保护 (复刻 MultiStepLocalizer.run() 第490-510行) ──
+            # 搜索后计算当前帧的墙壁覆盖率, 防止 local_search 滑到错误房间
+            c_y, s_y = math.cos(pose[2]), math.sin(pose[2])
+            res_i = info['resolution']; ox_i = info['origin_x']; oy_i = info['origin_y']
+            H_i, W_i = info['height'], info['width']
+            mx = c_y * pts[:, 0] - s_y * pts[:, 1] + pose[0]
+            my = s_y * pts[:, 0] + c_y * pts[:, 1] + pose[1]
+            ci = ((mx - ox_i) / res_i + 0.5).astype(np.int32)
+            ri = ((my - oy_i) / res_i + 0.5).astype(np.int32)
+            mv = (ci >= 0) & (ci < W_i) & (ri >= 0) & (ri < H_i)
+            cells = map_data[ri[mv], ci[mv]] if int(np.sum(mv)) > 10 else np.array([-1])
+            valid_c = (cells != -1); n_vc = int(np.sum(valid_c))
+            w_v = int(np.sum(cells[valid_c] == 100)) if n_vc > 0 else 0
+            f_v = int(np.sum(cells[valid_c] == 0)) if n_vc > 0 else 0
+            wall_pct_per_frame = w_v / max(w_v + f_v, 1)
+            icp_jump = math.sqrt(t[0]**2 + t[1]**2) if icp_used else 0
+
+            rejected = False
+            # 条件1: 墙壁覆盖率 < 20% → 直接拒绝
+            # 条件2: ICP跳变 > 2m 且覆盖率 < 35% → 拒绝 (保留上一帧位置, 只更新角度)
+            if i > 3 and (wall_pct_per_frame < 0.20 or (icp_jump > 2.0 and wall_pct_per_frame < 0.35)):
+                pose = (mu[0], mu[1], pose[2])
+                rejected = True
+
             mu = list(pose)
             sigma = max(sigma * decay, min_sigma)
             sigma_angle = max(sigma_angle * decay, 2.0)
+
+            if verbose:
+                dx = mu[0] - pred_x; dy = mu[1] - pred_y
+                corr = math.hypot(dx, dy)
+                dya = math.degrees(abs(math.atan2(math.sin(mu[2] - pred_yaw),
+                                                  math.cos(mu[2] - pred_yaw))))
+                icp_tag = "[ICP]" if icp_used else "[pred]"
+                mode_tag = "[cstr]" if constrained else "[free]"
+                rej_tag = " [REJECT]" if rejected else ""
+                print(f"  f{i:02d} {icp_tag}{mode_tag}: pred=({pred_x:.2f},{pred_y:.2f}) "
+                      f"corr={corr:.3f}m,{dya:.1f}deg "
+                      f"→ ({mu[0]:.2f},{mu[1]:.2f},{math.degrees(mu[2]):.0f}°) "
+                      f"jump={icp_jump:.1f}m wall={100*wall_pct_per_frame:.0f}%{rej_tag}")
 
         wp, sc = eval_pose_full(pts, mu, map_data, lf, info, ms)
         history.append((i, mu[0], mu[1], mu[2], sigma, wp, sc))
@@ -417,6 +462,16 @@ def main():
     parser.add_argument('--topk', type=int, default=10, help='首帧保留候选数')
     parser.add_argument('--decay', type=float, default=0.7)
     parser.add_argument('--force', action='store_true', help='预检失败仍强制定位')
+    parser.add_argument('--constrained', action='store_true', default=True,
+                        help='启用墙穿约束搜索 (默认, 防轨迹漂移到相似房间)')
+    parser.add_argument('--no-constrained', dest='constrained', action='store_false',
+                        help='禁用墙穿约束 (回退纯似然场搜索)')
+    parser.add_argument('--force-wallhit', action='store_true',
+                        help='始终强制启用 WallHit 独立搜索 (跳过 raycast 阈值检查)')
+    parser.add_argument('--skip-wallhit', action='store_true',
+                        help='跳过 WallHit 回退 (强制只用似然场首帧结果)')
+    parser.add_argument('--verbose', action='store_true',
+                        help='逐帧打印递推详情')
     args = parser.parse_args()
 
     npz_path = os.path.normpath(args.data)
@@ -458,12 +513,24 @@ def main():
     #    说明似然场被几何相似但内容不同的房间吸引, 切换墙壁命中评分独立搜索。
     #    这是 data_4 (下房间扫描) 能找到正确房间的关键 — 上房间墙更完整,
     #    似然场会偏爱上房间, 但 wallhit 严格要求端点真的落在墙像素上。
-    best_rc = ms.score_pose_raycast(pts0, cand0[0][1], cand0[0][2],
-                                     math.radians(cand0[0][3]), map_data, info)
-    rc_valid_rate = best_rc[2] / max(best_rc[1], 1) if best_rc[0] > -1e8 else 0
-    print(f"  [诊断] 似然首选射线投射有效率={rc_valid_rate:.0%}")
-    if rc_valid_rate < 0.30:
-        print(f"  [WallHit fallback] 启动独立墙壁命中搜索...")
+    do_wallhit = False
+    if args.skip_wallhit:
+        print(f"  [WallHit] --skip-wallhit 指定, 跳过独立墙壁搜索")
+    elif args.force_wallhit:
+        print(f"  [WallHit] --force-wallhit 指定, 强制执行独立墙壁搜索")
+        do_wallhit = True
+    else:
+        best_rc = ms.score_pose_raycast(pts0, cand0[0][1], cand0[0][2],
+                                         math.radians(cand0[0][3]), map_data, info)
+        rc_valid_rate = best_rc[2] / max(best_rc[1], 1) if best_rc[0] > -1e8 else 0
+        print(f"  [诊断] 似然首选射线投射有效率={rc_valid_rate:.0%}")
+        if rc_valid_rate < 0.30:
+            print(f"  [WallHit fallback] 启动独立墙壁命中搜索...")
+            do_wallhit = True
+        else:
+            print(f"  [WallHit] raycast有效={rc_valid_rate:.0%}≥30%, 信任似然场首帧结果")
+
+    if do_wallhit:
         wh_candidates = []
         res_m = info['resolution']; ox_m = info['origin_x']; oy_m = info['origin_y']
         mw_m = info['width'] * res_m; mh_m = info['height'] * res_m
@@ -499,7 +566,8 @@ def main():
         seed, _ = ms.local_search(pts0, hx, hy, math.radians(had), lf, info,
                                   radius=2.0, pos_step=0.3)
         final, hist, mscore, mwall, unk = recurse_from_seed(
-            frame_pts, seed, ms, lf, map_data, info, decay=args.decay)
+            frame_pts, seed, ms, lf, map_data, info, decay=args.decay,
+            constrained=args.constrained, verbose=args.verbose)
         # 几何自洽双约束 (主判据): 端点灰色率 + 墙穿空旷率
         gray_end, wall_free, sensor_nf = geometry_constraints(final, frame_ranges, frame_tfs,
                                                               angle_min, angle_inc, map_data, info)
@@ -531,30 +599,54 @@ def main():
 
     # ── 消歧策略 ──
     #  传感器只排除"站墙里"的(放宽灰色区), 因为下房间地图可能未完整扫描
-    #  排名: mean_score(似然) 为主 + wallhit 加分(贴墙好的优先) - 墙穿空旷惩罚
+    #  排名: 多维综合评分
+    #    似然场(mean_score) 在几何相似房间中区分度不足 → 降权
+    #    墙壁命中(wallhit) 严格贴合, 可信度高
+    #    墙穿空旷(wall_free) 关键区分信号: 正确位姿下射线穿过自由区, 错误位姿穿墙
+    #    raycast 正交验证: 光线投射误差(米), 越小越可信, 原理独立于似然场
+    #    gray_end 端点灰色率: 端点落在地图未知区说明位姿彻底错误
     SENSOR_WALL_MAX = 50.0  # 传感器在墙里的帧比例超此值 -> 硬淘汰
     for r in dedup:
         r['sensor_ok'] = r['sensor_nf'] <= SENSOR_WALL_MAX
         r['valid']     = r['sensor_ok']
-        # mean_score 范围 ~0.5-1.4, wallhit 范围 ~0-1.2, wall_free 范围 0-15
-        r['combined'] = (r['mean_score'] * 1.0
-                         + r['wallhit'] * 0.5
-                         - r['wall_free'] * 0.05
-                         - r['sensor_nf'] * 0.02)
+        # 各指标典型范围:
+        #   mean_score ~0.5-1.4, wallhit ~0-1.2, wall_free 0-20%
+        #   raycast ~0-10m, gray_end 0-100%, sensor_nf 0-100%
+        #
+        # 多房间消歧靠 wall_free (穿墙率差异 5-15%), raycast (正交验证), gray_end (端点灰):
+        #   这些指标在正确/错误房间之间差异显著 (正确: wall_free~2% raycast~2m gray_end~10%)
+        #   而 mean_score 和 wallhit 在相似房间间区分不足
+        r['combined'] = (r['mean_score'] * 0.3        # 似然场弱化 (几何相似房间区分不足)
+                         + r['wallhit'] * 0.5         # 墙壁命中: 严格贴墙更可信
+                         - r['wall_free'] * 0.20      # 墙穿空旷增强 (关键消歧)
+                         - r['raycast'] * 0.25        # raycast 误差增强 (正交验证)
+                         - r['gray_end'] * 0.015      # 端点灰色率增强
+                         - r['sensor_nf'] * 0.03)     # 传感器非自由增强
     dedup.sort(key=lambda r: (r['valid'], r['combined']), reverse=True)
     results = dedup
     best = results[0]
 
     print("\n" + "=" * 60)
-    print(f"步骤 4: 候选排名 (mean_score 主导 + wallhit 加分; 传感器在墙里≤{SENSOR_WALL_MAX}%)")
+    print(f"步骤 4: 候选排名 (多维综合评分; 传感器在墙里≤{SENSOR_WALL_MAX}%)")
     print("=" * 60)
     for rank, r in enumerate(results):
         fx, fy, fyaw = r['final']
         trust = "可信" if r['valid'] else "淘汰(传感器在墙里)"
         tag = " ← 选中" if r is best else ""
-        print(f"  排名{rank}: 墙命中={r['wallhit']:.2f} 综合分={r['combined']:.2f} | "
-              f"传感器非自由={r['sensor_nf']:.0f}% 端点灰={r['gray_end']:.0f}% 墙穿={r['wall_free']:.1f}% "
-              f"均分={r['mean_score']:.2f} ({fx:.1f},{fy:.1f},{math.degrees(fyaw):.0f}°) [{trust}]{tag}")
+        # 评分拆解: 更直观看出各维度贡献
+        sc_lf  = r['mean_score'] * 0.3
+        sc_wh  = r['wallhit'] * 0.5
+        sc_wf  = -r['wall_free'] * 0.20
+        sc_rc  = -r['raycast'] * 0.25
+        sc_ge  = -r['gray_end'] * 0.015
+        sc_sn  = -r['sensor_nf'] * 0.03
+        print(f"  排名{rank}: 综合={r['combined']:.2f} "
+              f"| 似然={sc_lf:+.2f} 墙命中={sc_wh:+.2f} 穿墙={sc_wf:+.2f} "
+              f"raycast={sc_rc:+.2f} 灰色={sc_ge:+.2f} 传感={sc_sn:+.2f}")
+        print(f"          raw: mean_score={r['mean_score']:.2f} wallhit={r['wallhit']:.2f} "
+              f"wall_free={r['wall_free']:.1f}% raycast={r['raycast']:.2f}m "
+              f"gray_end={r['gray_end']:.0f}% sensor_nf={r['sensor_nf']:.0f}%")
+        print(f"          位姿 ({fx:.1f},{fy:.1f},{math.degrees(fyaw):.0f}°) [{trust}]{tag}")
     if not best['valid']:
         print("  [警告] 最优候选也站在墙里, 定位不可信")
 
