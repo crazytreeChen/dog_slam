@@ -30,6 +30,7 @@ import argparse
 import importlib.util
 
 import numpy as np
+import cv2
 
 try:
     import matplotlib
@@ -262,6 +263,180 @@ def local_search_constrained(pts, cx, cy, yaw, lf, map_data, info, ms,
                     best_score = sc
                     best_pose = (ax, ay, ayaw)
     return best_pose, best_score
+
+
+# ============================================================
+# 房间分割: 形态学关门分离连通房间
+# ============================================================
+def find_rooms_freespace(map_data, info, gap_m=2.0, min_area_m2=20,
+                         max_area_m2=800):
+    """
+    用形态学膨胀关闭走廊/门洞, 分割独立房间。
+    返回房间列表, 按中心 x 排序。过滤超大房间 (>max_area_m2, 即走廊未关死)。
+    若过滤后无剩余, 返回全图作为单房间回退。
+    Return: [(cx, cy, bbox_x0, bbox_y0, bbox_x1, bbox_y1, area_m2), ...]
+    """
+    res = info['resolution']; ox = info['origin_x']; oy = info['origin_y']
+    W_img = info['width']; H_img = info['height']
+    gap_px = int(gap_m / res)
+    wall_mask = (map_data == 100).astype(np.uint8)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (gap_px, gap_px))
+    wall_dilated = cv2.dilate(wall_mask, kernel, iterations=1)
+    room_mask = (wall_dilated == 0).astype(np.uint8)
+    # 清除小噪点
+    room_mask = cv2.morphologyEx(room_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(room_mask, connectivity=4)
+
+    rooms = []
+    for i in range(1, num_labels):
+        a = stats[i, cv2.CC_STAT_AREA]
+        area_m2 = a * res * res
+        if area_m2 < min_area_m2:
+            continue
+        l = stats[i, cv2.CC_STAT_LEFT]; t = stats[i, cv2.CC_STAT_TOP]
+        w = stats[i, cv2.CC_STAT_WIDTH]; h = stats[i, cv2.CC_STAT_HEIGHT]
+        # 过滤超大房间 (走廊未关死, 包含全图连通区)
+        if max_area_m2 is not None and area_m2 > max_area_m2:
+            continue
+        cx = ox + (l + w / 2) * res
+        cy = oy + (t + h / 2) * res
+        bx0 = ox + l * res;          by0 = oy + t * res
+        bx1 = ox + (l + w) * res;    by1 = oy + (t + h) * res
+        rooms.append((cx, cy, bx0, by0, bx1, by1, area_m2))
+
+    if not rooms:
+        # 回退: 全图作为单房间
+        map_x0 = ox; map_y0 = oy
+        map_x1 = ox + W_img * res; map_y1 = oy + H_img * res
+        rooms.append((ox + W_img * res / 2, oy + H_img * res / 2,
+                      map_x0, map_y0, map_x1, map_y1,
+                      W_img * H_img * res * res))
+    else:
+        rooms.sort(key=lambda r: r[0])  # 按 x 排序
+    return rooms
+
+
+# ============================================================
+# 方案A: 自由空间最大化评分 (data_4 开放空间定位)
+# ============================================================
+def score_pose_freespace(pts, x, y, yaw, map_data, info):
+    """
+    自由空间评分: 机器人位于开放空间时, 扫描点应绝大多数落在已知自由区(0)。
+    返回 (combined_score, free_ratio, wall_ratio, n_free, n_wall, n_unknown, n_total)
+
+    评分 = free_ratio * (n_free / n_total) - 2.0 * wall_ratio
+    同时考虑 1) 自由占比(质量) 和 2) 绝对自由像素数(覆盖量),
+    避免"所有点落未知区只剩1个自由点也拿满分"的退化情况。
+    """
+    res = info['resolution']; ox = info['origin_x']; oy = info['origin_y']
+    H, W = info['height'], info['width']
+    c, s = math.cos(yaw), math.sin(yaw)
+    mx = c * pts[:, 0] - s * pts[:, 1] + x
+    my = s * pts[:, 0] + c * pts[:, 1] + y
+    col = ((mx - ox) / res + 0.5).astype(np.int32)
+    row = ((my - oy) / res + 0.5).astype(np.int32)
+    v = (col >= 0) & (col < W) & (row >= 0) & (row < H)
+    cells = map_data[row[v], col[v]]
+    n_total = len(pts)
+    n_free = int(np.sum(cells == 0))
+    n_wall = int(np.sum(cells == 100))
+    n_unknown = int(np.sum(cells == -1))
+    known = n_free + n_wall
+    if known > 10:
+        free_ratio = n_free / known
+        wall_ratio = n_wall / known
+    else:
+        free_ratio = 0.0; wall_ratio = 1.0
+    # 混合评分: 自由率(质量) * 绝对覆盖(数量) / 总点数 - 墙惩罚
+    coverage_factor = n_free / max(n_total, 1)
+    score = free_ratio * coverage_factor - 2.0 * wall_ratio * (n_wall / max(n_total, 1))
+    return score, free_ratio, wall_ratio, n_free, n_wall, n_unknown, n_total
+
+
+def global_search_freespace(pts, map_data, info, top_k=10,
+                            xy_step=2.0, angle_step_deg=15, search_bbox=None):
+    """
+    自由空间最大化全局搜索。
+    遍历地图网格，对每个候选位姿计算扫描点落在已知自由区的比例。
+    可选 search_bbox=(x_min, y_min, x_max, y_max) 将搜索约束在指定矩形内。
+    返回 Top-K (score, x, y, deg) 经 NMS 去重。
+    """
+    res = info['resolution']; ox = info['origin_x']; oy = info['origin_y']
+    mw = info['width'] * res; mh = info['height'] * res
+    if search_bbox is not None:
+        x_min, y_min, x_max, y_max = search_bbox
+        x_start = max(ox + 3, x_min); x_end = min(ox + mw - 3, x_max)
+        y_start = max(oy + 3, y_min); y_end = min(oy + mh - 3, y_max)
+    else:
+        x_start, x_end = ox + 3, ox + mw - 3
+        y_start, y_end = oy + 3, oy + mh - 3
+    candidates = []
+    for x in np.arange(x_start, x_end, xy_step):
+        for y in np.arange(y_start, y_end, xy_step):
+            for adeg in range(0, 360, angle_step_deg):
+                sc, fr, wr, nf, nw, nu, nt = score_pose_freespace(
+                    pts, x, y, math.radians(adeg), map_data, info)
+                if sc > 0.05 and nf > 50:  # 至少50点落自由区, 且有区分度
+                    candidates.append((sc, x, y, adeg, fr, wr, nf, nw))
+    if not candidates:
+        return []
+    candidates.sort(key=lambda c: c[0], reverse=True)
+    nms = []
+    for item in candidates:
+        sc, x, y, adeg = item[0], item[1], item[2], item[3]
+        if any(math.hypot(x - nx, y - ny) < 3.0 for _, nx, ny, _ in nms):
+            continue
+        nms.append((sc, x, y, adeg))
+        if len(nms) >= top_k:
+            break
+    return nms
+
+
+def global_search_freespace_per_room(pts, map_data, info, top_k=3,
+                                     xy_step=2.0, angle_step_deg=15,
+                                     gap_m=2.0, min_area_m2=20):
+    """
+    逐房间自由空间搜索: 先用形态学关门分割房间, 再在每个房间内独立
+    搜索 Top-K FreeSpace 候选。保证候选跨房间分布, 避免全挤在同一区域。
+    返回 (rooms_info, per_room_candidates):
+      rooms_info: [(cx, cy, bbox, area_m2), ...]
+      per_room_candidates: 扁平化后的 (score, x, y, deg) 列表, 按 score 降序
+    """
+    rooms = find_rooms_freespace(map_data, info, gap_m=gap_m, min_area_m2=min_area_m2)
+    if len(rooms) <= 1:
+        # 单房间 (或未分割成功), 回退到全图搜索
+        return rooms, global_search_freespace(pts, map_data, info, top_k=top_k,
+                                              xy_step=xy_step, angle_step_deg=angle_step_deg)
+    # 多房间: 每房间独立搜索并各取 Top-1, 不足 top_k 时用全图搜索补足
+    all_cands = []
+    seen_poses = set()
+    for cx, cy, bx0, by0, bx1, by1, area_m2 in rooms:
+        room_cands = global_search_freespace(
+            pts, map_data, info, top_k=1,
+            xy_step=xy_step, angle_step_deg=angle_step_deg,
+            search_bbox=(bx0, by0, bx1, by1))
+        for cand in room_cands:
+            key = (round(cand[1], 1), round(cand[2], 1))
+            if key not in seen_poses:
+                seen_poses.add(key)
+                all_cands.append(cand)
+        if room_cands:
+            print(f"  [RoomSearch] room({cx:.1f},{cy:.1f}) {area_m2:.0f}m2 "
+                  f"→ best ({room_cands[0][1]:.1f},{room_cands[0][2]:.1f},{room_cands[0][3]:.0f}deg) "
+                  f"fs={room_cands[0][0]:.3f}")
+    if len(all_cands) < top_k:
+        # 补足: 全图 NMS 后取额外候选
+        full = global_search_freespace(pts, map_data, info, top_k=top_k,
+                                       xy_step=xy_step, angle_step_deg=angle_step_deg)
+        for cand in full:
+            key = (round(cand[1], 1), round(cand[2], 1))
+            if key not in seen_poses:
+                seen_poses.add(key)
+                all_cands.append(cand)
+            if len(all_cands) >= top_k:
+                break
+    all_cands.sort(key=lambda c: c[0], reverse=True)
+    return rooms, all_cands[:top_k]
 
 
 # ============================================================
@@ -509,15 +684,19 @@ def main():
         print("[ERROR] 首帧无候选"); sys.exit(1)
     print(f"  得到 {len(cand0)} 个首帧候选")
 
-    # ── WallHit fallback (借鉴 multistep): 似然场最强解射线投射有效率<30% ──
-    #    说明似然场被几何相似但内容不同的房间吸引, 切换墙壁命中评分独立搜索。
-    #    这是 data_4 (下房间扫描) 能找到正确房间的关键 — 上房间墙更完整,
-    #    似然场会偏爱上房间, 但 wallhit 严格要求端点真的落在墙像素上。
+    # ── 似然场失败时的回退策略 ──
+    #   RayCast<30% → 似然场找到的位姿与地图无有效匹配。
+    #   原因有二: (a) 多房间几何相似 → WallHit 墙壁命中搜索
+    #            (b) 开放空间/地图覆盖不足 → FreeSpace 自由空间最大化搜索
+    #   优先尝试 FreeSpace (data_4 场景), 若也失败再降级到 WallHit。
     do_wallhit = False
+    do_freespace = False
+    rc_valid_rate = 0.0
+
     if args.skip_wallhit:
-        print(f"  [WallHit] --skip-wallhit 指定, 跳过独立墙壁搜索")
+        print(f"  [回退] --skip-wallhit 指定, 跳过替代搜索")
     elif args.force_wallhit:
-        print(f"  [WallHit] --force-wallhit 指定, 强制执行独立墙壁搜索")
+        print(f"  [回退] --force-wallhit 指定, 强制执行墙壁搜索")
         do_wallhit = True
     else:
         best_rc = ms.score_pose_raycast(pts0, cand0[0][1], cand0[0][2],
@@ -525,11 +704,31 @@ def main():
         rc_valid_rate = best_rc[2] / max(best_rc[1], 1) if best_rc[0] > -1e8 else 0
         print(f"  [诊断] 似然首选射线投射有效率={rc_valid_rate:.0%}")
         if rc_valid_rate < 0.30:
-            print(f"  [WallHit fallback] 启动独立墙壁命中搜索...")
-            do_wallhit = True
+            print(f"  [回退] 似然场不可信, 优先尝试自由空间最大化搜索...")
+            do_freespace = True
         else:
-            print(f"  [WallHit] raycast有效={rc_valid_rate:.0%}≥30%, 信任似然场首帧结果")
+            print(f"  [回退] raycast有效={rc_valid_rate:.0%}≥30%, 信任似然场首帧结果")
 
+    # ── 方案A: 自由空间最大化 (data_4 开放空间场景) ──
+    if do_freespace:
+        # 房间感知搜索: 形态学关门分割房间, 逐房间分配候选, 保证跨区域覆盖
+        rooms, room_cands = global_search_freespace_per_room(
+            pts0, map_data, info, top_k=args.topk)
+        fs_candidates = room_cands  # use room-scoped candidates directly
+        if fs_candidates and fs_candidates[0][0] > 0.3:
+            cand0 = fs_candidates
+            best_fs = fs_candidates[0]
+            if len(rooms) > 1:
+                print(f"  [FreeSpace+Room] {len(rooms)}个房间 → 逐房间分发 {len(fs_candidates)} 个候选")
+            print(f"  [FreeSpace] 替换为 {len(fs_candidates)} 个自由空间候选, 最优"
+                  f"({best_fs[1]:.1f},{best_fs[2]:.1f},{best_fs[3]:.0f}°) "
+                  f"自由率={best_fs[0]:.2f}")
+        else:
+            fs_score = fs_candidates[0][0] if fs_candidates else 0
+            print(f"  [FreeSpace] 无高置信候选 (最高分={fs_score:.2f}), 降级到墙壁搜索...")
+            do_wallhit = True
+
+    # ── WallHit 墙壁命中回退 (多房间几何消歧) ──
     if do_wallhit:
         wh_candidates = []
         res_m = info['resolution']; ox_m = info['origin_x']; oy_m = info['origin_y']

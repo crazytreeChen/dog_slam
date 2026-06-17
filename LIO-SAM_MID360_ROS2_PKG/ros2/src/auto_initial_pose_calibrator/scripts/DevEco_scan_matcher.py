@@ -190,6 +190,7 @@ def global_likelihood_search(points_c, lf, map_data, info,
                               top_k=10):
     res = info['resolution']
     ox, oy = info['origin_x'], info['origin_y']
+    H, W = info['height'], info['width']
     mw_m = info['width'] * res
     mh_m = info['height'] * res
 
@@ -219,6 +220,21 @@ def global_likelihood_search(points_c, lf, map_data, info,
                 ayaw = math.radians(adeg * angle_step_deg)
                 sc, hit, nv = score_at_pose(pts_ds, ax, ay, ayaw, lf, info)
                 if sc > -1e8:
+                    c_y, s_y = math.cos(ayaw), math.sin(ayaw)
+                    mx_q = c_y * pts_ds[:100, 0] - s_y * pts_ds[:100, 1] + ax if len(pts_ds) >= 100 else \
+                           c_y * pts_ds[:, 0] - s_y * pts_ds[:, 1] + ax
+                    my_q = s_y * pts_ds[:100, 0] + c_y * pts_ds[:100, 1] + ay if len(pts_ds) >= 100 else \
+                           s_y * pts_ds[:, 0] + c_y * pts_ds[:, 1] + ay
+                    ci_q = ((mx_q - ox) / res + 0.5).astype(np.int32)
+                    ri_q = ((my_q - oy) / res + 0.5).astype(np.int32)
+                    v_q = (ci_q >= 0) & (ci_q < W) & (ri_q >= 0) & (ri_q < H)
+                    if int(np.sum(v_q)) < 10: continue
+                    cells = map_data[ri_q[v_q], ci_q[v_q]]
+                    n_unk = int(np.sum(cells == -1))
+                    n_wall = int(np.sum(cells == 100))
+                    n_valid_cells = len(cells)
+                    if n_unk / n_valid_cells > 0.50 or n_wall / n_valid_cells > 0.60:
+                        continue
                     all_scores.append((sc, ax, ay, ayaw))
             if count % 200 == 0:
                 elapsed = time.time() - t0
@@ -908,14 +924,18 @@ def main():
     print("="*60)
     if final_result:
         fr = final_result
-        print(f"  Position: ({fr['x']:.3f}, {fr['y']:.3f})")
+        c_y, s_y = math.cos(fr['yaw']), math.sin(fr['yaw'])
+        robot_x = fr['x'] - c_y * scan_cx + s_y * scan_cy
+        robot_y = fr['y'] - s_y * scan_cx - c_y * scan_cy
+        print(f"  Centroid pos: ({fr['x']:.3f}, {fr['y']:.3f})")
+        print(f"  Robot pos:    ({robot_x:.3f}, {robot_y:.3f})")
         print(f"  Yaw: {math.degrees(fr['yaw']):.1f}deg")
         print(f"  LF score: {fr.get('lf_score', 0):.4f}")
         print(f"  Ray-cast MAE: {fr.get('mae', 0):.3f}")
         if fr.get('icp_applied', False):
             print(f"  ICP: applied")
         if tf_gt is not None:
-            err = math.sqrt((fr['x']-tf_gt[0])**2+(fr['y']-tf_gt[1])**2)
+            err = math.sqrt((robot_x-tf_gt[0])**2+(robot_y-tf_gt[1])**2)
             yaw_err = math.degrees(abs(math.atan2(math.sin(fr['yaw']-tf_gt[2]),
                                                     math.cos(fr['yaw']-tf_gt[2]))))
             print(f"  GT: ({tf_gt[0]:.3f}, {tf_gt[1]:.3f}, {math.degrees(tf_gt[2]):.1f}deg)")
