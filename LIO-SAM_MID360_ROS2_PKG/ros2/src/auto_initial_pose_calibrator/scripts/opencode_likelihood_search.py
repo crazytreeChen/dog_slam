@@ -172,7 +172,7 @@ def score_at_pose(points_c, cx, cy, yaw, lf, info):
     valid = (ci >= 0) & (ci < W) & (ri >= 0) & (ri < H)
 
     nv = int(np.sum(valid))
-    if nv < len(points_c) * 0.10:
+    if nv < max(len(points_c) * 0.10, 1):
         return -1e9, 0, 0
 
     dists = lf[ri[valid], ci[valid]]

@@ -386,7 +386,7 @@ def ray_cast_single(cx, cy, yaw, ranges, angles, map_data, info,
 
         for s in range(1, max_steps + 1):
             col = int(px + s * dx / res + 0.5)
-            row = int(H - 1 - (py + s * dy / res) + 0.5)
+            row = int(py + s * dy / res + 0.5)
 
             if col < 0 or col >= W or row < 0 or row >= H:
                 break
@@ -405,18 +405,30 @@ def ray_cast_single(cx, cy, yaw, ranges, angles, map_data, info,
 
 
 def ray_cast_disambiguate(candidates, frame_ranges, angle_min, angle_inc,
-                          map_data, info, lambda_weight=0.3, n_rays=120):
+                          map_data, info, scan_cx, scan_cy, frame_tfs,
+                          lambda_weight=0.3, n_rays=120):
     """
     对 Top-N 候选进行光线投射 180° 消歧。
 
-    使用第一帧原始ranges(保留空旷射线信息)。
-    对每个候选同时评估 yaw 和 yaw+180°,
-    综合分 = 似然场分 - lambda * MAE。
+    关键: 候选位姿(cx,cy,yaw)是"质心放在地图(cx,cy)处"的语义,
+    但光线投射需要从第一帧激光原点发射射线, 因此需要计算
+    第一帧激光原点在地图系中的真实位置。
+
+    第一帧激光原点在odom系 = frame_tfs[0] = (tx0, ty0, yaw0)
+    质心在odom系 = (scan_cx, scan_cy)
+    偏移 = (tx0 - scan_cx, ty0 - scan_cy)
+    地图系激光原点 = (cx + R(yaw)@offset_x, cy + R(yaw)@offset_y)
+    地图系激光朝向 = yaw + yaw0
     """
     ranges = frame_ranges[0]
     angles = angle_min + np.arange(len(ranges)) * angle_inc
 
+    tx0, ty0, yaw0 = frame_tfs[0]
+    offset_x = tx0 - scan_cx
+    offset_y = ty0 - scan_cy
+
     print(f"\n  [Ray-Cast Disambiguate] {len(candidates)} 候选, n_rays={n_rays}, lambda={lambda_weight}")
+    print(f"  第一帧偏移: offset=({offset_x:.3f},{offset_y:.3f}), yaw0={math.degrees(yaw0):.1f}deg")
 
     results = []
     for rank, cand in enumerate(candidates):
@@ -426,13 +438,22 @@ def ray_cast_disambiguate(candidates, frame_ranges, angle_min, angle_inc,
         else:
             score_lf, cx, cy, yaw = cand[0], cand[1], cand[2], cand[3]
 
-        mae1, vr1 = ray_cast_single(cx, cy, yaw, ranges, angles, map_data, info, n_rays)
+        c_y, s_y = math.cos(yaw), math.sin(yaw)
+        sensor_x = cx + c_y * offset_x - s_y * offset_y
+        sensor_y = cy + s_y * offset_x + c_y * offset_y
+        sensor_yaw = yaw + yaw0
+
+        mae1, vr1 = ray_cast_single(sensor_x, sensor_y, sensor_yaw, ranges, angles, map_data, info, n_rays)
         combined1 = score_lf - lambda_weight * mae1
 
         yaw_180 = yaw + math.pi
         yaw_180 = math.atan2(math.sin(yaw_180), math.cos(yaw_180))
+        c_y2, s_y2 = math.cos(yaw_180), math.sin(yaw_180)
+        sensor_x2 = cx + c_y2 * offset_x - s_y2 * offset_y
+        sensor_y2 = cy + s_y2 * offset_x + c_y2 * offset_y
+        sensor_yaw2 = yaw_180 + yaw0
 
-        mae2, vr2 = ray_cast_single(cx, cy, yaw_180, ranges, angles, map_data, info, n_rays)
+        mae2, vr2 = ray_cast_single(sensor_x2, sensor_y2, sensor_yaw2, ranges, angles, map_data, info, n_rays)
         combined2 = score_lf - lambda_weight * mae2
 
         if combined1 >= combined2:
@@ -485,7 +506,7 @@ def icp_refine_scan(points_odom, cx, cy, yaw, map_data, info,
     wall_ys, wall_xs = np.where(map_data == 100)
     map_walls = np.column_stack([
         wall_xs * res + ox,
-        (H - 1 - wall_ys) * res + oy
+        wall_ys * res + oy
     ])
     step = max(1, len(map_walls) // 5000)
     map_walls_ds = map_walls[::step]
@@ -826,8 +847,25 @@ def main():
         print("="*60)
         disambig_results = ray_cast_disambiguate(
             valid_refined, frame_ranges, angle_min, angle_inc,
-            map_data, info, lambda_weight=args.ray_lambda,
+            map_data, info, scan_cx, scan_cy, frame_tfs,
+            lambda_weight=args.ray_lambda,
             n_rays=args.ray_n_rays)
+
+        # GT 诊断: 计算GT位姿的光线投射MAE
+        if tf_gt is not None:
+            gt_ranges = frame_ranges[0]
+            gt_angles = angle_min + np.arange(len(gt_ranges)) * angle_inc
+            gt_yaw = tf_gt[2]
+            gt_cx = tf_gt[0] - scan_cx * math.cos(gt_yaw) + scan_cy * math.sin(gt_yaw)
+            gt_cy = tf_gt[1] - scan_cx * math.sin(gt_yaw) - scan_cy * math.cos(gt_yaw)
+            gt_mae, gt_vr = ray_cast_single(tf_gt[0], tf_gt[1], gt_yaw, gt_ranges, gt_angles, map_data, info, n_rays=args.ray_n_rays)
+            gt_mae_flip, _ = ray_cast_single(tf_gt[0], tf_gt[1], gt_yaw + math.pi, gt_ranges, gt_angles, map_data, info, n_rays=args.ray_n_rays)
+            print(f"\n  [GT 诊断] GT pose ray-cast MAE: original={gt_mae:.3f}, flipped(+180)={gt_mae_flip:.3f}")
+            print(f"  [GT 诊断] GT sensor pos=({tf_gt[0]:.2f},{tf_gt[1]:.2f}), yaw={math.degrees(gt_yaw):.1f}deg")
+            if gt_mae < gt_mae_flip:
+                print(f"  [GT 诊断] GT方向MAE更低 -> 光线投射理论正确, 搜索偏差导致候选位置不准")
+            else:
+                print(f"  [GT 诊断] GT+180方向MAE更低 -> 光线投射在GT位置也无法区分方向!")
 
     # ── Step 7: ICP refinement ──
     final_result = None

@@ -94,3 +94,21 @@ Super-LIO writes incremental PCDs to `<save_map_dir>/PCD/` and merges into `<sav
 - README, comments, commit messages, and `freqcmd.txt` notes are in Chinese; match that style when editing existing files. New code identifiers stay in English.
 - `freqcmd.txt` at the repo root is the developer's running notes/scratchpad — read it for context but treat it as informational, not a spec.
 - Don't edit the auto-rewritten yaml files (`nav2_params*.yaml`, `mid360.yaml`, `livox_360*.yaml`) for host-specific values; edit `global_config/__init__.py` instead. Other yaml fields can still be edited normally.
+
+## Local dev environment (Windows)
+
+Offline analysis/visualization scripts (e.g. `auto_initial_pose_calibrator/scripts/*.py`) run under the conda env **`dog_slam_envs`** (Python 3.10, has numpy / opencv / scipy / matplotlib). Activate it before running any Python — don't hunt for the interpreter each time:
+
+```bash
+conda activate dog_slam_envs
+python <script>.py
+```
+
+The shell here is Git Bash; if `conda activate` isn't initialized, source it first:
+
+```bash
+source /d/ProgramData/miniforge3/etc/profile.d/conda.sh
+conda activate dog_slam_envs
+```
+
+Direct interpreter path (no activation): `D:/miniforge_cache/envs/dog_slam_envs/python.exe`. (System `python` may be a Windows Store stub that exits 49 — avoid it.)

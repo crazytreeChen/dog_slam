@@ -152,6 +152,33 @@ def build_likelihood_field(map_data, info, max_dist=3.0):
     return lf
 
 
+def score_pose_wallhit(points_odom, cx, cy, yaw, map_data, info):
+    """
+    墙壁命中评分: 只统计真正落在墙壁像素上的点。
+    比似然场更严格 — 不会给"靠近墙壁"的点分数, 只在确实命中时计分。
+    用于障碍物遮挡场景下区分相似走廊。
+    """
+    res = info['resolution']; ox = info['origin_x']; oy = info['origin_y']
+    H, W = info['height'], info['width']
+    c_y, s_y = math.cos(yaw), math.sin(yaw)
+    mx = c_y*points_odom[:,0] - s_y*points_odom[:,1] + cx
+    my = s_y*points_odom[:,0] + c_y*points_odom[:,1] + cy
+    ci = ((mx-ox)/res+0.5).astype(np.int32); ri = ((my-oy)/res+0.5).astype(np.int32)
+    v = (ci>=0)&(ci<W)&(ri>=0)&(ri<H); nv = int(np.sum(v))
+    if nv < max(len(points_odom)*0.1, 3): return -1e9, 0, 0
+    cells = map_data[ri[v], ci[v]]
+    valid = (cells != -1); n_v = int(np.sum(valid))
+    if n_v < 5: return -1e9, 0, 0
+    n_wall = int(np.sum(cells[valid] == 100))
+    n_free = int(np.sum(cells[valid] == 0))
+    # 墙壁命中率 = wall / (wall + free), 要求 free < 60% (扫描不能大部分在空地上)
+    if n_free / max(n_v, 1) > 0.60: return -1e9, 0, 0
+    hit_rate = n_wall / max(n_wall + n_free, 1)
+    # 评分 = 命中率 × 覆盖率
+    coverage = n_v / len(points_odom)
+    return hit_rate * coverage * 2.0, n_wall, n_v
+
+
 def score_pose(points_odom, cx, cy, yaw, lf, info):
     """似然场评分"""
     res = info['resolution']; ox = info['origin_x']; oy = info['origin_y']
@@ -161,17 +188,91 @@ def score_pose(points_odom, cx, cy, yaw, lf, info):
     my = s_y*points_odom[:,0] + c_y*points_odom[:,1] + cy
     ci = ((mx-ox)/res+0.5).astype(np.int32); ri = ((my-oy)/res+0.5).astype(np.int32)
     v = (ci>=0)&(ci<W)&(ri>=0)&(ri<H); nv = int(np.sum(v))
-    if nv < len(points_odom)*0.1: return -1e9, 0, 0
+    if nv < max(len(points_odom)*0.1, 1): return -1e9, 0, 0
     dists = lf[ri[v], ci[v]]
     sc = float(np.mean(np.exp(-dists**2/0.045)))
     hit = int(np.sum(dists < 0.15))
     return sc + hit/nv*0.5, hit, nv
 
 
-def global_search_first_frame(pts_odom, lf, map_data, info, step=1.5, angle_step=8, top_k=8):
-    """首帧全局搜索"""
+def score_pose_raycast(points_odom, cx, cy, yaw, map_data, info, range_tol=1.0):
+    """
+    光线投射评分: 只对"实测距离 ≈ 地图预期距离"的束评分。
+    自动过滤被障碍物/家具遮挡的异常束。
+
+    原理:
+      对每个扫描点, 从扫描原点沿该方向发射虚拟射线:
+      - 射线在预期距离处碰到地图墙壁 → 有效束 (障碍物未遮挡)
+      - 射线在预期距离前碰到地图墙壁 → 异常束 (有地图外障碍物)
+      - 射线穿过预期位置没有墙壁 → 异常束 (扫描点在空地/门外)
+    
+    返回: (score, n_valid_beams, total_beams)
+    """
     res = info['resolution']; ox = info['origin_x']; oy = info['origin_y']
-    mw = info['width']*res; mh = info['height']*res
+    H, W = info['height'], info['width']
+
+    n_pts = len(points_odom)
+    n_valid = 0
+    total_score = 0.0
+
+    # 扫描原点在 map 中的位置
+    origin_x = cx
+    origin_y = cy
+
+    for i in range(0, n_pts, max(1, n_pts//200)):  # 最多评估200束
+        px = points_odom[i, 0]
+        py = points_odom[i, 1]
+        # 扫描点在 map 中的位置
+        c_y, s_y = math.cos(yaw), math.sin(yaw)
+        mx = c_y*px - s_y*py + cx
+        my = s_y*px + c_y*py + cy
+
+        # 扫描点相对于扫描原点的距离和方向
+        dist_measured = math.sqrt(px*px + py*py)
+        if dist_measured < 0.1: continue
+        ray_angle = math.atan2(my - origin_y, mx - origin_x)
+
+        # 沿射线方向步进, 检查地图墙壁
+        dx_r = math.cos(ray_angle) * res * 0.5  # 半像素步进
+        dy_r = math.sin(ray_angle) * res * 0.5
+        rx, ry = origin_x, origin_y
+        hit_wall = False
+        dist_expected = 50.0  # 默认超过最大范围
+
+        for step in range(int(50.0 / (res*0.5))):
+            col = int((rx - ox) / res)
+            row = int((ry - oy) / res)
+            if col < 0 or col >= W or row < 0 or row >= H: break
+            cell = map_data[row, col]
+            if cell == 100:  # 碰到墙壁
+                dist_expected = math.sqrt((rx-origin_x)**2 + (ry-origin_y)**2)
+                hit_wall = True
+                break
+            elif cell == -1:  # 进入未知区域 → 跳过此束
+                dist_expected = -1
+                break
+            rx += dx_r; ry += dy_r
+
+        if hit_wall and abs(dist_measured - dist_expected) < range_tol:
+            # 实测距离与地图墙壁距离一致 → 有效束
+            n_valid += 1
+            total_score += 1.0
+        elif hit_wall:
+            # 碰到墙但距离不对 → 可能有障碍物遮挡 → 不评分
+            pass
+
+    if n_valid < 5: return -1e9, 0, n_pts
+
+    # 评分 = 有效束比例 (越高越好)
+    n_evaluated = n_pts // max(1, n_pts//200)
+    score = total_score / max(n_evaluated, 1)
+    return score, n_valid, n_evaluated
+
+
+def global_search_first_frame(pts_odom, lf, map_data, info, step=1.5, angle_step=8, top_k=8):
+    """首帧全局搜索 (带自动过滤: 排除灰色区域和穿墙候选)"""
+    res = info['resolution']; ox = info['origin_x']; oy = info['origin_y']
+    mw = info['width']*res; mh = info['height']*res; H, W = info['height'], info['width']
     xs = np.arange(ox+2, ox+mw-2, step); ys = np.arange(oy+2, oy+mh-2, step)
     n_ang = int(360/angle_step)
     
@@ -182,12 +283,36 @@ def global_search_first_frame(pts_odom, lf, map_data, info, step=1.5, angle_step
     pts_ds = pts_odom[idx]
     
     results = []
+    n_filtered = 0
     for ax in xs:
         for ay in ys:
             for adeg in range(n_ang):
-                sc, _, _ = score_pose(pts_ds, ax, ay, math.radians(adeg*angle_step), lf, info)
-                if sc > 0.3: results.append((sc, ax, ay, adeg*angle_step))
+                ayaw = math.radians(adeg*angle_step)
+                sc, _, _ = score_pose(pts_ds, ax, ay, ayaw, lf, info)
+                if sc < 0.3: continue
+                # ── 快速过滤: 检查扫描是否在有效区域内 ──
+                c_y, s_y = math.cos(ayaw), math.sin(ayaw)
+                # 用少量点做快速检查
+                mx = c_y*pts_ds[:100,0] - s_y*pts_ds[:100,1] + ax if len(pts_ds) >= 100 else \
+                     c_y*pts_ds[:,0] - s_y*pts_ds[:,1] + ax
+                my = s_y*pts_ds[:100,0] + c_y*pts_ds[:100,1] + ay if len(pts_ds) >= 100 else \
+                     s_y*pts_ds[:,0] + c_y*pts_ds[:,1] + ay
+                ci = ((mx-ox)/res+0.5).astype(np.int32)
+                ri = ((my-oy)/res+0.5).astype(np.int32)
+                v = (ci>=0)&(ci<W)&(ri>=0)&(ri<H)
+                if int(np.sum(v)) < 20: n_filtered+=1; continue
+                cells = map_data[ri[v], ci[v]]
+                n_unk = int(np.sum(cells==-1))
+                n_wall = int(np.sum(cells==100))
+                n_valid = len(cells)
+                # 过滤: 未知区域 > 50% 或 墙壁 > 60% → 无效
+                if n_unk/n_valid > 0.50 or n_wall/n_valid > 0.60:
+                    n_filtered += 1; continue
+                results.append((sc, ax, ay, adeg*angle_step))
     results.sort(key=lambda x: x[0], reverse=True)
+    
+    if n_filtered > 0:
+        print(f"  [Filter] Excluded {n_filtered} invalid candidates (gray/wall)")
     
     # NMS
     nms = []
@@ -195,7 +320,28 @@ def global_search_first_frame(pts_odom, lf, map_data, info, step=1.5, angle_step
         dup = any(math.sqrt((ax-cx)**2+(ay-cy)**2)<1.5 and abs(ad-ca)<20 for _,cx,cy,ca in nms)
         if not dup:
             nms.append((sc, ax, ay, ad))
-            if len(nms) >= top_k: break
+            if len(nms) >= top_k * 2: break  # 保留更多候选供光线投射精选
+
+    # ── 光线投射精选: 对 Top-K 候选用 ray-cast 重新排序 ──
+    if len(nms) >= 2:
+        rc_scored = []
+        for sc, ax, ay, ad in nms:
+            ayaw = math.radians(ad)
+            rc_sc, rc_valid, rc_total = score_pose_raycast(pts_ds, ax, ay, ayaw, map_data, info)
+            if rc_sc > -1e8 and rc_valid >= 5:
+                rc_scored.append((sc, rc_sc, rc_valid/rc_total, ax, ay, ad))
+        if rc_scored:
+            best_rc = rc_scored[0]
+            # 光线投射有效束比例 > 30% 才启用 (否则障碍物太多, 回退似然场)
+            if best_rc[2] > 0.30:
+                rc_scored.sort(key=lambda x: x[0]*0.3 + x[1]*0.7, reverse=True)
+                nms = [(s, ax, ay, ad) for s, _, _, ax, ay, ad in rc_scored[:top_k]]
+                print(f"  [RayCast] Best: ({best_rc[3]:.1f},{best_rc[4]:.1f},{best_rc[5]:.0f}deg) "
+                      f"rc_score={best_rc[1]:.3f} valid={best_rc[2]:.1%}")
+            else:
+                print(f"  [RayCast] valid={best_rc[2]:.1%}<30%, fallback to likelihood")
+    else:
+        nms = nms[:top_k]
     return nms
 
 
@@ -224,7 +370,8 @@ def local_search(pts_odom, cx_pred, cy_pred, yaw_pred, lf, info,
 # 4. Multi-Step Localizer
 # ============================================================
 class MultiStepLocalizer:
-    def __init__(self, map_data, info, lf, frame_pts_list, uncertainty_decay=0.7, min_sigma=0.5):
+    def __init__(self, map_data, info, lf, frame_pts_list, uncertainty_decay=0.7, min_sigma=0.5,
+                 prior_x=None, prior_y=None, prior_yaw=None, prior_radius=10.0):
         self.map_data = map_data
         self.info = info
         self.lf = lf
@@ -236,8 +383,12 @@ class MultiStepLocalizer:
         self.sigma_angle = 20.0
         self.decay = uncertainty_decay
         self.min_sigma = min_sigma
+        self.prior_x = prior_x
+        self.prior_y = prior_y
+        self.prior_yaw = prior_yaw
+        self.prior_radius = prior_radius
         
-        self.history = []  # [(step, x, y, yaw, sigma, wall_pct, score), ...]
+        self.history = []
     
     def run(self):
         """运行完整多步定位流程"""
@@ -252,27 +403,57 @@ class MultiStepLocalizer:
                 continue
             
             if i == 0:
-                # 首帧: 全局搜索
-                print(f"\n--- Frame 0: Global Search ---")
-                t0 = time.time()
-                candidates = global_search_first_frame(pts, self.lf, self.map_data, self.info)
-                
-                if not candidates:
-                    print("  [ERROR] No initial candidates found")
-                    return False
-                
-                # 对 Top-3 做精细搜索
-                best_sc = -1e9; best_pose = None
-                for sc, hx, hy, had in candidates[:3]:
-                    pose, lf_sc = local_search(pts, hx, hy, math.radians(had), 
-                                               self.lf, self.info, radius=2.0, pos_step=0.3)
-                    if lf_sc > best_sc:
-                        best_sc = lf_sc; best_pose = pose
-                
-                self.mu = best_pose
-                self.sigma = 5.0
-                print(f"  Init: ({self.mu[0]:.2f}, {self.mu[1]:.2f}, {math.degrees(self.mu[2]):.1f}deg) "
-                      f"sigma={self.sigma:.1f}m ({time.time()-t0:.1f}s)")
+                # 首帧: 全局搜索 (有先验则约束范围)
+                if self.prior_x is not None:
+                    print(f"\n--- Frame 0: Local Search (prior ±{self.prior_radius}m) ---")
+                    best_sc = -1e9; best_pose = None
+                    for dx in np.arange(-self.prior_radius, self.prior_radius+1, 1.5):
+                        for dy in np.arange(-self.prior_radius, self.prior_radius+1, 1.5):
+                            for adeg in range(0, 360, 8):
+                                sc, _, _ = score_pose(pts, self.prior_x+dx, self.prior_y+dy, 
+                                                      math.radians(adeg), self.lf, self.info)
+                                if sc > best_sc: best_sc = sc; best_pose = (self.prior_x+dx, self.prior_y+dy, math.radians(adeg))
+                    if best_pose:
+                        self.mu = best_pose
+                        print(f"  Init: ({self.mu[0]:.2f}, {self.mu[1]:.2f}, {math.degrees(self.mu[2]):.1f}deg)")
+                else:
+                    print(f"\n--- Frame 0: Global Search ---")
+                    t0 = time.time()
+                    candidates = global_search_first_frame(pts, self.lf, self.map_data, self.info)
+                    if not candidates:
+                        print("  [ERROR] No initial candidates found"); return False
+                    
+                    # ── 光线投射回退: 独立墙壁命中全局搜索 ──
+                    best_rc_check = score_pose_raycast(pts, candidates[0][1], candidates[0][2], 
+                                                       math.radians(candidates[0][3]), self.map_data, self.info)
+                    rc_valid_rate = best_rc_check[2] / max(best_rc_check[1], 1) if best_rc_check[0] > -1e8 else 0
+                    if rc_valid_rate < 0.30:
+                        print(f"  [WallHit fallback] independent search...")
+                        wh_candidates = []
+                        res = self.info['resolution']; ox = self.info['origin_x']; oy = self.info['origin_y']
+                        mw = self.info['width']*res; mh = self.info['height']*res
+                        for ax in np.arange(ox+3, ox+mw-3, 2.0):
+                            for ay in np.arange(oy+3, oy+mh-3, 2.0):
+                                for adeg in range(0, 360, 10):
+                                    wh, nw, _ = score_pose_wallhit(pts, ax, ay, math.radians(adeg), self.map_data, self.info)
+                                    if wh > 0: wh_candidates.append((wh, ax, ay, adeg))
+                        if wh_candidates:
+                            wh_candidates.sort(key=lambda x: x[0], reverse=True)
+                            # NMS
+                            wh_nms = []
+                            for wh, ax, ay, ad in wh_candidates:
+                                dup = any(math.sqrt((ax-wx)**2+(ay-wy)**2)<2.0 for _, wx, wy, _ in wh_nms)
+                                if not dup: wh_nms.append((wh, ax, ay, ad))
+                                if len(wh_nms) >= 8: break
+                            candidates = wh_nms
+                            print(f"  [WallHit] Best: ({wh_nms[0][1]:.1f},{wh_nms[0][2]:.1f},{wh_nms[0][3]:.0f}deg) wall%={100*wh_nms[0][0]/2:.0f}%")
+                    # ── end wallhit fallback ──
+                    best_sc = -1e9; best_pose = None
+                    for sc, hx, hy, had in candidates[:3]:
+                        pose, lf_sc = local_search(pts, hx, hy, math.radians(had), self.lf, self.info, radius=2.0, pos_step=0.3)
+                        if lf_sc > best_sc: best_sc = lf_sc; best_pose = pose
+                    self.mu = best_pose
+                    print(f"  Init: ({self.mu[0]:.2f}, {self.mu[1]:.2f}, {math.degrees(self.mu[2]):.1f}deg) sigma={self.sigma:.1f}m ({time.time()-t0:.1f}s)")
             else:
                 # 后续帧: ICP + 局部搜索
                 prev_pts = self.frames[i-1][0]
@@ -291,13 +472,13 @@ class MultiStepLocalizer:
                 
                 dyaw_icp = math.atan2(R_icp[1,0], R_icp[0,0])
                 
-                # 预测
+                # 预测: ICP 平移+旋转 提供最强帧间约束, 锁住正确房间
                 c_m, s_m = math.cos(self.mu[2]), math.sin(self.mu[2])
                 pred_x = self.mu[0] + c_m*t_icp[0] - s_m*t_icp[1]
                 pred_y = self.mu[1] + s_m*t_icp[0] + c_m*t_icp[1]
                 pred_yaw = self.mu[2] + dyaw_icp
                 
-                # 局部搜索 (范围 = sigma)
+                # 局部搜索 (范围 = sigma, ICP 平移约束后只需小范围)
                 search_radius = min(self.sigma * 1.5, 3.0)
                 angle_range = min(self.sigma_angle * 1.5, 20)
                 
@@ -305,6 +486,28 @@ class MultiStepLocalizer:
                                            self.lf, self.info,
                                            radius=search_radius,
                                            angle_range=int(angle_range))
+                
+                # ── ICP 失败保护 ──
+                # 计算当前帧的墙壁覆盖率
+                c_y, s_y = math.cos(pose[2]), math.sin(pose[2])
+                mx = c_y*pts[:,0] - s_y*pts[:,1] + pose[0]
+                my = s_y*pts[:,0] + c_y*pts[:,1] + pose[1]
+                ci = ((mx-self.info['origin_x'])/self.info['resolution']+0.5).astype(np.int32)
+                ri = ((my-self.info['origin_y'])/self.info['resolution']+0.5).astype(np.int32)
+                mv = (ci>=0)&(ci<self.info['width'])&(ri>=0)&(ri<self.info['height'])
+                cells = self.map_data[ri[mv], ci[mv]] if int(np.sum(mv)) > 10 else np.array([-1])
+                valid_c = (cells != -1); n_vc = int(np.sum(valid_c))
+                w_v = int(np.sum(cells[valid_c]==100)) if n_vc > 0 else 0
+                f_v = int(np.sum(cells[valid_c]==0)) if n_vc > 0 else 0
+                wall_pct = w_v / max(w_v+f_v, 1)
+                icp_jump = math.sqrt(t_icp[0]**2 + t_icp[1]**2) if icp_used else 0
+                
+                # 条件1: 墙壁覆盖率 < 20% → 直接拒绝
+                # 条件2: ICP跳变 > 2m 且覆盖率 < 35% → 拒绝
+                if i > 3 and (wall_pct < 0.20 or (icp_jump > 2.0 and wall_pct < 0.35)):
+                    pose = (self.mu[0], self.mu[1], pose[2])
+                    lf_sc = -1
+                    print(f"  f{i:02d} [REJECT] wall={100*wall_pct:.0f}% jump={icp_jump:.1f}m, keeping prev")
                 
                 # 更新
                 self.mu = pose
@@ -468,6 +671,10 @@ def main():
                             '..', 'scan_viz', 'debug_match_data.npz'))
     parser.add_argument('--output', type=str, default=None)
     parser.add_argument('--decay', type=float, default=0.7, help='Uncertainty decay factor (0-1)')
+    parser.add_argument('--prior-x', type=float, default=None, help='Prior X position constraint')
+    parser.add_argument('--prior-y', type=float, default=None, help='Prior Y position constraint')
+    parser.add_argument('--prior-yaw', type=float, default=None, help='Prior yaw constraint (deg)')
+    parser.add_argument('--prior-radius', type=float, default=10.0, help='Search radius around prior (m)')
     args = parser.parse_args()
     
     npz_path = os.path.normpath(args.data)
@@ -496,7 +703,11 @@ def main():
     lf = build_likelihood_field(map_data, info)
     
     # Run multi-step localizer
-    localizer = MultiStepLocalizer(map_data, info, lf, frame_pts, uncertainty_decay=args.decay)
+    prior_x = args.prior_x; prior_y = args.prior_y
+    prior_yaw = math.radians(args.prior_yaw) if args.prior_yaw is not None else None
+    localizer = MultiStepLocalizer(map_data, info, lf, frame_pts, uncertainty_decay=args.decay,
+                                   prior_x=prior_x, prior_y=prior_y, prior_yaw=prior_yaw,
+                                   prior_radius=args.prior_radius)
     success = localizer.run()
     
     if success:

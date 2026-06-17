@@ -56,8 +56,10 @@ class IndoorPhase(Enum):
     FILTERING = 8
     DONE = 9
     # ── 被动模式 ──
-    PASSIVE_COLLECTING = 10   # 被动采集: 持续缓存帧, 不控制机器人
-    PASSIVE_MATCHING = 11     # 被动匹配: 定时触发局部重匹配
+    PASSIVE_COLLECTING = 10
+    PASSIVE_MATCHING = 11
+    # ── 主动多步递推 ──
+    ACTIVE_MULTISTEP = 12      # 逐帧ICP + 局部搜索, sigma衰减
 
 
 class AutoInitialPoseCalibrator(Node):
@@ -957,7 +959,9 @@ class AutoInitialPoseCalibrator(Node):
         ci = ((mx - ox) / res + 0.5).astype(np.int32)
         ri = ((my - oy) / res + 0.5).astype(np.int32)
         # ROS栅格: ri 越大 → y 越小, 需要翻转
-        ri = H - 1 - ri
+        # ROS栅格: row 0 = y=0 (底部), 直接除res即可
+        ri = ((my - oy) / res + 0.5).astype(np.int32)
+        # ROS栅格: ri 越大 → y 越大, 无需翻转 (与离线NPZ一致)
 
         valid = (ci >= 0) & (ci < W) & (ri >= 0) & (ri < H)
         nv = int(np.sum(valid))
@@ -985,7 +989,7 @@ class AutoInitialPoseCalibrator(Node):
         mx = c_y * points_odom[:, 0] - s_y * points_odom[:, 1] + cx
         my = s_y * points_odom[:, 0] + c_y * points_odom[:, 1] + cy
         ci = ((mx - ox) / res + 0.5).astype(np.int32)
-        ri = H - 1 - ((my - oy) / res + 0.5).astype(np.int32)
+        ri = ((my - oy) / res + 0.5).astype(np.int32)
         valid = (ci >= 0) & (ci < W) & (ri >= 0) & (ri < H)
         cells = self.map_data[ri[valid], ci[valid]]
         valid_cell = (cells != -1)
@@ -1254,20 +1258,18 @@ class AutoInitialPoseCalibrator(Node):
         # 防卡死超时保护（最多旋转90秒，即约27rad @ 0.3rad/s）
         elapsed = (self.get_clock().now() - self.rotation_start_time).nanoseconds / 1e9
         if elapsed > 90.0:
-            self._logger.warn(f'[旋转采集] 超时 ({elapsed:.1f}s)，停止旋转。已采集 {len(self.scan_buffer)} 帧, '
-                                  f'已转 {math.degrees(self.rotation_accumulated):.0f}°')
+            self._logger.warn(f'[旋转采集] 超时 ({elapsed:.1f}s)，停止旋转。已采集 {len(self.scan_buffer)} 帧')
             self.cmd_vel_pub.publish(Twist())
-            if len(self.scan_buffer) > 0:
-                self.submap_ready = True
-            self.indoor_phase = IndoorPhase.COLLECTING_SUBMAP1
+            self.indoor_phase = IndoorPhase.ACTIVE_MULTISTEP
+            self._multistep_frame_idx = 0
             return
         
         # 达到目标帧数则提前停止
         if self.submap_ready:
-            self._logger.info(f'[旋转采集] 已达成目标帧数 ({len(self.scan_buffer)}/{self.submap_scan_count})，'
-                                  f'已转 {math.degrees(self.rotation_accumulated):.0f}°/{math.degrees(self.rotation_total_rad):.0f}°')
+            self._logger.info(f'[旋转采集] 已达成目标帧数 ({len(self.scan_buffer)}/{self.submap_scan_count})')
             self.cmd_vel_pub.publish(Twist())
-            self.indoor_phase = IndoorPhase.COLLECTING_SUBMAP1
+            self.indoor_phase = IndoorPhase.ACTIVE_MULTISTEP
+            self._multistep_frame_idx = 0
             return
         
         # 是否完成全角度旋转
@@ -1275,18 +1277,18 @@ class AutoInitialPoseCalibrator(Node):
             self._logger.info(f'[旋转采集] 完成 {math.degrees(self.rotation_accumulated):.0f}° 全覆盖采集')
             self.cmd_vel_pub.publish(Twist())
             self.submap_ready = True
-            self.indoor_phase = IndoorPhase.COLLECTING_SUBMAP1
+            self.indoor_phase = IndoorPhase.ACTIVE_MULTISTEP
+            self._multistep_frame_idx = 0
             return
         
         # 碰撞安全检查
         if self.current_scan is not None:
-            safe = self._check_local_direction_safety(0.0, 0.3)  # 检查正前方0.3m
+            safe = self._check_local_direction_safety(0.0, 0.3)
             if not safe:
                 self._logger.warn('[旋转采集] 前方检测到障碍物，终止旋转采集。')
                 self.cmd_vel_pub.publish(Twist())
-                if len(self.scan_buffer) > 0:
-                    self.submap_ready = True
-                self.indoor_phase = IndoorPhase.COLLECTING_SUBMAP1
+                self.indoor_phase = IndoorPhase.ACTIVE_MULTISTEP
+                self._multistep_frame_idx = 0
                 return
         
         # 持续旋转
@@ -1530,6 +1532,9 @@ class AutoInitialPoseCalibrator(Node):
         elif self.indoor_phase == IndoorPhase.PASSIVE_MATCHING:
             self._do_passive_matching()
 
+        elif self.indoor_phase == IndoorPhase.ACTIVE_MULTISTEP:
+            self._do_multistep_matching()
+
     # ================================================================
     #  核心步骤 3：改进的网格全局搜索 + 精细局部搜索
     # ================================================================
@@ -1656,8 +1661,129 @@ class AutoInitialPoseCalibrator(Node):
             self._publish_and_finish(best_x, best_y, best_yaw)
 
     # ================================================================
-    #  被动模式: 定时匹配 + 主动/被动互斥
+    #  多步递推匹配 (主动+被动共用)
+    #  逐帧ICP → 预测 → 局部搜索 → sigma衰减 → 收敛
     # ================================================================
+    def _do_multistep_matching(self):
+        """逐帧递推匹配: 首帧全局搜索, 后续帧 ICP+局部搜索"""
+        if self.likelihood_field is None or self.map_data is None:
+            self.indoor_phase = IndoorPhase.BOOT_DELAY
+            return
+
+        scans = [item[0] for item in self.scan_buffer]
+        n_frames = len(scans)
+        if n_frames < 3:
+            self._logger.warn('[多步递推] 帧数不足, 回退到合并匹配')
+            self.indoor_phase = IndoorPhase.ROUGH_MATCHING
+            return
+
+        t0 = time.time()
+        total_wall_hits = 0
+        total_valid = 0
+
+        # 初始化
+        mu = None        # (x, y, yaw) 当前最佳估计 in map frame
+        sigma = 5.0      # 位置不确定度 (m)
+        sigma_angle = 20.0
+        min_sigma = 0.5
+        decay = 0.75
+        step = max(1, n_frames // 20)  # 最多处理20帧, 跳帧加速
+
+        self._logger.info(f'[多步递推] 开始, {n_frames}帧, 步长={step}')
+
+        for i in range(0, n_frames, step):
+            # 单帧提取点云
+            frame_pts = self._scan_to_points(scans[i])
+            if len(frame_pts) < 10:
+                continue
+
+            if mu is None:
+                # ── 首帧: 全局搜索 ──
+                ds0 = max(1, len(frame_pts) // 800)
+                pts_ds = frame_pts[::ds0]
+                res = self.map_info.resolution
+                ox = self.map_info.origin.position.x
+                oy = self.map_info.origin.position.y
+                mw = self.map_info.width * res; mh = self.map_info.height * res
+                xs = np.arange(ox + 2, ox + mw - 2, 2.0)
+                ys = np.arange(oy + 2, oy + mh - 2, 2.0)
+
+                best_sc = -1e9; best_pose = None
+                for ax in xs:
+                    for ay in ys:
+                        for adeg in range(0, 360, 15):
+                            sc, _, _ = self._score_points(pts_ds, ax, ay, math.radians(adeg))
+                            if sc > best_sc: best_sc = sc; best_pose = (ax, ay, math.radians(adeg))
+
+                if best_pose is None:
+                    self._logger.error('[多步递推] 首帧全局搜索失败')
+                    self.indoor_phase = IndoorPhase.ROUGH_MATCHING
+                    return
+
+                mu = best_pose
+                wall_cov, cov, _ = self._compute_wall_coverage(frame_pts, mu[0], mu[1], mu[2])
+                self._logger.info(f'  帧{i:02d}(首): 全局搜索 → ({mu[0]:.2f},{mu[1]:.2f},{math.degrees(mu[2]):.0f}deg) '
+                                f'wall={100*wall_cov:.0f}% σ={sigma:.1f}m')
+            else:
+                # ── 后续帧: ICP + 局部搜索 ──
+                prev_pts = self._scan_to_points(scans[max(0, i - step)])
+                dx_i, dy_i, dyaw_i = 0.0, 0.0, 0.0
+                if len(prev_pts) > 10 and len(frame_pts) > 10:
+                    dx_i, dy_i, dyaw_i = self._icp_match(prev_pts, frame_pts)
+                    if abs(dyaw_i) > math.radians(30):  # 旋转太大, 放弃ICP
+                        dx_i = dy_i = dyaw_i = 0.0
+
+                # 预测 (ICP增量旋转到map系)
+                c_m, s_m = math.cos(mu[2]), math.sin(mu[2])
+                pred_x = mu[0] + c_m*dx_i - s_m*dy_i
+                pred_y = mu[1] + s_m*dx_i + c_m*dy_i
+                pred_yaw = mu[2] + dyaw_i
+
+                # 局部搜索 (±sigma)
+                search_r = min(sigma * 1.5, 3.0)
+                angle_r = min(sigma_angle * 1.5, 20)
+                ds_i = max(1, len(frame_pts) // 600)
+                pts_local = frame_pts[::ds_i]
+
+                best_sc = -1e9; best_local = (pred_x, pred_y, pred_yaw)
+                for dx in np.arange(-search_r, search_r + 1e-5, max(0.2, search_r/7)):
+                    for dy in np.arange(-search_r, search_r + 1e-5, max(0.2, search_r/7)):
+                        for da in np.arange(-angle_r, angle_r + 1, max(2.0, angle_r/5)):
+                            sc, _, _ = self._score_points(pts_local, pred_x+dx, pred_y+dy,
+                                                          pred_yaw + math.radians(da))
+                            if sc > best_sc:
+                                best_sc = sc; best_local = (pred_x+dx, pred_y+dy, pred_yaw+math.radians(da))
+
+                mu = best_local
+                sigma = max(sigma * decay, min_sigma)
+                sigma_angle = max(sigma_angle * decay, 2.0)
+                wall_cov, _, _ = self._compute_wall_coverage(frame_pts, mu[0], mu[1], mu[2])
+                total_wall_hits += int(wall_cov * 100)
+
+                if i % (step * 5) == 0 or i == n_frames - 1:
+                    self._logger.info(
+                        f'  帧{i:02d}: ({mu[0]:.2f},{mu[1]:.2f},{math.degrees(mu[2]):.0f}deg) '
+                        f'wall={100*wall_cov:.0f}% σ={sigma:.2f}m')
+
+            total_valid += 1
+
+        elapsed = time.time() - t0
+        avg_wall = total_wall_hits / max(total_valid, 1) / 100.0
+
+        self._logger.info(
+            f'[多步递推] 完成 ({elapsed:.1f}s, {total_valid}帧): '
+            f'({mu[0]:.2f},{mu[1]:.2f},{math.degrees(mu[2]):.1f}deg) '
+            f'avg_wall={100*avg_wall:.0f}% final_σ={sigma:.2f}m')
+
+        # 更新 candidates (兼容后续流程)
+        self.candidates = [(1.0, mu[0], mu[1], mu[2])]
+        self._last_match_quality = {'wall_cov': avg_wall, 'coverage': 0.5, 'score': 1.0}
+
+        if self.quick_mode:
+            self._publish_and_finish(mu[0], mu[1], mu[2])
+        else:
+            self._publish_candidates()
+            self.indoor_phase = IndoorPhase.SELECTING_ACTIVE_MOTION
     def _passive_timer_cb(self):
         """被动模式定时器: 每隔 passive_interval 秒触发一次匹配"""
         if not self.passive_mode_enabled:
@@ -1673,86 +1799,85 @@ class AutoInitialPoseCalibrator(Node):
         self.indoor_phase = IndoorPhase.PASSIVE_MATCHING
 
     def _do_passive_matching(self):
-        """被动匹配: 取缓冲区最近N帧 → ICP合并 → 局部搜索 → 更新估计"""
+        """被动匹配: 取缓冲区最近N帧 → 多步递推 (逐帧ICP + 局部搜索)"""
         if self.likelihood_field is None or not self.passive_scan_buffer:
             self.indoor_phase = IndoorPhase.PASSIVE_COLLECTING
             return
 
         t0 = time.time()
-        # 取最近 N 帧 (时间上最接近的)
         recent = self.passive_scan_buffer[-self.passive_frame_count:]
         scans = [item[0] for item in recent]
         if len(scans) < 5:
             self.indoor_phase = IndoorPhase.PASSIVE_COLLECTING
             return
 
-        # 用 ICP 帧间匹配合并 (复用 _build_submap 的 ICP 逻辑)
-        saved = self.scan_buffer
-        self.scan_buffer = [(s, 0.0) for s in scans]
-        self.use_icp_for_submap = True
-        submap = self._build_submap()
-        self.scan_buffer = saved
+        # 多步递推: 逐帧处理
+        mu = self.passive_best_pose  # 上次估计作为先验
+        sigma = 2.0 if mu is not None else 5.0
+        min_sigma = 0.3; decay = 0.8
+        total_wall = 0; total_n = 0
 
-        if submap is None:
-            self.indoor_phase = IndoorPhase.PASSIVE_COLLECTING
-            return
+        for i, scan in enumerate(scans):
+            pts = self._scan_to_points(scan)
+            if len(pts) < 10: continue
 
-        submap_pts = self._scan_to_points(submap)
-        if len(submap_pts) < 10:
-            self.indoor_phase = IndoorPhase.PASSIVE_COLLECTING
-            return
+            if mu is None:
+                # 首帧全局搜索
+                ds0 = max(1, len(pts)//800); pts_ds = pts[::ds0]
+                res = self.map_info.resolution
+                ox = self.map_info.origin.position.x; oy = self.map_info.origin.position.y
+                mw = self.map_info.width*res; mh = self.map_info.height*res
+                best_sc = -1e9; best_pose = None
+                for ax in np.arange(ox+2, ox+mw-2, 2.0):
+                    for ay in np.arange(oy+2, oy+mh-2, 2.0):
+                        for adeg in range(0, 360, 15):
+                            sc, _, _ = self._score_points(pts_ds, ax, ay, math.radians(adeg))
+                            if sc > best_sc: best_sc = sc; best_pose = (ax, ay, math.radians(adeg))
+                if best_pose is None: continue
+                mu = best_pose; method = "全局"
+            else:
+                # ICP + 局部搜索
+                prev_pts = self._scan_to_points(scans[max(0,i-1)])
+                dx_i = dy_i = dyaw_i = 0.0
+                if len(prev_pts) > 10:
+                    dx_i, dy_i, dyaw_i = self._icp_match(prev_pts, pts)
+                    if abs(dyaw_i) > math.radians(30): dx_i = dy_i = dyaw_i = 0.0
+                c_m, s_m = math.cos(mu[2]), math.sin(mu[2])
+                pred_x = mu[0] + c_m*dx_i - s_m*dy_i
+                pred_y = mu[1] + s_m*dx_i + c_m*dy_i
+                pred_yaw = mu[2] + dyaw_i
 
-        ds = max(1, len(submap_pts) // 800)
-        pts_ds = submap_pts[::ds]
+                sr = min(sigma*1.5, 2.0); ar = min(sigma_angle:=10.0, 15)
+                ds_i = max(1, len(pts)//600); pts_l = pts[::ds_i]
+                best_sc = -1e9; best_l = (pred_x, pred_y, pred_yaw)
+                for dx in np.arange(-sr, sr+1e-5, 0.3):
+                    for dy in np.arange(-sr, sr+1e-5, 0.3):
+                        for da in range(int(-ar), int(ar)+1, 2):
+                            sc, _, _ = self._score_points(pts_l, pred_x+dx, pred_y+dy, pred_yaw+math.radians(da))
+                            if sc > best_sc: best_sc = sc; best_l = (pred_x+dx, pred_y+dy, pred_yaw+math.radians(da))
+                mu = best_l; sigma = max(sigma*decay, min_sigma); method = "局部"
 
-        # 局部搜索 (有历史估计则在周围搜; 无则全局)
-        if self.passive_best_pose is not None:
-            px, py, pyaw = self.passive_best_pose
-            best_sc = -1e9; best_pose = (px, py, pyaw)
-            for dx in np.arange(-2.0, 2.01, 0.3):
-                for dy in np.arange(-2.0, 2.01, 0.3):
-                    for da in range(-10, 11, 3):
-                        sc, _, _ = self._score_points(pts_ds, px+dx, py+dy, pyaw+math.radians(da))
-                        if sc > best_sc: best_sc = sc; best_pose = (px+dx, py+dy, pyaw+math.radians(da))
-            bx, by, byaw = best_pose
-            method = "局部"
-        else:
-            # 首次: 全局搜索
-            res = self.map_info.resolution
-            ox = self.map_info.origin.position.x; oy = self.map_info.origin.position.y
-            mw = self.map_info.width*res; mh = self.map_info.height*res
-            xs = np.arange(ox+2, ox+mw-2, 1.5); ys = np.arange(oy+2, oy+mh-2, 1.5)
-            best_sc = -1e9; best_pose = (ox+mw/2, oy+mh/2, 0.0)
-            for ax in xs:
-                for ay in ys:
-                    for adeg in range(0, 360, 10):
-                        sc, _, _ = self._score_points(pts_ds, ax, ay, math.radians(adeg))
-                        if sc > best_sc: best_sc = sc; best_pose = (ax, ay, math.radians(adeg))
-            bx, by, byaw = best_pose
-            method = "全局"
+            wc, _, _ = self._compute_wall_coverage(pts, mu[0], mu[1], mu[2])
+            total_wall += wc; total_n += 1
 
-        wall_cov, coverage, _ = self._compute_wall_coverage(submap_pts, bx, by, byaw)
-        self.passive_best_pose = (bx, by, byaw)
-
+        avg_wall = total_wall / max(total_n, 1)
+        self.passive_best_pose = mu
         elapsed = time.time() - t0
         ts = self.get_clock().now().nanoseconds / 1e9
-        self.passive_pose_history.append((ts, bx, by, byaw, wall_cov))
+        self.passive_pose_history.append((ts, mu[0], mu[1], mu[2], avg_wall))
 
-        # 发布到 debug 话题
         if hasattr(self, 'debug_auto_pose_pub'):
             msg = PoseWithCovarianceStamped()
             msg.header.stamp = self.get_clock().now().to_msg()
             msg.header.frame_id = self.map_frame
-            msg.pose.pose.position = Point(x=bx, y=by, z=0.0)
-            qz = math.sin(byaw/2.0); qw = math.cos(byaw/2.0)
+            msg.pose.pose.position = Point(x=mu[0], y=mu[1], z=0.0)
+            qz = math.sin(mu[2]/2.0); qw = math.cos(mu[2]/2.0)
             msg.pose.pose.orientation = Quaternion(x=0.0, y=0.0, z=qz, w=qw)
             self.debug_auto_pose_pub.publish(msg)
 
         self._logger.info(
-            f'[被动{method}] {elapsed:.1f}s: ({bx:.2f},{by:.2f},{math.degrees(byaw):.1f}deg) '
-            f'wall={100*wall_cov:.0f}% cov={100*coverage:.0f}% '
-            f'buf={len(self.passive_scan_buffer)}/{self.passive_buffer_max}帧')
-
+            f'[被动{method}] {elapsed:.1f}s {total_n}帧: ({mu[0]:.2f},{mu[1]:.2f},{math.degrees(mu[2]):.1f}deg) '
+            f'wall={100*avg_wall:.0f}% σ={sigma:.2f}m buf={len(self.passive_scan_buffer)}帧')
         self.indoor_phase = IndoorPhase.PASSIVE_COLLECTING
 
     def _start_passive_mode(self):
