@@ -45,13 +45,29 @@
     auto_start: true              # 开机收到地图+scan+odom后自动触发校准
     auto_start_delay: 3.0         # 数据就绪后等待延迟 (秒)
     quick_mode: true              # 快速模式：跳过旋转+运动探索，仅做一次全局匹配
-    auto_publish_initial_pose: false  # 自动发布 /initialpose (false=仅输出日志+debug话题, 供验证)
+    auto_publish_initial_pose: true   # 自动发布 /initialpose (false=仅输出日志+debug话题, 供验证)
 
     # ────── 被动持续定位模式 ──────
     passive_mode_enabled: true     # 启用被动持续定位 (服务启动即进入)
-    passive_interval: 60.0         # 被动匹配间隔 (秒), 默认1分钟
+    passive_interval: 30.0         # 被动匹配间隔 (秒)
     passive_frame_count: 30        # 每次匹配使用最近N帧 (通过ICP拼接)
-    passive_buffer_max: 300        # 循环缓冲区最大帧数
+    passive_buffer_max: 60        # 循环缓冲区最大帧数
+    passive_quality_threshold: 0.25      # [已废弃] 原墙壁覆盖率最低阈值, 现仅记日志不丢弃
+    passive_deviation_threshold: 2.0     # 与上次位姿偏差超过此值触发二次验证 (m)
+    passive_deviation_yaw_threshold: 30.0 # 与上次位姿偏差超过此值触发二次验证 (deg)
+
+    # ────── 被动模式: 里程计融合轻量验证 ──────
+    passive_odom_fusion_enabled: true    # 启用里程计融合验证 (验证通过则跳过扫描匹配)
+    passive_odom_max_move: 5.0         # 里程计累计位移上限(m), 超则强制重匹配
+    passive_likelihood_threshold: 0.25   # 似然场评分阈值 (likelihood)
+    passive_fusion_wall_threshold: 0.20 # 融合验证的墙壁覆盖率阈值
+    passive_amcl_cross_check: true       # 启用 AMCL 位姿交叉验证
+    passive_amcl_max_deviation: 1.0     # AMCL 与推算位姿最大允许偏差 (m)
+
+    # ────── 置信度门控 ──────
+    confidence_threshold_update: 0.65   # 允许更新原点/校准位姿的置信度阈值 (0.0~1.0)
+    confidence_threshold_publish: 0.50  # 允许发布 /initialpose 的置信度阈值 (0.0~1.0)
+    confidence_threshold_amcl: 0.35     # 低置信度仍可辅助 AMCL 的阈值 (0.0~1.0, 当前仅监控)
 
     # ────── 旋转采集 ──────
     rotation_min_deg: 180.0

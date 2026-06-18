@@ -347,19 +347,35 @@ def global_search_first_frame(pts_odom, lf, map_data, info, step=1.5, angle_step
 
 def local_search(pts_odom, cx_pred, cy_pred, yaw_pred, lf, info,
                  radius=3.0, pos_step=0.2, angle_range=15, angle_step=2):
-    """局部搜索: 在预测位姿周围 ±radius 范围搜索"""
-    best_sc = -1e9; best_pose = (cx_pred, cy_pred, yaw_pred)
-    # 降采样
+    """局部搜索: 两级粗→细搜索, 大幅减少计算量"""
+    # 降采样 (两级共享)
     n_pts = min(len(pts_odom), 800)
     rng = np.random.default_rng()
     idx = rng.choice(len(pts_odom), size=n_pts, replace=False) if len(pts_odom) > n_pts else np.arange(len(pts_odom))
     pts_ds = pts_odom[idx]
-    
-    for dx in np.arange(-radius, radius+1e-5, pos_step):
-        for dy in np.arange(-radius, radius+1e-5, pos_step):
-            for da in np.arange(-angle_range, angle_range+1, angle_step):
-                ax, ay = cx_pred+dx, cy_pred+dy
+
+    # ── 阶段1: 粗搜索 (大步长, 定位大致区域) ──
+    coarse_ps = max(pos_step * 2.0, 0.5)
+    coarse_as = max(angle_step * 2, 5)
+    coarse_rad = radius
+    best_sc = -1e9; best_pose = (cx_pred, cy_pred, yaw_pred)
+    for dx in np.arange(-coarse_rad, coarse_rad + 1e-5, coarse_ps):
+        for dy in np.arange(-coarse_rad, coarse_rad + 1e-5, coarse_ps):
+            for da in np.arange(-int(angle_range), int(angle_range) + 1, coarse_as):
+                ax, ay = cx_pred + dx, cy_pred + dy
                 ayaw = yaw_pred + math.radians(da)
+                sc, _, _ = score_pose(pts_ds, ax, ay, ayaw, lf, info)
+                if sc > best_sc:
+                    best_sc = sc; best_pose = (ax, ay, ayaw)
+
+    # ── 阶段2: 细搜索 (围绕粗搜最优, 小窗口精修) ──
+    fine_rad = pos_step * 1.5  # 紧贴粗搜结果周围
+    cx_r, cy_r, yaw_r = best_pose
+    for dx in np.arange(-fine_rad, fine_rad + 1e-5, pos_step):
+        for dy in np.arange(-fine_rad, fine_rad + 1e-5, pos_step):
+            for da in np.arange(-int(angle_step * 2), int(angle_step * 2) + 1, int(angle_step)):
+                ax, ay = cx_r + dx, cy_r + dy
+                ayaw = yaw_r + math.radians(da)
                 sc, _, _ = score_pose(pts_ds, ax, ay, ayaw, lf, info)
                 if sc > best_sc:
                     best_sc = sc; best_pose = (ax, ay, ayaw)

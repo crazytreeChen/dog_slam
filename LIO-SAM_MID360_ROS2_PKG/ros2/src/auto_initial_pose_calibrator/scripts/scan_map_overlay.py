@@ -119,7 +119,7 @@ def geometry_constraints(mu, frame_ranges, frame_tfs, amin, ainc, map_data, info
         # 约束3: 传感器自身位置不得位于地图墙壁(100)上 — 机器人不可能站墙里
         #         灰色未知区允许 (data_4场景: 下房间地图未完整扫描时机器人可能站在灰色区)
         sensor_tot += 1
-        s_col = int((sx - ox) / res); s_row = int(H - 1 - (sy - oy) / res)
+        s_col = int((sx - ox) / res); s_row = int((sy - oy) / res + 0.5)
         if not (0 <= s_row < H and 0 <= s_col < W):
             sensor_nonfree += 1  # 出图边界算非法
         elif map_data[s_row, s_col] == 100:
@@ -131,7 +131,7 @@ def geometry_constraints(mu, frame_ranges, frame_tfs, amin, ainc, map_data, info
 
         # 约束1: 端点灰色率 (向量化)
         e_col = ((ex - ox) / res + 0.5).astype(np.int32)
-        e_row = (H - 1 - (ey - oy) / res + 0.5).astype(np.int32)
+        e_row = ((ey - oy) / res + 0.5).astype(np.int32)
         e_v = (e_col >= 0) & (e_col < W) & (e_row >= 0) & (e_row < H)
         tot_end += int(np.sum(e_v))
         gray_end += int(np.sum(map_data[e_row[e_v], e_col[e_v]] == -1))
@@ -149,7 +149,7 @@ def geometry_constraints(mu, frame_ranges, frame_tfs, amin, ainc, map_data, info
             px = sx + (ex[j] - sx) * t
             py = sy + (ey[j] - sy) * t
             col2 = ((px - ox) / res + 0.5).astype(np.int32)
-            row2 = (H - 1 - (py - oy) / res + 0.5).astype(np.int32)
+            row2 = ((py - oy) / res + 0.5).astype(np.int32)
             v2 = (col2 >= 0) & (col2 < W) & (row2 >= 0) & (row2 < H)
             tot_free += int(np.sum(v2))
             wall_in_free += int(np.sum(map_data[row2[v2], col2[v2]] == 100))
@@ -209,55 +209,84 @@ def eval_pose_full(pts, mu, map_data, lf, info, ms):
     return wall_pct, sc
 
 
-def wall_in_free_fast(pts, mu, map_data, info, sample_step=4, free_margin_cells=6):
+def wall_in_free_fast(pts, mu, map_data, info, sample_step=4, free_margin_cells=6,
+                      sensor_odom_x=0.0, sensor_odom_y=0.0):
     """
     快速墙穿空旷率 (递推内用, 单帧 odom 点云已在 mu 系下投影):
-      对降采样后的每个端点, 沿"传感器原点(mu位置)→端点"的射线检查空闲段是否穿墙。
-      pts 为 odom 系单帧点 (已是相对传感器的局部坐标, 原点即传感器)。
+      对降采样后的每个端点, 沿"实际传感器原点→端点"的射线检查空闲段是否穿墙。
+      pts 为 odom 系单帧点 (已含传感器在 odom 中的绝对位置),
+      sensor_odom_* 为当前帧传感器在 odom 系中的位置 (来自 frame_tfs[i][:2])。
     返回穿墙比例 (0~1)。
     """
     res, ox, oy = info['resolution'], info['origin_x'], info['origin_y']
     H, W = info['height'], info['width']
     x, y, yaw = mu
     c, s = math.cos(yaw), math.sin(yaw)
+    # ── 射线原点: 实际传感器在 map 系中的位置 (非 odom 原点) ──
+    origin_x = c * sensor_odom_x - s * sensor_odom_y + x
+    origin_y = s * sensor_odom_x + c * sensor_odom_y + y
     sub = pts[::sample_step]
     ex = c * sub[:, 0] - s * sub[:, 1] + x
     ey = s * sub[:, 0] + c * sub[:, 1] + y
     wall = tot = 0
     for j in range(len(ex)):
-        dist = math.hypot(ex[j] - x, ey[j] - y)
+        dist = math.hypot(ex[j] - origin_x, ey[j] - origin_y)
         nstep = int(dist / res)
         for k in range(2, nstep - free_margin_cells, 3):  # 沿线每3格采一次
-            px = x + (ex[j] - x) * k / nstep
-            py = y + (ey[j] - y) * k / nstep
-            col = int((px - ox) / res); rr = int(H - 1 - (py - oy) / res)
-            if 0 <= rr < H and 0 <= col < W:
+            px = origin_x + (ex[j] - origin_x) * k / nstep
+            py = origin_y + (ey[j] - origin_y) * k / nstep
+            col = int((px - ox) / res + 0.5); row = int((py - oy) / res + 0.5)
+            if 0 <= row < H and 0 <= col < W:
                 tot += 1
-                if map_data[rr, col] == 100:
+                if map_data[row, col] == 100:
                     wall += 1
     return wall / max(tot, 1)
 
 
 def local_search_constrained(pts, cx, cy, yaw, lf, map_data, info, ms,
                              radius=3.0, pos_step=0.2, angle_range=15, angle_step=2,
-                             wall_penalty=8.0):
+                             wall_penalty=8.0, sensor_odom_x=0.0, sensor_odom_y=0.0):
     """
-    约束感知局部搜索: 在似然评分基础上减去"墙穿空旷"惩罚。
-    阻止位姿滑向相邻相似房间 (滑过去会让本该空旷的方向穿过隔壁墙)。
+    约束感知局部搜索: 两级粗→细搜索 + 墙穿惩罚。
+    阻止位姿滑向相邻相似房间。
     """
     best_score = -1e9
     best_pose = (cx, cy, yaw)
-    for dx in np.arange(-radius, radius + 1e-5, pos_step):
-        for dy in np.arange(-radius, radius + 1e-5, pos_step):
-            for da in range(-int(angle_range), int(angle_range) + 1, angle_step):
+
+    # ── 阶段1: 粗搜索 (大步长, 不用墙惩罚 — 用 wallhit 快速过滤) ──
+    coarse_ps = max(pos_step * 2.0, 0.5)
+    coarse_as = max(angle_step * 2, 5)
+    coarse_rad = radius
+    for dx in np.arange(-coarse_rad, coarse_rad + 1e-5, coarse_ps):
+        for dy in np.arange(-coarse_rad, coarse_rad + 1e-5, coarse_ps):
+            for da in range(-int(angle_range), int(angle_range) + 1, coarse_as):
                 ax, ay = cx + dx, cy + dy
                 ayaw = yaw + math.radians(da)
                 sc, _, _ = ms.score_pose(pts, ax, ay, ayaw, lf, info)
                 if sc < -1e8:
                     continue
-                # 墙穿惩罚 (粗采样, 仅在似然较优的位姿附近才精算以省时)
+                # 阶段1 只用 wallhit 快速补分 (不用耗时的 wall_in_free_fast)
+                wh, _, _ = ms.score_pose_wallhit(pts, ax, ay, ayaw, map_data, info)
+                sc += max(wh, 0) * 0.3
+                if sc > best_score:
+                    best_score = sc; best_pose = (ax, ay, ayaw)
+
+    # ── 阶段2: 细搜索 (围绕粗搜最优, 小窗口 + 墙穿惩罚精修) ──
+    fine_rad = pos_step * 1.5
+    cx_r, cy_r, yaw_r = best_pose
+    for dx in np.arange(-fine_rad, fine_rad + 1e-5, pos_step):
+        for dy in np.arange(-fine_rad, fine_rad + 1e-5, pos_step):
+            for da in range(-int(angle_step * 2), int(angle_step * 2) + 1, int(angle_step)):
+                ax, ay = cx_r + dx, cy_r + dy
+                ayaw = yaw_r + math.radians(da)
+                sc, _, _ = ms.score_pose(pts, ax, ay, ayaw, lf, info)
+                if sc < -1e8:
+                    continue
+                # 精细阶段使用墙穿惩罚 (传入传感器 odom 位置计算正确射线原点)
                 if sc > best_score - 0.3:
-                    wf = wall_in_free_fast(pts, (ax, ay, ayaw), map_data, info)
+                    wf = wall_in_free_fast(pts, (ax, ay, ayaw), map_data, info,
+                                           sensor_odom_x=sensor_odom_x,
+                                           sensor_odom_y=sensor_odom_y)
                     sc -= wall_penalty * wf
                 if sc > best_score:
                     best_score = sc
@@ -353,11 +382,23 @@ def score_pose_freespace(pts, x, y, yaw, map_data, info):
     return score, free_ratio, wall_ratio, n_free, n_wall, n_unknown, n_total
 
 
+def _is_known_cell(mx, my, map_data, info):
+    """返回地图坐标 (mx,my) 所在格是否在已知区域 (非灰色/unknown)。"""
+    res = info['resolution']; ox = info['origin_x']; oy = info['origin_y']
+    H, W = info['height'], info['width']
+    col = int((mx - ox) / res + 0.5)
+    row = int((my - oy) / res + 0.5)
+    if 0 <= col < W and 0 <= row < H:
+        return map_data[row, col] != -1  # -1 = unknown/gray
+    return False
+
+
 def global_search_freespace(pts, map_data, info, top_k=10,
                             xy_step=2.0, angle_step_deg=15, search_bbox=None):
     """
     自由空间最大化全局搜索。
     遍历地图网格，对每个候选位姿计算扫描点落在已知自由区的比例。
+    跳过灰色未知区(unknown)的候选位置, 大幅减少无效计算。
     可选 search_bbox=(x_min, y_min, x_max, y_max) 将搜索约束在指定矩形内。
     返回 Top-K (score, x, y, deg) 经 NMS 去重。
     """
@@ -370,9 +411,22 @@ def global_search_freespace(pts, map_data, info, top_k=10,
     else:
         x_start, x_end = ox + 3, ox + mw - 3
         y_start, y_end = oy + 3, oy + mh - 3
+    # 预计算已知区域 mask (在搜索步长分辨率下)
+    xs = np.arange(x_start, x_end, xy_step)
+    ys = np.arange(y_start, y_end, xy_step)
+    known_mask = np.zeros((len(ys), len(xs)), dtype=bool)
+    for iy, y in enumerate(ys):
+        for ix, x in enumerate(xs):
+            known_mask[iy, ix] = _is_known_cell(x, y, map_data, info)
+    n_known = int(known_mask.sum())
+    n_total = len(xs) * len(ys)
+    print(f"  [FreeSpace] search grid: {n_known}/{n_total} known cells "
+          f"(跳过 {n_total-n_known} 个未知区, {100*(n_total-n_known)/max(n_total,1):.0f}%)")
     candidates = []
-    for x in np.arange(x_start, x_end, xy_step):
-        for y in np.arange(y_start, y_end, xy_step):
+    for iy, y in enumerate(ys):
+        for ix, x in enumerate(xs):
+            if not known_mask[iy, ix]:
+                continue  # 跳过灰色未知区
             for adeg in range(0, 360, angle_step_deg):
                 sc, fr, wr, nf, nw, nu, nt = score_pose_freespace(
                     pts, x, y, math.radians(adeg), map_data, info)
@@ -443,7 +497,8 @@ def global_search_freespace_per_room(pts, map_data, info, top_k=3,
 # 单候选完整递推 (复刻 MultiStepLocalizer 的逐帧逻辑, 种子由外部给定)
 # ============================================================
 def recurse_from_seed(frames, seed_pose, ms, lf, map_data, info, decay=0.7, min_sigma=0.5,
-                      constrained=True, verbose=False):
+                      constrained=True, verbose=False, best_score_ref=None,
+                      early_exit_gap=0.15, early_exit_frame=10):
     """
     从指定首帧种子位姿出发, 逐帧 ICP + 局部搜索递推。
 
@@ -453,15 +508,16 @@ def recurse_from_seed(frames, seed_pose, ms, lf, map_data, info, decay=0.7, min_
 
     返回:
       final_pose (x,y,yaw), history[(i,x,y,yaw,sigma,wall%,score)],
-      mean_score, mean_wall, unknown_pct(终态合并点落在未知区域比例)
+      mean_score, mean_wall, unknown_pct(终态合并点落在未知区域比例), early_exit (bool)
     """
     mu = list(seed_pose)
     sigma = 5.0
     sigma_angle = 20.0
     history = []
+    early_exit = False
 
     for i in range(len(frames)):
-        pts, _ = frames[i]
+        pts, tf = frames[i]
         if len(pts) < 10:
             continue
 
@@ -485,13 +541,27 @@ def recurse_from_seed(frames, seed_pose, ms, lf, map_data, info, decay=0.7, min_
 
             search_radius = min(sigma * 1.5, 3.0)
             angle_range = min(sigma_angle * 1.5, 20)
+
+            # 自适应搜索粒度 (配合两级搜索, 粗搜大步长+细搜精修):
+            #   sigma大 → 粗粒度, 让两级搜索的"粗搜阶段"覆盖更大空间
+            #   sigma小 → 细粒度, 粗/细两级都收窄
+            if sigma > 2.0:
+                ps, a_s = 0.25, 4   # 粗搜: 0.5m/8° → 细搜: 0.25m/4°
+            elif sigma > 1.0:
+                ps, a_s = 0.2, 3    # 粗搜: 0.5m/6° → 细搜: 0.2m/3°
+            else:
+                ps, a_s = 0.15, 2   # 粗搜: 0.5m/4° → 细搜: 0.15m/2°
+
             if constrained:
                 pose, _ = local_search_constrained(pts, pred_x, pred_y, pred_yaw, lf,
                                                    map_data, info, ms,
-                                                   radius=search_radius, angle_range=int(angle_range))
+                                                   radius=search_radius, angle_range=int(angle_range),
+                                                   pos_step=ps, angle_step=a_s,
+                                                   sensor_odom_x=tf[0], sensor_odom_y=tf[1])
             else:
                 pose, _ = ms.local_search(pts, pred_x, pred_y, pred_yaw, lf, info,
-                                          radius=search_radius, angle_range=int(angle_range))
+                                          radius=search_radius, angle_range=int(angle_range),
+                                          pos_step=ps, angle_step=a_s)
 
             # ── ICP 失败保护 (复刻 MultiStepLocalizer.run() 第490-510行) ──
             # 搜索后计算当前帧的墙壁覆盖率, 防止 local_search 滑到错误房间
@@ -537,6 +607,19 @@ def recurse_from_seed(frames, seed_pose, ms, lf, map_data, info, decay=0.7, min_
         wp, sc = eval_pose_full(pts, mu, map_data, lf, info, ms)
         history.append((i, mu[0], mu[1], mu[2], sigma, wp, sc))
 
+        # 早期终止: 若当前候选明显劣于已知最优, 放弃后续帧
+        if best_score_ref is not None and i >= early_exit_frame:
+            running_mean = float(np.mean([h[6] for h in history]))
+            if running_mean < best_score_ref - early_exit_gap:
+                if verbose:
+                    print(f"  [EARLY EXIT] f{i:02d} running_score={running_mean:.3f} < "
+                          f"best={best_score_ref:.3f} - gap={early_exit_gap:.2f}")
+                early_exit = True
+                while i + 1 < len(frames):
+                    i += 1
+                    history.append((i, mu[0], mu[1], mu[2], sigma, wp, sc))
+                break
+
     mean_score = float(np.mean([h[6] for h in history])) if history else -1e9
     mean_wall = float(np.mean([h[5] for h in history])) if history else 0.0
 
@@ -556,7 +639,7 @@ def recurse_from_seed(frames, seed_pose, ms, lf, map_data, info, decay=0.7, min_
         n_tot += len(p)
     unknown_pct = 100.0 * n_unk / max(n_tot, 1)
 
-    return tuple(mu), history, mean_score, mean_wall, unknown_pct
+    return tuple(mu), history, mean_score, mean_wall, unknown_pct, early_exit
 
 
 # ============================================================
@@ -628,6 +711,195 @@ def create_overlay(map_data, info, frame_pts, best, all_cands, tf_gt, output_pat
     return err_dist, math.degrees(err_yaw)
 
 
+# ═══════════════════════════════════════════════════════════════
+# 去灰 + 面积/线条对比可视化
+# ═══════════════════════════════════════════════════════════════
+
+def _classify_scan_zones(pts_map, map_data, info):
+    """将扫描点分类到 free/wall/unknown 三个区域，返回每类的 mask 和计数。"""
+    res, ox, oy = info['resolution'], info['origin_x'], info['origin_y']
+    H, W = info['height'], info['width']
+    ci = ((pts_map[:, 0] - ox) / res + 0.5).astype(np.int32)
+    ri = ((pts_map[:, 1] - oy) / res + 0.5).astype(np.int32)
+    valid = (ci >= 0) & (ci < W) & (ri >= 0) & (ri < H)
+    zones = np.full(len(pts_map), -2, dtype=np.int8)  # -2=超出边界
+    zones[valid] = map_data[ri[valid], ci[valid]]
+    free_mask = zones == 0
+    wall_mask = zones == 100
+    unknown_mask = zones == -1
+    oob_mask = zones == -2
+    return free_mask, wall_mask, unknown_mask, oob_mask
+
+
+def _extract_wall_contours(map_data, info, min_wall_area=200):
+    """从地图 occupied 区域提取墙壁轮廓线。返回轮廓列表 (像素坐标)。"""
+    res = info['resolution']
+    ox, oy = info['origin_x'], info['origin_y']
+    H, W = info['height'], info['width']
+    wall_bin = (map_data == 100).astype(np.uint8) * 255
+    if wall_bin.sum() == 0:
+        return []
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    wall_bin = cv2.morphologyEx(wall_bin, cv2.MORPH_CLOSE, k, iterations=1)
+    contours, _ = cv2.findContours(wall_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    kept = []
+    for c in contours:
+        if cv2.contourArea(c) < min_wall_area:
+            continue
+        # 像素 → 地图坐标 (origin='lower' 对应 numpy row 反转)
+        pts = c.reshape(-1, 2).astype(np.float64)
+        mx = ox + (pts[:, 0] + 0.5) * res
+        my = oy + (H - pts[:, 1] - 0.5) * res
+        kept.append(np.column_stack([mx, my]))
+    return kept
+
+
+def _extract_scan_boundary(pts_map, info, grid_cells=20):
+    """将扫描端点栅格化后提取外轮廓，返回轮廓点 (地图坐标)。"""
+    res = info['resolution']
+    ox, oy = info['origin_x'], info['origin_y']
+    H, W = info['height'], info['width']
+
+    if len(pts_map) < 10:
+        return None
+
+    # 创建比地图稍大的局部网格
+    xs_min, xs_max = pts_map[:, 0].min() - 2.0, pts_map[:, 0].max() + 2.0
+    ys_min, ys_max = pts_map[:, 1].min() - 2.0, pts_map[:, 1].max() + 2.0
+    gx = int((xs_max - xs_min) / res) + 1
+    gy = int((ys_max - ys_min) / res) + 1
+
+    # 栅格化
+    grid = np.zeros((gy, gx), dtype=np.uint8)
+    ci = ((pts_map[:, 0] - xs_min) / res + 0.5).astype(np.int32)
+    ri = (gy - 1 - (pts_map[:, 1] - ys_min) / res + 0.5).astype(np.int32)
+    for cx, ry in zip(ci, ri):
+        if 0 <= cx < gx and 0 <= ry < gy:
+            grid[ry, cx] = 255
+
+    if grid.sum() == 0:
+        return None
+
+    # 膨胀 + 找轮廓
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (grid_cells, grid_cells))
+    grid_d = cv2.dilate(grid, k, iterations=1)
+    cs, _ = cv2.findContours(grid_d, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cs:
+        return None
+    c = max(cs, key=cv2.contourArea)
+    pts = c.reshape(-1, 2).astype(np.float64)
+    # 像素 → 地图坐标
+    mx = xs_min + (pts[:, 0] + 0.5) * res
+    my = ys_min + (gy - pts[:, 1] - 0.5) * res
+    return np.column_stack([mx, my])
+
+
+def create_no_gray_comparison(map_data, info, frame_pts, best, tf_gt, output_path):
+    """
+    去灰 + 面积/线条对比可视化 (3-panel):
+      (a) 去灰地图 + 扫描按区域着色 (绿=自由区, 红=墙, 蓝=未知)
+      (b) 面积统计: 扫描点落到各区域的比例 + 条形图
+      (c) 边界线条对比: 地图墙体轮廓 (黑) vs 扫描外轮廓 (红虚线)
+    """
+    res = info['resolution']
+    ox, oy = info['origin_x'], info['origin_y']
+    H, W = info['height'], info['width']
+    extent = [ox, ox + W * res, oy, oy + H * res]
+
+    final_pose, history = best['final'], best['history']
+    fx, fy, fyaw = final_pose
+
+    # ── 汇总所有帧扫描点 (best 位姿) ──
+    red_pts = np.vstack([project_pts(frame_pts[h[0]][0], h[1], h[2], h[3]) for h in history])
+    # 降采样
+    step = max(1, len(red_pts) // 8000)
+    red_pts_sub = red_pts[::step]
+
+    # ── 去灰地图 RGB ──
+    map_nogray = np.full((H, W, 3), 1.0, dtype=np.float32)       # 白色底
+    map_nogray[map_data == 0] = [0.92, 0.92, 0.92]               # 自由区 浅灰
+    map_nogray[map_data == 100] = [0.15, 0.15, 0.15]             # 墙 深灰
+
+    # ── 分类扫描点 ──
+    free_m, wall_m, unk_m, oob_m = _classify_scan_zones(red_pts_sub, map_data, info)
+    nb, nf, nw, nu = len(red_pts_sub), int(free_m.sum()), int(wall_m.sum()), int(unk_m.sum())
+    noob = int(oob_m.sum())
+
+    # ── 提取轮廓 ──
+    wall_contours = _extract_wall_contours(map_data, info)
+    scan_boundary = _extract_scan_boundary(red_pts_sub, info, grid_cells=15)
+
+    # ────────────────────────────────────────
+    fig, axes = plt.subplots(1, 3, figsize=(24, 9))
+    # ────────────────────────────────────────
+
+    # (a) 去灰地图 + 分类着色扫描
+    ax = axes[0]
+    ax.imshow(map_nogray, origin='lower', extent=extent, aspect='equal')
+    # 按区域着色扫描点
+    if nf > 0:
+        ax.scatter(red_pts_sub[free_m, 0], red_pts_sub[free_m, 1],
+                   s=0.8, c='#2ecc71', alpha=0.7, label=f'自由区 ({nf})')
+    if nw > 0:
+        ax.scatter(red_pts_sub[wall_m, 0], red_pts_sub[wall_m, 1],
+                   s=0.8, c='#e74c3c', alpha=0.7, label=f'墙壁 ({nw})')
+    if nu > 0:
+        ax.scatter(red_pts_sub[unk_m, 0], red_pts_sub[unk_m, 1],
+                   s=0.8, c='#3498db', alpha=0.7, label=f'未知 ({nu})')
+    ax.plot(fx, fy, 'r*', markersize=16, zorder=6)
+    ax.arrow(fx, fy, 2.5 * math.cos(fyaw), 2.5 * math.sin(fyaw),
+             head_width=0.5, head_length=0.4, fc='red', ec='darkred', lw=2.5)
+    ax.set_title(f'(a) 去灰地图 + 扫描分区着色\n'
+                 f'位姿 ({fx:.1f}, {fy:.1f}, {math.degrees(fyaw):.0f}°)', fontsize=11)
+    ax.legend(fontsize=8, loc='upper right', markerscale=5)
+    ax.grid(True, alpha=0.10)
+
+    # (b) 面积统计
+    ax = axes[1]
+    zones = ['自由区', '墙壁', '未知区', '出界']
+    counts = [nf, nw, nu, noob]
+    colors = ['#2ecc71', '#e74c3c', '#3498db', '#95a5a6']
+    bars = ax.bar(zones, counts, color=colors, edgecolor='white', linewidth=0.5, width=0.55)
+    for bar, cnt in zip(bars, counts):
+        pct = 100.0 * cnt / max(nb, 1)
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + max(counts) * 0.02,
+                f'{cnt}\n({pct:.1f}%)', ha='center', va='bottom', fontsize=9, fontweight='bold')
+    ax.set_ylabel('扫描点数', fontsize=10)
+    ax.set_title(f'(b) 面积统计 (总 {nb} 点)\n'
+                 f'已知区覆盖率={(nf + nw) / max(nb, 1) * 100:.1f}%  未知率={nu / max(nb, 1) * 100:.1f}%',
+                 fontsize=11)
+    ax.grid(axis='y', alpha=0.15)
+
+    # (c) 边界线条对比
+    ax = axes[2]
+    ax.imshow(map_nogray, origin='lower', extent=extent, aspect='equal')
+    # 地图墙壁轮廓
+    if wall_contours:
+        for wc in wall_contours:
+            ax.plot(wc[:, 0], wc[:, 1], color='black', lw=0.8, alpha=0.6, zorder=3)
+        # 首个轮廓用于图例
+        ax.plot([], [], color='black', lw=2.0, label=f'地图墙轮廓 ({len(wall_contours)}条)')
+    # 扫描外轮廓
+    if scan_boundary is not None and len(scan_boundary) > 0:
+        ax.plot(scan_boundary[:, 0], scan_boundary[:, 1],
+                color='#e74c3c', lw=2.0, ls='--', alpha=0.85, label='扫描外轮廓', zorder=4)
+        # 填充扫描外轮廓区域
+        ax.fill(scan_boundary[:, 0], scan_boundary[:, 1],
+                color='red', alpha=0.06, zorder=2)
+    ax.plot(fx, fy, 'r*', markersize=16, zorder=6)
+    ax.arrow(fx, fy, 2.5 * math.cos(fyaw), 2.5 * math.sin(fyaw),
+             head_width=0.5, head_length=0.4, fc='red', ec='darkred', lw=2.5)
+    ax.set_title(f'(c) 边界线条对比\n'
+                 f'map墙轮廓(黑) vs 扫描外轮廓(红虚线)', fontsize=11)
+    ax.legend(fontsize=8, loc='upper right')
+    ax.grid(True, alpha=0.10)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"去灰对比图已保存: {output_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description='扫描-地图叠加 (首帧多候选并行递推)')
     parser.add_argument('--data', type=str,
@@ -647,6 +919,8 @@ def main():
                         help='跳过 WallHit 回退 (强制只用似然场首帧结果)')
     parser.add_argument('--verbose', action='store_true',
                         help='逐帧打印递推详情')
+    parser.add_argument('--compare-viz', action='store_true',
+                        help='额外生成去灰 + 面积/线条对比图')
     args = parser.parse_args()
 
     npz_path = os.path.normpath(args.data)
@@ -760,32 +1034,49 @@ def main():
     print(f"步骤 3: 每个候选独立跑完整递推 ({len(frame_pts)} 帧)")
     print("=" * 60)
     results = []
+    best_score_so_far = None
     for k, (sc0, hx, hy, had) in enumerate(cand0):
+        print(f"\n  ▸ 候选 #{k} / {len(cand0)}  种子({hx:.1f}, {hy:.1f}, {had:.0f}°)")
         # 候选种子精搜细化
         seed, _ = ms.local_search(pts0, hx, hy, math.radians(had), lf, info,
                                   radius=2.0, pos_step=0.3)
-        final, hist, mscore, mwall, unk = recurse_from_seed(
+        # 从第2个候选起, 传入已知最佳分用于早期终止
+        ref = best_score_so_far if best_score_so_far is not None else None
+        final, hist, mscore, mwall, unk, early_exit = recurse_from_seed(
             frame_pts, seed, ms, lf, map_data, info, decay=args.decay,
-            constrained=args.constrained, verbose=args.verbose)
-        # 几何自洽双约束 (主判据): 端点灰色率 + 墙穿空旷率
-        gray_end, wall_free, sensor_nf = geometry_constraints(final, frame_ranges, frame_tfs,
-                                                              angle_min, angle_inc, map_data, info)
-        # Ray-cast 正交验证 (辅助)
-        rc_err = raycast_validate(final, frame_ranges, frame_tfs, angle_min, angle_inc,
-                                  map_data, info, hu)
-        # Wallhit 评分 (multistep 关键消歧器): 严格要求端点真的落在墙像素上
-        # 对所有帧合并点云算一次, 量化扫描和地图墙的匹配紧密度
-        all_pts = np.vstack([fp[0] for fp in frame_pts if len(fp[0]) > 0])
-        wh_score, wh_nwall, wh_nv = ms.score_pose_wallhit(all_pts, final[0], final[1],
-                                                         final[2], map_data, info)
+            constrained=args.constrained, verbose=args.verbose,
+            best_score_ref=ref)
+        if early_exit:
+            print(f"    ⚠ 候选#{k} 跑分过低 → 早期终止 (均分={mscore:.2f})")
+
+        # 更新最佳跑分 (用于后续候选早期终止判定)
+        if best_score_so_far is None or mscore > best_score_so_far:
+            best_score_so_far = mscore
+
+        # 验证 (早期终止的候选跳过耗时的验证 + wallhit)
+        if not early_exit:
+            gray_end, wall_free, sensor_nf = geometry_constraints(final, frame_ranges, frame_tfs,
+                                                                  angle_min, angle_inc, map_data, info)
+            rc_err = raycast_validate(final, frame_ranges, frame_tfs, angle_min, angle_inc,
+                                      map_data, info, hu)
+            # wallhit 降采样: 每4个点取1个, 速度提升4x, 评分影响极小
+            all_pts = np.vstack([fp[0] for fp in frame_pts if len(fp[0]) > 0])
+            wh_score, wh_nwall, wh_nv = ms.score_pose_wallhit(
+                all_pts[::4], final[0], final[1], final[2], map_data, info)
+        else:
+            gray_end = 50.0; wall_free = 50.0; sensor_nf = 50.0; rc_err = 1e9
+            wh_score = -1e9  # 被淘汰候选无需墙命中评分
+            wh_nwall = 0; wh_nv = 0
         results.append({'final': final, 'history': hist, 'mean_score': mscore,
                         'mean_wall': mwall, 'unknown_pct': unk, 'raycast': rc_err,
                         'gray_end': gray_end, 'wall_free': wall_free,
-                        'sensor_nf': sensor_nf, 'wallhit': max(wh_score, 0.0)})
+                        'sensor_nf': sensor_nf, 'wallhit': max(wh_score, 0.0),
+                        'early_exit': early_exit})
+        early_tag = " [EARLY EXIT]" if early_exit else ""
         print(f"  候选#{k}: 种子({hx:.1f},{hy:.1f},{had:.0f}°) → 终态"
               f"({final[0]:.1f},{final[1]:.1f},{math.degrees(final[2]):.0f}°) "
               f"| 墙命中={max(wh_score,0):.2f} 传感器非自由={sensor_nf:.0f}% "
-              f"端点灰={gray_end:.0f}% 墙穿={wall_free:.1f}% 均分={mscore:.2f}")
+              f"端点灰={gray_end:.0f}% 墙穿={wall_free:.1f}% 均分={mscore:.2f}{early_tag}")
 
     # 去重: 终态相近的候选合并 (保留 wallhit 最高的)
     dedup = []
@@ -807,7 +1098,9 @@ def main():
     SENSOR_WALL_MAX = 50.0  # 传感器在墙里的帧比例超此值 -> 硬淘汰
     for r in dedup:
         r['sensor_ok'] = r['sensor_nf'] <= SENSOR_WALL_MAX
-        r['valid']     = r['sensor_ok']
+        # 早期终止的候选降为无效 (跑分显著低于最优候选)
+        r['early_ok'] = not r.get('early_exit', False)
+        r['valid']    = r['sensor_ok'] and r['early_ok']
         # 各指标典型范围:
         #   mean_score ~0.5-1.4, wallhit ~0-1.2, wall_free 0-20%
         #   raycast ~0-10m, gray_end 0-100%, sensor_nf 0-100%
@@ -830,7 +1123,7 @@ def main():
     print("=" * 60)
     for rank, r in enumerate(results):
         fx, fy, fyaw = r['final']
-        trust = "可信" if r['valid'] else "淘汰(传感器在墙里)"
+        trust = "可信" if r['valid'] else ("淘汰(早期终止)" if not r.get('early_ok', True) else "淘汰(传感器在墙里)")
         tag = " ← 选中" if r is best else ""
         # 评分拆解: 更直观看出各维度贡献
         sc_lf  = r['mean_score'] * 0.3
@@ -853,6 +1146,10 @@ def main():
     print("步骤 5: 生成红色叠加可视化")
     print("=" * 60)
     err_d, err_y = create_overlay(map_data, info, frame_pts, best, results, tf_gt, output_path)
+
+    if args.compare_viz:
+        cmp_out = output_path.replace('.png', '_compare.png')
+        create_no_gray_comparison(map_data, info, frame_pts, best, tf_gt, cmp_out)
 
     fx, fy, fyaw = best['final']
     print("\n" + "=" * 60)

@@ -155,6 +155,21 @@ class AutoInitialPoseCalibrator(Node):
         self.declare_parameter('passive_interval', 60.0)        # 被动匹配间隔 (秒)
         self.declare_parameter('passive_frame_count', 30)       # 每次被动匹配累积帧数
         self.declare_parameter('passive_buffer_max', 300)       # 循环缓冲区最大帧数
+        self.declare_parameter('passive_quality_threshold', 0.25)         # 墙壁覆盖率最低阈值
+        self.declare_parameter('passive_deviation_threshold', 2.0)        # 与上次位姿偏差触发二次验证 (m)
+        self.declare_parameter('passive_deviation_yaw_threshold', 30.0)   # 与上次位姿偏差触发二次验证 (deg)
+        # 里程计融合轻量验证参数
+        self.declare_parameter('passive_odom_fusion_enabled', True)       # 启用里程计融合验证
+        self.declare_parameter('passive_odom_max_move', 5.0)             # 里程计累计位移上限(m)
+        self.declare_parameter('passive_likelihood_threshold', 0.25)      # 似然场评分阈值
+        self.declare_parameter('passive_fusion_wall_threshold', 0.20)     # 融合验证墙壁覆盖率阈值
+        self.declare_parameter('passive_amcl_cross_check', True)          # 启用 AMCL 交叉验证
+        self.declare_parameter('passive_amcl_max_deviation', 1.0)         # AMCL 与推算位姿最大偏差(m)
+
+        # ────── 置信度门控参数 ──────
+        self.declare_parameter('confidence_threshold_update', 0.65)       # 允许更新原点/校准位姿的置信度阈值
+        self.declare_parameter('confidence_threshold_publish', 0.50)      # 允许发布 /initialpose 的置信度阈值
+        self.declare_parameter('confidence_threshold_amcl', 0.35)         # 低置信度仍可辅助 AMCL 的阈值（仅监控）
 
         # ────── 日志持久化参数 ──────
         self.declare_parameter('log_dir', '')                 # 日志持久化目录（为空则不写文件）
@@ -263,6 +278,20 @@ class AutoInitialPoseCalibrator(Node):
         self.passive_interval = self.get_parameter('passive_interval').value
         self.passive_frame_count = self.get_parameter('passive_frame_count').value
         self.passive_buffer_max = self.get_parameter('passive_buffer_max').value
+        self.passive_quality_threshold = self.get_parameter('passive_quality_threshold').value
+        self.passive_deviation_threshold = self.get_parameter('passive_deviation_threshold').value
+        self.passive_deviation_yaw_threshold = self.get_parameter('passive_deviation_yaw_threshold').value
+        self.passive_odom_fusion_enabled = self.get_parameter('passive_odom_fusion_enabled').value
+        self.passive_odom_max_move = self.get_parameter('passive_odom_max_move').value
+        self.passive_likelihood_threshold = self.get_parameter('passive_likelihood_threshold').value
+        self.passive_fusion_wall_threshold = self.get_parameter('passive_fusion_wall_threshold').value
+        self.passive_amcl_cross_check = self.get_parameter('passive_amcl_cross_check').value
+        self.passive_amcl_max_deviation = self.get_parameter('passive_amcl_max_deviation').value
+
+        # ─── 置信度门控 ───
+        self.confidence_threshold_update = self.get_parameter('confidence_threshold_update').value
+        self.confidence_threshold_publish = self.get_parameter('confidence_threshold_publish').value
+        self.confidence_threshold_amcl = self.get_parameter('confidence_threshold_amcl').value
 
         # ────── 日志持久化初始化 ──────
         self._setup_file_logging()
@@ -309,9 +338,8 @@ class AutoInitialPoseCalibrator(Node):
         self.submap2 = None             # Synthesized LaserScan for stage 2
         self.submap2_ref_odom = None    # Odom reference at Submap 2 start
         
-        # 里程计数据验证
+        # 里程计数据
         self.last_odom_pose = None      # 上一帧 odom (x, y, yaw)
-        self.max_odom_delta = 2.0       # 单帧最大允许里程计增量 (m)
 
         # 控制运动目标位姿
         self.target_odom_pose = None    # (x, y, yaw) in reference odom frame
@@ -331,6 +359,10 @@ class AutoInitialPoseCalibrator(Node):
         self.passive_last_match_time = None # 上次被动匹配时间
         self.passive_best_pose = None       # 被动模式累积最佳位姿 (x, y, yaw)
         self.passive_pose_history = []      # [(timestamp, x, y, yaw, wall_cov), ...]
+        # 里程计融合验证状态
+        self.passive_last_odom = None       # 上次被动匹配时的里程计位姿 (ox, oy, oyaw)
+        self.passive_odom_accum_dist = 0.0  # 里程计累计位移 (m)
+        self.latest_amcl_pose = None        # 最新 AMCL 位姿 (x, y, yaw) from _amcl_cb
 
         # ────── QoS 配置 ──────
         be_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -679,20 +711,27 @@ class AutoInitialPoseCalibrator(Node):
     # ================================================================
     #  ICP 扫描匹配相关方法
     # ================================================================
-    def _scan_to_points(self, scan, apply_outlier_filter=False):
+    def _scan_to_points(self, scan, apply_outlier_filter=False, apply_frf_filter=False):
         """将 LaserScan 转换为 (N, 2) NumPy 点阵 (x, y in scan frame)
-        apply_outlier_filter: 是否应用半径离群点过滤去除动态障碍物/杂点"""
+        apply_outlier_filter: 是否应用半径离群点过滤去除动态障碍物/杂点
+        apply_frf_filter: 是否应用 FRF 角度bin间隙过滤去除混合像素/遮挡伪影"""
         if scan is None:
             return np.empty((0, 2))
-        ranges = scan.ranges
+        ranges = np.array(scan.ranges, dtype=np.float64)
         angles = scan.angle_min + np.arange(len(ranges)) * scan.angle_increment
-        valid = (np.array(ranges) > scan.range_min) & (np.array(ranges) < scan.range_max)
+
+        # FRF 过滤 (优先于范围裁剪, 在原始 ranges 上操作)
+        if apply_frf_filter:
+            keep_mask = self._frf_filter_frame(ranges, scan.angle_min, scan.angle_increment)
+            ranges = np.where(keep_mask, ranges, 0.0)
+
+        valid = (ranges > scan.range_min) & (ranges < scan.range_max)
         if not np.any(valid):
             return np.empty((0, 2))
-        r_valid = np.array(ranges)[valid]
+        r_valid = ranges[valid]
         a_valid = angles[valid]
         points = np.column_stack((r_valid * np.cos(a_valid), r_valid * np.sin(a_valid)))
-        
+
         if apply_outlier_filter and self.scan_outlier_filter and len(points) > 10:
             points = self._filter_scan_outliers(points)
         return points
@@ -726,6 +765,27 @@ class AutoInitialPoseCalibrator(Node):
                 mask = np.abs(dists - median_dist) < 3.0 * med_abs_dev * 1.4826
                 return points[mask]
             return points
+
+    def _frf_filter_frame(self, ranges, angle_min, angle_inc, bin_deg=2.0, gap_thresh=0.3):
+        """FRF (Fast Ray Filter): 逐角度bin过滤混合像素/遮挡伪影。
+        在每个2° bin内按距离排序, 剔除间隙>gap_thresh后的异常束。
+        返回: (N,) bool 数组, True=保留"""
+        bin_size = np.radians(bin_deg)
+        valid = (ranges > 0.15) & (ranges < 50.0)
+        if not np.any(valid):
+            return valid
+        angles = angle_min + np.arange(len(ranges)) * angle_inc
+        bins = np.round(angles / bin_size).astype(int)
+        keep = np.ones(len(ranges), dtype=bool)
+        for b in np.unique(bins[valid]):
+            idx = np.where((bins == b) & valid)[0]
+            if len(idx) < 2:
+                continue
+            sorted_idx = idx[np.argsort(ranges[idx])]
+            gaps = np.diff(ranges[sorted_idx]) > gap_thresh
+            if np.any(gaps):
+                keep[sorted_idx[int(np.argmax(gaps)) + 1:]] = False
+        return valid & keep
 
     def _temporal_consistency_filter(self, all_points, frame_ids):
         """
@@ -975,6 +1035,103 @@ class AutoInitialPoseCalibrator(Node):
         hit_rate = n_hit / nv
         return lf_score + hit_rate * 0.5, hit_rate, nv
 
+    def _score_pose_wallhit(self, points_odom, cx, cy, yaw):
+        """墙壁命中评分: 只统计真正落在墙壁像素(100)上的点。
+        比似然场更严格 — 不给"靠近墙壁"的点分数, 只在确实命中时计分。
+        用于障碍物遮挡场景下区分相似走廊。
+        要求: map_data 已加载 (self.map_data 不为 None)
+        返回: (score, n_wall, n_valid) 或 (-1e9,0,0) 表示无效"""
+        if self.map_data is None or self.map_info is None:
+            return -1e9, 0, 0
+        res = self.map_info.resolution
+        ox = self.map_info.origin.position.x
+        oy = self.map_info.origin.position.y
+        H, W = self.map_info.height, self.map_info.width
+
+        c_y, s_y = math.cos(yaw), math.sin(yaw)
+        mx = c_y * points_odom[:, 0] - s_y * points_odom[:, 1] + cx
+        my = s_y * points_odom[:, 0] + c_y * points_odom[:, 1] + cy
+        ci = ((mx - ox) / res + 0.5).astype(np.int32)
+        ri = ((my - oy) / res + 0.5).astype(np.int32)
+        v = (ci >= 0) & (ci < W) & (ri >= 0) & (ri < H)
+        nv = int(np.sum(v))
+        if nv < max(len(points_odom) * 0.1, 3):
+            return -1e9, 0, 0
+        cells = self.map_data[ri[v], ci[v]]
+        valid_c = (cells != -1)
+        n_v = int(np.sum(valid_c))
+        if n_v < 5:
+            return -1e9, 0, 0
+        n_wall = int(np.sum(cells[valid_c] == 100))
+        n_free = int(np.sum(cells[valid_c] == 0))
+        # 扫描不能大部分落在空地上
+        if n_free / max(n_v, 1) > 0.60:
+            return -1e9, 0, 0
+        hit_rate = n_wall / max(n_wall + n_free, 1)
+        coverage = n_v / len(points_odom)
+        return hit_rate * coverage * 2.0, n_wall, n_v
+
+    def _score_pose_raycast(self, points_odom, cx, cy, yaw, range_tol=1.0, max_beams=200):
+        """光线投射评分: 只对"实测距离 ≈ 地图预期距离"的束评分。
+        自动过滤被障碍物/家具遮挡的异常束。
+        原理: 对每个扫描点沿射线方向步进, 检查是否在预期距离处碰到墙壁。
+        返回: (score, n_valid_beams, n_evaluated)"""
+        if self.map_data is None or self.map_info is None:
+            return -1e9, 0, 0
+        res = self.map_info.resolution
+        ox = self.map_info.origin.position.x
+        oy = self.map_info.origin.position.y
+        H, W = self.map_info.height, self.map_info.width
+
+        n_pts = len(points_odom)
+        beam_step = max(1, n_pts // max_beams)
+        n_valid = 0
+        total_score = 0.0
+
+        c_y, s_y = math.cos(yaw), math.sin(yaw)
+        for i in range(0, n_pts, beam_step):
+            px, py = points_odom[i, 0], points_odom[i, 1]
+            dist_measured = math.sqrt(px * px + py * py)
+            if dist_measured < 0.1:
+                continue
+
+            # 扫描点在 map 中的位置
+            mx = c_y * px - s_y * py + cx
+            my = s_y * px + c_y * py + cy
+            ray_angle = math.atan2(my - cy, mx - cx)
+
+            # 沿射线方向步进 (半像素步进)
+            dx_r = math.cos(ray_angle) * res * 0.5
+            dy_r = math.sin(ray_angle) * res * 0.5
+            rx, ry = cx, cy
+            hit_wall = False
+            dist_expected = 50.0
+
+            for _ in range(int(50.0 / (res * 0.5))):
+                col = int((rx - ox) / res)
+                row = int((ry - oy) / res)
+                if col < 0 or col >= W or row < 0 or row >= H:
+                    break
+                cell = self.map_data[row, col]
+                if cell == 100:
+                    dist_expected = math.sqrt((rx - cx) ** 2 + (ry - cy) ** 2)
+                    hit_wall = True
+                    break
+                elif cell == -1:
+                    dist_expected = -1
+                    break
+                rx += dx_r
+                ry += dy_r
+
+            if hit_wall and abs(dist_measured - dist_expected) < range_tol:
+                n_valid += 1
+                total_score += 1.0
+
+        if n_valid < 5:
+            return -1e9, 0, n_pts // max(1, beam_step)
+
+        n_evaluated = n_pts // max(1, beam_step)
+        return total_score / max(n_evaluated, 1), n_valid, n_evaluated
 
     def _compute_wall_coverage(self, points_odom, cx, cy, yaw):
         """计算有效区域内的墙壁覆盖率 (排除灰色区域)"""
@@ -1000,6 +1157,100 @@ class AutoInitialPoseCalibrator(Node):
         w = int(np.sum(cells[valid_cell] == 100))
         f = int(np.sum(cells[valid_cell] == 0))
         return float(w) / (w + f), float(n_valid) / n_total, float(f) / (w + f)
+
+    # ────── 综合置信度计算 ──────
+    def _compute_confidence(self, wall_ratio, lf_score, coverage,
+                            sigma_pos, sigma_yaw_deg, buf_frames,
+                            best_prob=0.0, second_prob=0.0):
+        """综合置信度计算 (0.0 ~ 1.0)。
+
+        加权方案:
+          - wall_ratio:  30% — 墙壁命中率，最重要的约束强度指标
+          - lf_score:    25% — 似然场匹配质量
+          - coverage:    15% — 有效区域覆盖率
+          - sigma_penalty: 20% — 不确定性惩罚 (位置+角度，越小越高)
+          - buffer_bonus: 10% — 数据量奖励
+
+        额外惩罚:
+          - 多峰惩罚: 主/次候选概率比 < 2.0 → ×0.8
+          - 过拟合检测: lf_score > 2.5 且 coverage < 0.5 → ×0.7 (罕见高分布空洞模式)
+        """
+        import numpy as np
+
+        # 1. wall_ratio 归一化 (0% → 0.0,  60% → 1.0, clipping)
+        w = np.clip(wall_ratio / 0.60, 0.0, 1.0)
+
+        # 2. lf_score 归一化 (0.0 → 0.0,  1.5 → 1.0)
+        l = np.clip(lf_score / 1.5, 0.0, 1.0)
+
+        # 3. coverage 归一化 (30% → 0.0,  90% → 1.0)
+        c = np.clip((coverage - 0.30) / 0.60, 0.0, 1.0)
+
+        # 4. sigma 惩罚 (位置: 0.3m → 1.0,  3.0m → 0.0)
+        s = max(1.0 - max(sigma_pos - 0.3, 0.0) / 2.7, 0.0)
+        #    角度: 5° → 1.0,  45° → 0.0
+        sy = max(1.0 - max(sigma_yaw_deg - 5.0, 0.0) / 40.0, 0.0)
+        sigma_score = 0.6 * s + 0.4 * sy
+
+        # 5. buffer 奖励 (10帧 → 0.0,  60帧 → 1.0)
+        b = np.clip((buf_frames - 10) / 50.0, 0.0, 1.0)
+
+        # 加权综合
+        confidence = 0.30 * w + 0.25 * l + 0.15 * c + 0.20 * sigma_score + 0.10 * b
+
+        # 多峰惩罚: 主/次候选概率比 < 2.0 → 存在歧义
+        if best_prob > 0 and second_prob > 0 and (best_prob / max(second_prob, 1e-9)) < 2.0:
+            confidence *= 0.8
+
+        # 过拟合检测: 似然高但覆盖率低 → 可能匹配到了局部特征
+        if lf_score > 2.5 and coverage < 0.5:
+            confidence *= 0.7
+
+        return float(np.clip(confidence, 0.0, 1.0))
+
+    def _local_search_two_stage(self, points_odom, cx_pred, cy_pred, yaw_pred,
+                                 radius=3.0, pos_step=0.2, angle_range=15, angle_step=2):
+        """两级粗→细局部搜索: 大幅减少计算量同时保持精度。
+        Stage1: 大步长遍历全半径 → Stage2: 围绕粗搜最优做小窗口精修。
+        返回: (best_pose, best_score)
+            best_pose: (x, y, yaw) in map frame"""
+        # 降采样
+        n_pts = min(len(points_odom), 800)
+        rng = np.random.default_rng()
+        if len(points_odom) > n_pts:
+            idx = rng.choice(len(points_odom), size=n_pts, replace=False)
+            pts_ds = points_odom[idx]
+        else:
+            pts_ds = points_odom
+
+        # Stage 1: 粗搜索 (大步长, 定位大致区域)
+        coarse_ps = max(pos_step * 2.0, 0.5)
+        coarse_as = max(angle_step * 2, 5)
+        best_sc = -1e9
+        best_pose = (cx_pred, cy_pred, yaw_pred)
+        for dx in np.arange(-radius, radius + 1e-5, coarse_ps):
+            for dy in np.arange(-radius, radius + 1e-5, coarse_ps):
+                for da in np.arange(-int(angle_range), int(angle_range) + 1, int(coarse_as)):
+                    ax, ay = cx_pred + dx, cy_pred + dy
+                    ayaw = yaw_pred + math.radians(da)
+                    sc, _, _ = self._score_points(pts_ds, ax, ay, ayaw)
+                    if sc > best_sc:
+                        best_sc = sc
+                        best_pose = (ax, ay, ayaw)
+
+        # Stage 2: 细搜索 (围绕粗搜最优, 小窗口精修)
+        fine_rad = pos_step * 1.5
+        cx_r, cy_r, yaw_r = best_pose
+        for dx in np.arange(-fine_rad, fine_rad + 1e-5, pos_step):
+            for dy in np.arange(-fine_rad, fine_rad + 1e-5, pos_step):
+                for da in np.arange(-int(angle_step * 2), int(angle_step * 2) + 1, int(angle_step)):
+                    ax, ay = cx_r + dx, cy_r + dy
+                    ayaw = yaw_r + math.radians(da)
+                    sc, _, _ = self._score_points(pts_ds, ax, ay, ayaw)
+                    if sc > best_sc:
+                        best_sc = sc
+                        best_pose = (ax, ay, ayaw)
+        return best_pose, best_sc
 
     def _find_free_space(self):
         if self.map_data is None:
@@ -1035,7 +1286,10 @@ class AutoInitialPoseCalibrator(Node):
             is_collecting = True
 
         # ── 被动模式: 循环缓冲区持续缓存所有扫描帧 ──
-        if self.indoor_phase in (IndoorPhase.PASSIVE_COLLECTING, IndoorPhase.PASSIVE_MATCHING):
+        # IDLE/DONE 状态下也缓存，确保开机自启时 passive_timer 有数据可用
+        if self.passive_mode_enabled and self.indoor_phase in (
+            IndoorPhase.PASSIVE_COLLECTING, IndoorPhase.PASSIVE_MATCHING,
+            IndoorPhase.IDLE, IndoorPhase.DONE):
             ts = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
             self.passive_scan_buffer.append((msg, ts))
             # 循环缓冲区: 超出上限时丢最旧的
@@ -1062,23 +1316,6 @@ class AutoInitialPoseCalibrator(Node):
         # 丢弃 NaN 数据
         if math.isnan(curr_pos.x) or math.isnan(curr_pos.y) or math.isnan(curr_yaw):
             return
-        
-        # 里程计数据验证：检测异常跳变（基于相对增量，与绝对值无关）
-        if self.last_odom_pose is not None:
-            last_x, last_y, last_yaw = self.last_odom_pose
-            dx = curr_pos.x - last_x
-            dy = curr_pos.y - last_y
-            dist = math.sqrt(dx*dx + dy*dy)
-            dyaw = abs(self._norm_angle(curr_yaw - last_yaw))
-            
-            # 如果单帧增量超过阈值，丢弃该帧数据
-            if dist > self.max_odom_delta:
-                self._logger.warn(f'[里程计验证] 检测到异常跳变: Δdist={dist:.2f}m，丢弃该帧')
-                return
-            # 里程计航向不可能单帧跳变超过90度
-            if dyaw > math.radians(90.0):
-                self._logger.warn(f'[里程计验证] 检测到航向跳变: {math.degrees(dyaw):.1f}°，丢弃该帧')
-                return
         
         self.last_odom_pose = (curr_pos.x, curr_pos.y, curr_yaw)
         self.current_odom = msg
@@ -1120,42 +1357,44 @@ class AutoInitialPoseCalibrator(Node):
         amcl_pos = msg.pose.pose.position
         amcl_yaw = self._quat_to_yaw(msg.pose.pose.orientation)
         self._record_amcl_pose(amcl_pos.x, amcl_pos.y, amcl_yaw)
-            # 1. 获取当前定位点 (x, y, yaw)
-            amcl_pos = msg.pose.pose.position
-            amcl_yaw = self._quat_to_yaw(msg.pose.pose.orientation)
+        self.latest_amcl_pose = (amcl_pos.x, amcl_pos.y, amcl_yaw)
 
-            # 2. 计算此时由 odom 递推出来的理论位姿
-            curr_pos = self.current_odom.pose.pose.position
-            curr_yaw = self._quat_to_yaw(self.current_odom.pose.pose.orientation)
-            
-            ref_x, ref_y, ref_yaw = self.gt_ref_odom
-            dx = curr_pos.x - ref_x
-            dy = curr_pos.y - ref_y
-            
-            rel_x = dx * math.cos(ref_yaw) + dy * math.sin(ref_yaw)
-            rel_y = -dx * math.sin(ref_yaw) + dy * math.cos(ref_yaw)
-            rel_yaw = self._norm_angle(curr_yaw - ref_yaw)
-            
-            gt_x, gt_y, gt_yaw = self.gt_pose
-            est_x = gt_x + rel_x * math.cos(gt_yaw) - rel_y * math.sin(gt_yaw)
-            est_y = gt_y + rel_x * math.sin(gt_yaw) + rel_y * math.cos(gt_yaw)
-            est_yaw = self._norm_angle(gt_yaw + rel_yaw)
+        # 偏差对齐监测需要 Ground Truth，未设置时跳过
+        if self.gt_ref_odom is None or self.gt_pose is None or self.current_odom is None:
+            return
 
-            # 3. 计算两者在 Map 坐标系下的绝对偏差
-            err_dist = math.sqrt((amcl_pos.x - est_x)**2 + (amcl_pos.y - est_y)**2)
-            err_yaw = abs(self._norm_angle(amcl_yaw - est_yaw))
+        # 2. 计算此时由 odom 递推出来的理论位姿
+        curr_pos = self.current_odom.pose.pose.position
+        curr_yaw = self._quat_to_yaw(self.current_odom.pose.pose.orientation)
 
-            # 4. 频率限幅输出，避免刷屏 (1Hz 打印一次)
-            if not hasattr(self, '_last_print_time'):
-                self._last_print_time = 0.0
-            now_sec = self.get_clock().now().nanoseconds / 1e9
-            if now_sec - self._last_print_time > 1.0:
-                self._logger.info(
-                    f'[偏差对齐监测] 里程计递推: ({est_x:.2f}, {est_y:.2f}, {math.degrees(est_yaw):.1f}°), '
-                    f'算法实际定位: ({amcl_pos.x:.2f}, {amcl_pos.y:.2f}, {math.degrees(amcl_yaw):.1f}°), '
-                    f'累计偏差: 距离={err_dist:.3f}m, 角度={math.degrees(err_yaw):.1f}°'
-                )
-                self._last_print_time = now_sec
+        ref_x, ref_y, ref_yaw = self.gt_ref_odom
+        dx = curr_pos.x - ref_x
+        dy = curr_pos.y - ref_y
+
+        rel_x = dx * math.cos(ref_yaw) + dy * math.sin(ref_yaw)
+        rel_y = -dx * math.sin(ref_yaw) + dy * math.cos(ref_yaw)
+        rel_yaw = self._norm_angle(curr_yaw - ref_yaw)
+
+        gt_x, gt_y, gt_yaw = self.gt_pose
+        est_x = gt_x + rel_x * math.cos(gt_yaw) - rel_y * math.sin(gt_yaw)
+        est_y = gt_y + rel_x * math.sin(gt_yaw) + rel_y * math.cos(gt_yaw)
+        est_yaw = self._norm_angle(gt_yaw + rel_yaw)
+
+        # 3. 计算两者在 Map 坐标系下的绝对偏差
+        err_dist = math.sqrt((amcl_pos.x - est_x)**2 + (amcl_pos.y - est_y)**2)
+        err_yaw = abs(self._norm_angle(amcl_yaw - est_yaw))
+
+        # 4. 频率限幅输出，避免刷屏 (1Hz 打印一次)
+        if not hasattr(self, '_last_print_time'):
+            self._last_print_time = 0.0
+        now_sec = self.get_clock().now().nanoseconds / 1e9
+        if now_sec - self._last_print_time > 1.0:
+            self._logger.info(
+                f'[偏差对齐监测] 里程计递推: ({est_x:.2f}, {est_y:.2f}, {math.degrees(est_yaw):.1f}°), '
+                f'算法实际定位: ({amcl_pos.x:.2f}, {amcl_pos.y:.2f}, {math.degrees(amcl_yaw):.1f}°), '
+                f'累计偏差: 距离={err_dist:.3f}m, 角度={math.degrees(err_yaw):.1f}°'
+            )
+            self._last_print_time = now_sec
 
     def _initialpose_cb(self, msg):
         """若节点处于空闲状态，将手动标记作为 Ground Truth 用于偏差校准与调试"""
@@ -1591,6 +1830,26 @@ class AutoInitialPoseCalibrator(Node):
                 if len(nms_candidates) >= self.top_n * 2:
                     break
 
+        # ── RayCast 重排序 (v2): 对 NMS 候选用光线投射重新评估 ──
+        if len(nms_candidates) >= 2:
+            rc_scored = []
+            for sc, ax, ay, ad in nms_candidates:
+                ayaw = math.radians(ad)
+                rc_sc_val, rc_valid, rc_total = self._score_pose_raycast(
+                    pts_ds, ax, ay, ayaw)
+                if rc_sc_val > -1e8 and rc_valid >= 5:
+                    rc_scored.append((sc, rc_sc_val, rc_valid/rc_total, ax, ay, ad))
+            if rc_scored:
+                best_rc = rc_scored[0]
+                if best_rc[2] > 0.30:  # 有效束>30% → 加权重排序
+                    rc_scored.sort(key=lambda x: x[0]*0.3 + x[1]*0.7, reverse=True)
+                    nms_candidates = [(s, ax, ay, ad) for s, _, _, ax, ay, ad
+                                      in rc_scored[:self.top_n]]
+                    self._logger.info(f'  [RayCast] Best valid={best_rc[2]:.1%}, rc_score={best_rc[1]:.3f}, '
+                                    f're-ranked top-{len(nms_candidates)}')
+                else:
+                    self._logger.info(f'  [RayCast] valid={best_rc[2]:.1%}<30%, keep likelihood order')
+
         # ── Phase 2: 精细局部搜索 (±2.5m, 0.3m步长, ±15°, 3°步长) ──
         self._logger.info(f'  精搜: 对 Top-{min(3, len(nms_candidates))} 候选做局部搜索...')
         fine_results = []
@@ -1641,31 +1900,52 @@ class AutoInitialPoseCalibrator(Node):
 
 
     def _handle_quick_mode_result(self, scan_pts):
-        """快速模式: 评估匹配质量后发布 (含不确定度信息)"""
+        """快速模式: 评估匹配质量后发布 (含不确定度信息 + 置信度门控)"""
         best_prob, best_x, best_y, best_yaw = self.candidates[0]
         second_prob = self.candidates[1][0] if len(self.candidates) > 1 else 0.0
 
-        # 计算实际墙壁覆盖率
+        # 计算实际墙壁覆盖率 + 真实似然场分数 (NOT best_prob, which is softmax-normalized)
         wall_cov, coverage, _ = self._compute_wall_coverage(scan_pts, best_x, best_y, best_yaw)
-        self._last_match_quality = {'wall_cov': wall_cov, 'coverage': coverage, 'score': best_prob}
+        real_lf, _, _ = self._score_points(scan_pts, best_x, best_y, best_yaw)
+        self._last_match_quality = {'wall_cov': wall_cov, 'coverage': coverage, 'score': real_lf}
+
+        # 估计不确定度: 从前N个候选的空间/角度分散度推算
+        top_n = min(5, len(self.candidates))
+        xs = np.array([c[1] for c in self.candidates[:top_n]])
+        ys = np.array([c[2] for c in self.candidates[:top_n]])
+        yaws = np.array([c[3] for c in self.candidates[:top_n]])
+        sigma_pos = float(np.std(xs) + np.std(ys)) / 2.0
+        sigma_pos = min(max(sigma_pos, 0.5), 3.0)  # clamp [0.5, 3.0]
+        sigma_yaw_deg = float(np.std([self._norm_angle(yw) for yw in yaws]))
+        sigma_yaw_deg = math.degrees(min(max(sigma_yaw_deg, math.radians(5)), math.radians(45)))
+        buf_frames = len(self.scan_buffer) if hasattr(self, 'scan_buffer') else 30
 
         is_unique = best_prob > 0.5 and (second_prob == 0.0 or best_prob / max(second_prob, 1e-9) >= 1.5)
 
         if is_unique and wall_cov > 0.50:
             self._logger.info(f'[快速模式] 匹配唯一且可靠 (wall={100*wall_cov:.0f}%), 发布')
-            self._publish_and_finish(best_x, best_y, best_yaw)
+            self._publish_and_finish(best_x, best_y, best_yaw,
+                                     sigma_pos=sigma_pos, sigma_yaw_deg=sigma_yaw_deg,
+                                     buf_frames=buf_frames,
+                                     best_prob=best_prob, second_prob=second_prob)
         else:
             self._logger.warn(
-                f'[快速模式] 匹配质量: unique={is_unique} wall={100*wall_cov:.0f}% cov={100*coverage:.0f}%')
-            self._logger.warn('[快速模式] 发布最佳结果供 AMCL 初步收敛，偏差监控将追踪后续对齐')
-            self._publish_and_finish(best_x, best_y, best_yaw)
+                f'[快速模式] 匹配质量: unique={is_unique} wall={100*wall_cov:.0f}% cov={100*coverage:.0f}% '
+                f'lf={real_lf:.3f}')
+            self._logger.warn('[快速模式] 尝试发布最佳结果 (将经置信度门控审核)')
+            self._publish_and_finish(best_x, best_y, best_yaw,
+                                     sigma_pos=sigma_pos, sigma_yaw_deg=sigma_yaw_deg,
+                                     buf_frames=buf_frames,
+                                     best_prob=best_prob, second_prob=second_prob)
 
     # ================================================================
     #  多步递推匹配 (主动+被动共用)
     #  逐帧ICP → 预测 → 局部搜索 → sigma衰减 → 收敛
     # ================================================================
     def _do_multistep_matching(self):
-        """逐帧递推匹配: 首帧全局搜索, 后续帧 ICP+局部搜索"""
+        """逐帧递推匹配 (v2 增强版):
+        首帧: FRF过滤 → 全局搜索 → 候选有效性过滤 → RayCast重排序 → WallHit回退 → 两级精修
+        后续帧: FRF过滤 → ICP帧间匹配 → 预测 → 两级局部搜索 → ICP失败保护 → sigma衰减"""
         if self.likelihood_field is None or self.map_data is None:
             self.indoor_phase = IndoorPhase.BOOT_DELAY
             return
@@ -1680,6 +1960,12 @@ class AutoInitialPoseCalibrator(Node):
         t0 = time.time()
         total_wall_hits = 0
         total_valid = 0
+        res = self.map_info.resolution
+        ox = self.map_info.origin.position.x
+        oy = self.map_info.origin.position.y
+        mw = self.map_info.width * res
+        mh = self.map_info.height * res
+        H, W = self.map_info.height, self.map_info.width
 
         # 初始化
         mu = None        # (x, y, yaw) 当前最佳估计 in map frame
@@ -1689,34 +1975,118 @@ class AutoInitialPoseCalibrator(Node):
         decay = 0.75
         step = max(1, n_frames // 20)  # 最多处理20帧, 跳帧加速
 
-        self._logger.info(f'[多步递推] 开始, {n_frames}帧, 步长={step}')
+        self._logger.info(f'[多步递推 v2] 开始, {n_frames}帧, 步长={step}, FRF+RayCast+WallHit')
 
         for i in range(0, n_frames, step):
-            # 单帧提取点云
-            frame_pts = self._scan_to_points(scans[i])
+            # FRF 过滤提取点云 (去除混合像素/遮挡伪影)
+            frame_pts = self._scan_to_points(scans[i], apply_frf_filter=True)
             if len(frame_pts) < 10:
                 continue
 
             if mu is None:
-                # ── 首帧: 全局搜索 ──
+                # ══════ 首帧: 增强全局搜索 ══════
                 ds0 = max(1, len(frame_pts) // 800)
                 pts_ds = frame_pts[::ds0]
-                res = self.map_info.resolution
-                ox = self.map_info.origin.position.x
-                oy = self.map_info.origin.position.y
-                mw = self.map_info.width * res; mh = self.map_info.height * res
                 xs = np.arange(ox + 2, ox + mw - 2, 2.0)
                 ys = np.arange(oy + 2, oy + mh - 2, 2.0)
 
-                best_sc = -1e9; best_pose = None
+                # 粗搜收集所有有效候选
+                candidates_raw = []
+                n_filtered = 0
                 for ax in xs:
                     for ay in ys:
                         for adeg in range(0, 360, 15):
-                            sc, _, _ = self._score_points(pts_ds, ax, ay, math.radians(adeg))
-                            if sc > best_sc: best_sc = sc; best_pose = (ax, ay, math.radians(adeg))
+                            ayaw = math.radians(adeg)
+                            sc, _, _ = self._score_points(pts_ds, ax, ay, ayaw)
+                            if sc < 0.3:
+                                continue
+                            # 候选有效性过滤: 未知区域<50%, 墙壁<60%
+                            c_y, s_y = math.cos(ayaw), math.sin(ayaw)
+                            fast_n = min(100, len(pts_ds))
+                            mx = c_y*pts_ds[:fast_n,0] - s_y*pts_ds[:fast_n,1] + ax
+                            my = s_y*pts_ds[:fast_n,0] + c_y*pts_ds[:fast_n,1] + ay
+                            ci = ((mx-ox)/res+0.5).astype(np.int32)
+                            ri = ((my-oy)/res+0.5).astype(np.int32)
+                            v = (ci>=0)&(ci<W)&(ri>=0)&(ri<H)
+                            if int(np.sum(v)) < 20:
+                                n_filtered += 1; continue
+                            cells = self.map_data[ri[v], ci[v]]
+                            n_unk = int(np.sum(cells==-1))
+                            n_wall = int(np.sum(cells==100))
+                            n_valid_c = len(cells)
+                            if n_unk/n_valid_c > 0.50 or n_wall/n_valid_c > 0.60:
+                                n_filtered += 1; continue
+                            candidates_raw.append((sc, ax, ay, adeg))
+                candidates_raw.sort(key=lambda x: x[0], reverse=True)
+                self._logger.info(f'  首帧粗搜: {len(candidates_raw)}有效, 过滤{n_filtered}无效')
+
+                if not candidates_raw:
+                    self._logger.error('[多步递推] 首帧全局搜索无有效候选')
+                    self.indoor_phase = IndoorPhase.ROUGH_MATCHING
+                    return
+
+                # NMS 去冗余
+                nms_candidates = []
+                for sc, ax, ay, ad in candidates_raw:
+                    dup = any(math.sqrt((ax-cx)**2+(ay-cy)**2)<1.5 and abs(ad-ca)<20
+                              for _, cx, cy, ca in nms_candidates)
+                    if not dup:
+                        nms_candidates.append((sc, ax, ay, ad))
+                        if len(nms_candidates) >= 16:
+                            break
+
+                # RayCast 重排序 (Top候选用光线投射重新评估)
+                raycast_picked = False
+                if len(nms_candidates) >= 2:
+                    rc_scored = []
+                    for sc, ax, ay, ad in nms_candidates:
+                        ayaw = math.radians(ad)
+                        rc_sc_val, rc_valid, rc_total = self._score_pose_raycast(pts_ds, ax, ay, ayaw)
+                        if rc_sc_val > -1e8 and rc_valid >= 5:
+                            rc_scored.append((sc, rc_sc_val, rc_valid/rc_total, ax, ay, ad))
+                    if rc_scored:
+                        best_rc = rc_scored[0]
+                        if best_rc[2] > 0.30:  # 有效束比例>30% → 启用RayCast
+                            rc_scored.sort(key=lambda x: x[0]*0.3 + x[1]*0.7, reverse=True)
+                            nms_candidates = [(s, ax, ay, ad) for s, _, _, ax, ay, ad in rc_scored[:8]]
+                            raycast_picked = True
+                            self._logger.info(f'  [RayCast] Best valid={best_rc[2]:.1%}, weighted re-rank')
+                        else:
+                            self._logger.info(f'  [RayCast] valid={best_rc[2]:.1%}<30%, fallback to likelihood')
+
+                # WallHit 回退: RayCast 验证率低时, 独立墙壁命中搜索
+                if not raycast_picked:
+                    self._logger.info(f'  [WallHit] fallback search...')
+                    wh_candidates = []
+                    for ax in np.arange(ox+3, ox+mw-3, 2.0):
+                        for ay in np.arange(oy+3, oy+mh-3, 2.0):
+                            for adeg in range(0, 360, 10):
+                                wh, _, _ = self._score_pose_wallhit(pts_ds, ax, ay, math.radians(adeg))
+                                if wh > 0:
+                                    wh_candidates.append((wh, ax, ay, adeg))
+                    if wh_candidates:
+                        wh_candidates.sort(key=lambda x: x[0], reverse=True)
+                        wh_nms = []
+                        for wh, ax, ay, ad in wh_candidates:
+                            dup = any(math.sqrt((ax-wx)**2+(ay-wy)**2)<2.0 for _, wx, wy, _ in wh_nms)
+                            if not dup:
+                                wh_nms.append((wh, ax, ay, ad))
+                                if len(wh_nms) >= 8:
+                                    break
+                        nms_candidates = wh_nms
+                        self._logger.info(f'  [WallHit] Best: ({wh_nms[0][1]:.1f},{wh_nms[0][2]:.1f}) wall%={100*wh_nms[0][0]/2:.0f}%')
+
+                # 两级局部搜索精修 Top-3 候选
+                best_sc = -1e9; best_pose = None
+                for sc, hx, hy, had in nms_candidates[:3]:
+                    pose, lf_sc = self._local_search_two_stage(
+                        pts_ds, hx, hy, math.radians(had),
+                        radius=2.0, pos_step=0.3, angle_range=12, angle_step=2)
+                    if lf_sc > best_sc:
+                        best_sc = lf_sc; best_pose = pose
 
                 if best_pose is None:
-                    self._logger.error('[多步递推] 首帧全局搜索失败')
+                    self._logger.error('[多步递推] 首帧两级精修失败')
                     self.indoor_phase = IndoorPhase.ROUGH_MATCHING
                     return
 
@@ -1725,13 +2095,16 @@ class AutoInitialPoseCalibrator(Node):
                 self._logger.info(f'  帧{i:02d}(首): 全局搜索 → ({mu[0]:.2f},{mu[1]:.2f},{math.degrees(mu[2]):.0f}deg) '
                                 f'wall={100*wall_cov:.0f}% σ={sigma:.1f}m')
             else:
-                # ── 后续帧: ICP + 局部搜索 ──
+                # ══════ 后续帧: ICP + 两级局部搜索 ══════
                 prev_pts = self._scan_to_points(scans[max(0, i - step)])
                 dx_i, dy_i, dyaw_i = 0.0, 0.0, 0.0
+                icp_used = False
                 if len(prev_pts) > 10 and len(frame_pts) > 10:
                     dx_i, dy_i, dyaw_i = self._icp_match(prev_pts, frame_pts)
                     if abs(dyaw_i) > math.radians(30):  # 旋转太大, 放弃ICP
                         dx_i = dy_i = dyaw_i = 0.0
+                    else:
+                        icp_used = True
 
                 # 预测 (ICP增量旋转到map系)
                 c_m, s_m = math.cos(mu[2]), math.sin(mu[2])
@@ -1739,30 +2112,41 @@ class AutoInitialPoseCalibrator(Node):
                 pred_y = mu[1] + s_m*dx_i + c_m*dy_i
                 pred_yaw = mu[2] + dyaw_i
 
-                # 局部搜索 (±sigma)
+                # 两级局部搜索
                 search_r = min(sigma * 1.5, 3.0)
                 angle_r = min(sigma_angle * 1.5, 20)
-                ds_i = max(1, len(frame_pts) // 600)
-                pts_local = frame_pts[::ds_i]
+                pose, lf_sc = self._local_search_two_stage(
+                    frame_pts, pred_x, pred_y, pred_yaw,
+                    radius=search_r, pos_step=0.2,
+                    angle_range=int(angle_r), angle_step=2)
 
-                best_sc = -1e9; best_local = (pred_x, pred_y, pred_yaw)
-                for dx in np.arange(-search_r, search_r + 1e-5, max(0.2, search_r/7)):
-                    for dy in np.arange(-search_r, search_r + 1e-5, max(0.2, search_r/7)):
-                        for da in np.arange(-angle_r, angle_r + 1, max(2.0, angle_r/5)):
-                            sc, _, _ = self._score_points(pts_local, pred_x+dx, pred_y+dy,
-                                                          pred_yaw + math.radians(da))
-                            if sc > best_sc:
-                                best_sc = sc; best_local = (pred_x+dx, pred_y+dy, pred_yaw+math.radians(da))
+                # ── ICP 失败保护: 墙壁覆盖率检查 ──
+                wall_cov, _, _ = self._compute_wall_coverage(frame_pts, pose[0], pose[1], pose[2])
+                icp_jump = math.sqrt(dx_i**2 + dy_i**2) if icp_used else 0
 
-                mu = best_local
+                if i > 3 and (wall_cov < 0.20 or (icp_jump > 2.0 and wall_cov < 0.35)):
+                    # 保持上一帧位置, 只更新角度
+                    pose = (mu[0], mu[1], pose[2])
+                    lf_sc = -1
+                    icp_tag = "[REJECT]"
+                    self._logger.warn(
+                        f'  帧{i:02d} {icp_tag}: wall={100*wall_cov:.0f}% jump={icp_jump:.1f}m, keeping prev')
+                else:
+                    icp_tag = "[ICP]" if icp_used else "[pred]"
+
+                mu = pose
                 sigma = max(sigma * decay, min_sigma)
                 sigma_angle = max(sigma_angle * decay, 2.0)
-                wall_cov, _, _ = self._compute_wall_coverage(frame_pts, mu[0], mu[1], mu[2])
                 total_wall_hits += int(wall_cov * 100)
 
-                if i % (step * 5) == 0 or i == n_frames - 1:
+                if i % (step * 5) == 0 or i >= n_frames - step:
+                    dx = mu[0] - pred_x; dy = mu[1] - pred_y
+                    corr = math.sqrt(dx**2 + dy**2)
+                    dya = math.degrees(abs(math.atan2(math.sin(mu[2]-pred_yaw),
+                                         math.cos(mu[2]-pred_yaw))))
                     self._logger.info(
-                        f'  帧{i:02d}: ({mu[0]:.2f},{mu[1]:.2f},{math.degrees(mu[2]):.0f}deg) '
+                        f'  帧{i:02d} {icp_tag}: pred=({pred_x:.2f},{pred_y:.2f}) corr={corr:.3f}m,{dya:.1f}deg '
+                        f'→ ({mu[0]:.2f},{mu[1]:.2f},{math.degrees(mu[2]):.0f}deg) '
                         f'wall={100*wall_cov:.0f}% σ={sigma:.2f}m')
 
             total_valid += 1
@@ -1771,7 +2155,7 @@ class AutoInitialPoseCalibrator(Node):
         avg_wall = total_wall_hits / max(total_valid, 1) / 100.0
 
         self._logger.info(
-            f'[多步递推] 完成 ({elapsed:.1f}s, {total_valid}帧): '
+            f'[多步递推 v2] 完成 ({elapsed:.1f}s, {total_valid}帧): '
             f'({mu[0]:.2f},{mu[1]:.2f},{math.degrees(mu[2]):.1f}deg) '
             f'avg_wall={100*avg_wall:.0f}% final_σ={sigma:.2f}m')
 
@@ -1780,7 +2164,9 @@ class AutoInitialPoseCalibrator(Node):
         self._last_match_quality = {'wall_cov': avg_wall, 'coverage': 0.5, 'score': 1.0}
 
         if self.quick_mode:
-            self._publish_and_finish(mu[0], mu[1], mu[2])
+            self._publish_and_finish(mu[0], mu[1], mu[2],
+                                     sigma_pos=sigma, sigma_yaw_deg=sigma_angle,
+                                     buf_frames=total_valid, best_prob=1.0, second_prob=0.0)
         else:
             self._publish_candidates()
             self.indoor_phase = IndoorPhase.SELECTING_ACTIVE_MOTION
@@ -1794,12 +2180,91 @@ class AutoInitialPoseCalibrator(Node):
         if self.indoor_phase in (IndoorPhase.MOVING, IndoorPhase.ROTATING_360):
             return
         if self.indoor_phase not in (IndoorPhase.PASSIVE_COLLECTING, IndoorPhase.PASSIVE_MATCHING,
-                                      IndoorPhase.IDLE, IndoorPhase.DONE):
+                                       IndoorPhase.IDLE, IndoorPhase.DONE):
             return
+
+        # ── 尝试里程计融合轻量验证 ──
+        ok, pred_pose, reason = self._try_odom_fusion_verify()
+        if ok and pred_pose is not None:
+            # 验证通过 → 置信度门控，跳过扫描匹配
+            px, py, pyaw = pred_pose
+
+            # 提取融合验证中已计算的 lf_score 和 wall_ratio
+            # reason 格式: "ok wall=0.45 lf=0.320" 或类似
+            fusion_wall = self.passive_fusion_wall_threshold
+            fusion_lf = self.passive_likelihood_threshold
+            try:
+                parts = reason.split()
+                for p in parts:
+                    if p.startswith('wall='):
+                        fusion_wall = float(p.split('=')[1])
+                    elif p.startswith('lf='):
+                        fusion_lf = float(p.split('=')[1])
+            except (ValueError, IndexError):
+                pass
+
+            pos_sigma = min(0.8 / max(fusion_wall, 0.1), 2.0)
+            yaw_sigma_deg = min(20.0 / max(fusion_wall, 0.1), 30.0)
+            buf_frames = len(self.passive_scan_buffer) if hasattr(self, 'passive_scan_buffer') else 10
+
+            # 置信度计算
+            confidence = self._compute_confidence(
+                wall_ratio=fusion_wall, lf_score=fusion_lf, coverage=0.5,
+                sigma_pos=pos_sigma, sigma_yaw_deg=yaw_sigma_deg,
+                buf_frames=buf_frames, best_prob=1.0, second_prob=0.0)
+
+            conf_pct = 100 * confidence
+            th_up = self.confidence_threshold_update
+            th_pub = self.confidence_threshold_publish
+
+            # 门控：低于发布阈值则拒绝
+            if confidence < th_pub:
+                self._logger.warn(
+                    f'[融合门控✗] 拒绝发布: conf={conf_pct:.0f}% < {100*th_pub:.0f}% '
+                    f'(wall={100*fusion_wall:.0f}% lf={fusion_lf:.3f} '
+                    f'σ=({pos_sigma:.2f}m,{yaw_sigma_deg:.1f}deg))')
+                self.indoor_phase = IndoorPhase.PASSIVE_COLLECTING
+                return
+
+            gate_level = '✓高' if confidence >= th_up else '○中'
+
+            cov = [0.0] * 36
+            cov[0] = pos_sigma ** 2; cov[7] = pos_sigma ** 2
+            cov[35] = math.radians(yaw_sigma_deg) ** 2
+
+            msg = PoseWithCovarianceStamped()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.header.frame_id = self.map_frame
+            msg.pose.pose.position = Point(x=px, y=py, z=0.0)
+            qz = math.sin(pyaw/2.0); qw = math.cos(pyaw/2.0)
+            msg.pose.pose.orientation = Quaternion(x=0.0, y=0.0, z=qz, w=qw)
+            msg.pose.covariance = cov
+
+            if self.auto_publish_initial_pose:
+                self.initialpose_pub.publish(msg)
+                # 仅高置信度更新原点 + 重置 odom 推算基准
+                if confidence >= th_up:
+                    self.last_calibrated_pose = (px, py, pyaw)
+                    curr_pos = self.current_odom.pose.pose.position
+                    curr_yaw = self._quat_to_yaw(self.current_odom.pose.pose.orientation)
+                    self.passive_last_odom = (curr_pos.x, curr_pos.y, curr_yaw)
+                    self.passive_odom_accum_dist = 0.0
+                self._logger.info(
+                    f'[被动融合{gate_level}] 发布推算位姿: ({px:.2f},{py:.2f},{math.degrees(pyaw):.1f}deg) '
+                    f'conf={conf_pct:.0f}% odom_delta={self.passive_odom_accum_dist:.2f}m [{reason}]')
+            else:
+                if hasattr(self, 'debug_auto_pose_pub'):
+                    self.debug_auto_pose_pub.publish(msg)
+                self._logger.info(f'[被动融合{gate_level}] debug模式 conf={conf_pct:.0f}% [{reason}]')
+            return
+
+        # 验证失败：记录原因，走完整扫描匹配
+        if 'fusion disabled' not in reason and 'first run' not in reason:
+            self._logger.info(f'[被动融合验证] ✗ {reason}，执行完整扫描匹配')
         self.indoor_phase = IndoorPhase.PASSIVE_MATCHING
 
     def _do_passive_matching(self):
-        """被动匹配: 取缓冲区最近N帧 → 多步递推 (逐帧ICP + 局部搜索)"""
+        """被动匹配 (v2 增强版): 取缓冲区最近N帧 → 多步递推 (FRF + ICP + 两级局部搜索 + ICP保护)"""
         if self.likelihood_field is None or not self.passive_scan_buffer:
             self.indoor_phase = IndoorPhase.PASSIVE_COLLECTING
             return
@@ -1814,19 +2279,22 @@ class AutoInitialPoseCalibrator(Node):
         # 多步递推: 逐帧处理
         mu = self.passive_best_pose  # 上次估计作为先验
         sigma = 2.0 if mu is not None else 5.0
+        sigma_angle = 10.0 if mu is not None else 20.0
         min_sigma = 0.3; decay = 0.8
         total_wall = 0; total_n = 0
+        res = self.map_info.resolution
+        ox = self.map_info.origin.position.x
+        oy = self.map_info.origin.position.y
+        mw = self.map_info.width * res; mh = self.map_info.height * res
 
         for i, scan in enumerate(scans):
-            pts = self._scan_to_points(scan)
+            # FRF 过滤提取点云
+            pts = self._scan_to_points(scan, apply_frf_filter=True)
             if len(pts) < 10: continue
 
             if mu is None:
                 # 首帧全局搜索
                 ds0 = max(1, len(pts)//800); pts_ds = pts[::ds0]
-                res = self.map_info.resolution
-                ox = self.map_info.origin.position.x; oy = self.map_info.origin.position.y
-                mw = self.map_info.width*res; mh = self.map_info.height*res
                 best_sc = -1e9; best_pose = None
                 for ax in np.arange(ox+2, ox+mw-2, 2.0):
                     for ay in np.arange(oy+2, oy+mh-2, 2.0):
@@ -1836,26 +2304,38 @@ class AutoInitialPoseCalibrator(Node):
                 if best_pose is None: continue
                 mu = best_pose; method = "全局"
             else:
-                # ICP + 局部搜索
+                # ICP + 两级局部搜索
                 prev_pts = self._scan_to_points(scans[max(0,i-1)])
                 dx_i = dy_i = dyaw_i = 0.0
+                icp_used = False
                 if len(prev_pts) > 10:
                     dx_i, dy_i, dyaw_i = self._icp_match(prev_pts, pts)
-                    if abs(dyaw_i) > math.radians(30): dx_i = dy_i = dyaw_i = 0.0
+                    if abs(dyaw_i) > math.radians(30):
+                        dx_i = dy_i = dyaw_i = 0.0
+                    else:
+                        icp_used = True
                 c_m, s_m = math.cos(mu[2]), math.sin(mu[2])
                 pred_x = mu[0] + c_m*dx_i - s_m*dy_i
                 pred_y = mu[1] + s_m*dx_i + c_m*dy_i
                 pred_yaw = mu[2] + dyaw_i
 
-                sr = min(sigma*1.5, 2.0); ar = min(sigma_angle:=10.0, 15)
-                ds_i = max(1, len(pts)//600); pts_l = pts[::ds_i]
-                best_sc = -1e9; best_l = (pred_x, pred_y, pred_yaw)
-                for dx in np.arange(-sr, sr+1e-5, 0.3):
-                    for dy in np.arange(-sr, sr+1e-5, 0.3):
-                        for da in range(int(-ar), int(ar)+1, 2):
-                            sc, _, _ = self._score_points(pts_l, pred_x+dx, pred_y+dy, pred_yaw+math.radians(da))
-                            if sc > best_sc: best_sc = sc; best_l = (pred_x+dx, pred_y+dy, pred_yaw+math.radians(da))
-                mu = best_l; sigma = max(sigma*decay, min_sigma); method = "局部"
+                sr = min(sigma*1.5, 2.0); ar = min(sigma_angle, 15)
+                pose, _ = self._local_search_two_stage(
+                    pts, pred_x, pred_y, pred_yaw,
+                    radius=sr, pos_step=0.2, angle_range=int(ar), angle_step=2)
+
+                # ICP 失败保护
+                wc, _, _ = self._compute_wall_coverage(pts, pose[0], pose[1], pose[2])
+                icp_jump = math.sqrt(dx_i**2 + dy_i**2) if icp_used else 0
+                if i > 3 and (wc < 0.20 or (icp_jump > 2.0 and wc < 0.35)):
+                    pose = (mu[0], mu[1], pose[2])
+                    method = "局部[REJECT]"
+                else:
+                    method = "局部"
+
+                mu = pose
+                sigma = max(sigma*decay, min_sigma)
+                sigma_angle = max(sigma_angle*decay, 2.0)
 
             wc, _, _ = self._compute_wall_coverage(pts, mu[0], mu[1], mu[2])
             total_wall += wc; total_n += 1
@@ -1866,19 +2346,262 @@ class AutoInitialPoseCalibrator(Node):
         ts = self.get_clock().now().nanoseconds / 1e9
         self.passive_pose_history.append((ts, mu[0], mu[1], mu[2], avg_wall))
 
-        if hasattr(self, 'debug_auto_pose_pub'):
+        # ── 质量记录: 仅记日志，不再因低覆盖率丢弃结果 ──
+        if avg_wall < 0.25:
+            self._logger.info(
+                f'[被动低覆盖] {elapsed:.1f}s wall={100*avg_wall:.0f}% '
+                f'({mu[0]:.2f},{mu[1]:.2f},{math.degrees(mu[2]):.1f}deg) '
+                f'buf={len(self.passive_scan_buffer)}帧 '
+                f'-- 继续发布')
+        # 低覆盖率时也发布 debug 位姿供可视化分析
+        if avg_wall < 0.25 and hasattr(self, 'debug_auto_pose_pub'):
             msg = PoseWithCovarianceStamped()
             msg.header.stamp = self.get_clock().now().to_msg()
             msg.header.frame_id = self.map_frame
             msg.pose.pose.position = Point(x=mu[0], y=mu[1], z=0.0)
-            qz = math.sin(mu[2]/2.0); qw = math.cos(mu[2]/2.0)
-            msg.pose.pose.orientation = Quaternion(x=0.0, y=0.0, z=qz, w=qw)
+            qz_d = math.sin(mu[2]/2.0); qw_d = math.cos(mu[2]/2.0)
+            msg.pose.pose.orientation = Quaternion(x=0.0, y=0.0, z=qz_d, w=qw_d)
             self.debug_auto_pose_pub.publish(msg)
 
+        # ── 偏差检查: 与上次定位结果对比, 偏差过大触发二次验证 ──
+        pose_to_publish = mu
+        publish_wall = avg_wall
+        recheck_done = False
+        if self.last_calibrated_pose is not None:
+            last_x, last_y, last_yaw = self.last_calibrated_pose
+            dev_dist = math.sqrt((mu[0] - last_x)**2 + (mu[1] - last_y)**2)
+            dev_yaw = abs(self._norm_angle(mu[2] - last_yaw))
+            if dev_dist > self.passive_deviation_threshold or \
+               math.degrees(dev_yaw) > self.passive_deviation_yaw_threshold:
+                self._logger.warn(
+                    f'[被动偏差] 与上次位姿偏差过大: Δd={dev_dist:.2f}m Δyaw={math.degrees(dev_yaw):.1f}°, '
+                    f'触发二次验证...')
+                mu2, wall2, elapsed2 = self._do_passive_reverify()
+                if mu2 is not None:
+                    dev2 = math.sqrt((mu[0] - mu2[0])**2 + (mu[1] - mu2[1])**2)
+                    dev2_yaw = abs(self._norm_angle(mu[2] - mu2[2]))
+                    # 比较主辅结果, 取墙壁覆盖率更高的那个（不再硬丢弃）
+                    if wall2 > avg_wall:
+                        pose_to_publish = mu2
+                        publish_wall = wall2
+                        recheck_done = True
+                        self._logger.info(
+                            f'[被动二次验证] 辅优于主: 主({mu[0]:.2f},{mu[1]:.2f},{math.degrees(mu[2]):.1f}° '
+                            f'wall={100*avg_wall:.0f}%) ↔ '
+                            f'辅({mu2[0]:.2f},{mu2[1]:.2f},{math.degrees(mu2[2]):.1f}° '
+                            f'wall={100*wall2:.0f}%) Δd={dev2:.2f}m Δyaw={math.degrees(dev2_yaw):.1f}°')
+                    else:
+                        self._logger.info(
+                            f'[被动二次验证] 主优于辅: 主({mu[0]:.2f},{mu[1]:.2f},{math.degrees(mu[2]):.1f}° '
+                            f'wall={100*avg_wall:.0f}%) ↔ '
+                            f'辅({mu2[0]:.2f},{mu2[1]:.2f},{math.degrees(mu2[2]):.1f}° '
+                            f'wall={100*wall2:.0f}%) Δd={dev2:.2f}m Δyaw={math.degrees(dev2_yaw):.1f}°')
+                else:
+                    self._logger.warn('[被动二次验证] 二次匹配失败, 保留主结果')
+                    # 不丢弃，继续使用主结果
+
+        # ── 置信度评估：用最后一帧评分获取 lf_score ──
+        # 估算位置/角度不确定度
+        pos_sigma = min(0.8 / max(publish_wall, 0.1), 2.0)
+        yaw_sigma_deg = min(20.0 / max(publish_wall, 0.1), 30.0)
+
+        last_scan_pts = self._scan_to_points(scans[-1], apply_frf_filter=True) if scans else None
+        est_lf = 0.5
+        if last_scan_pts is not None and len(last_scan_pts) > 10:
+            est_lf, _, _ = self._score_points(last_scan_pts, pose_to_publish[0],
+                                              pose_to_publish[1], pose_to_publish[2])
+
+        confidence = self._compute_confidence(
+            wall_ratio=publish_wall, lf_score=est_lf, coverage=0.5,
+            sigma_pos=pos_sigma, sigma_yaw_deg=yaw_sigma_deg,
+            buf_frames=total_n, best_prob=1.0, second_prob=0.0)
+
+        conf_pct = 100 * confidence
+        th_up = self.confidence_threshold_update
+        th_pub = self.confidence_threshold_publish
+
+        # ── 置信度门控 ──
+        if confidence < th_pub:
+            self._logger.warn(
+                f'[被动门控✗] 拒绝发布: conf={conf_pct:.0f}% < {100*th_pub:.0f}% '
+                f'(wall={100*publish_wall:.0f}% lf={est_lf:.2f} '
+                f'σ=({pos_sigma:.2f}m,{yaw_sigma_deg:.1f}deg) buf={total_n}帧)')
+            self.indoor_phase = IndoorPhase.PASSIVE_COLLECTING
+            return
+
+        gate_level = '✓高' if confidence >= th_up else '○中'
+
+        # ── 发布初始位姿 ──
+        cov = [0.0] * 36
+        cov[0] = pos_sigma ** 2; cov[7] = pos_sigma ** 2
+        cov[35] = math.radians(yaw_sigma_deg) ** 2
+
+        msg = PoseWithCovarianceStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = self.map_frame
+        msg.pose.pose.position = Point(x=pose_to_publish[0], y=pose_to_publish[1], z=0.0)
+        qz = math.sin(pose_to_publish[2]/2.0); qw = math.cos(pose_to_publish[2]/2.0)
+        msg.pose.pose.orientation = Quaternion(x=0.0, y=0.0, z=qz, w=qw)
+
+        if self.auto_publish_initial_pose:
+            msg.pose.covariance = cov
+            self.initialpose_pub.publish(msg)
+            # 仅高置信度更新原点 + 重置 odom 推算基准
+            if confidence >= th_up:
+                self.last_calibrated_pose = (pose_to_publish[0], pose_to_publish[1], pose_to_publish[2])
+                if self.current_odom is not None:
+                    curr_pos = self.current_odom.pose.pose.position
+                    curr_yaw = self._quat_to_yaw(self.current_odom.pose.pose.orientation)
+                    self.passive_last_odom = (curr_pos.x, curr_pos.y, curr_yaw)
+                    self.passive_odom_accum_dist = 0.0  # 重置累计位移
+            status = '发布→/initialpose ' + gate_level + ('[二次验证]' if recheck_done else '')
+        else:
+            if hasattr(self, 'debug_auto_pose_pub'):
+                self.debug_auto_pose_pub.publish(msg)
+            status = 'debug模式' + ('[二次验证]' if recheck_done else '')
+
         self._logger.info(
-            f'[被动{method}] {elapsed:.1f}s {total_n}帧: ({mu[0]:.2f},{mu[1]:.2f},{math.degrees(mu[2]):.1f}deg) '
-            f'wall={100*avg_wall:.0f}% σ={sigma:.2f}m buf={len(self.passive_scan_buffer)}帧')
+            f'[被动{method}] {elapsed:.1f}s {total_n}帧: '
+            f'({pose_to_publish[0]:.2f},{pose_to_publish[1]:.2f},{math.degrees(pose_to_publish[2]):.1f}deg) '
+            f'conf={conf_pct:.0f}% wall={100*publish_wall:.0f}% σ={pos_sigma:.2f}m yσ={yaw_sigma_deg:.1f}deg '
+            f'buf={len(self.passive_scan_buffer)}帧 [{status}]')
         self.indoor_phase = IndoorPhase.PASSIVE_COLLECTING
+
+    def _try_odom_fusion_verify(self):
+        """里程计融合轻量验证: 推算位姿 + 雷达双重验证 + AMCL 交叉验证。
+        返回 (success: bool, pose: (x,y,yaw) or None, reason: str)
+        """
+        # ── 前置检查 ──
+        if not self.passive_odom_fusion_enabled:
+            return False, None, 'fusion disabled'
+        if self.last_calibrated_pose is None:
+            return False, None, 'no last calibrated pose'
+        if self.passive_last_odom is None:
+            return False, None, 'no passive_last_odom (first run)'
+        if self.current_odom is None:
+            return False, None, 'no current odom'
+        if self.likelihood_field is None:
+            return False, None, 'no likelihood field'
+        if self.current_scan is None:
+            return False, None, 'no current scan'
+
+        # ── 1. 里程计推算 ──
+        last_x, last_y, last_yaw = self.passive_last_odom
+        curr_pos = self.current_odom.pose.pose.position
+        curr_yaw = self._quat_to_yaw(self.current_odom.pose.pose.orientation)
+        dx_o = curr_pos.x - last_x
+        dy_o = curr_pos.y - last_y
+        dyaw_o = self._norm_angle(curr_yaw - last_yaw)
+
+        # 更新累计位移
+        move_dist = math.sqrt(dx_o**2 + dy_o**2)
+        self.passive_odom_accum_dist += move_dist
+
+        # 累计位移超阈值 → 强制重匹配
+        if self.passive_odom_accum_dist > self.passive_odom_max_move:
+            return False, None, f'odom accum {self.passive_odom_accum_dist:.1f}m > {self.passive_odom_max_move:.1f}m'
+
+        # 推算 map 位姿
+        px, py, pyaw = self.last_calibrated_pose
+        c_y, s_y = math.cos(pyaw), math.sin(pyaw)
+        pred_x = px + dx_o * c_y - dy_o * s_y
+        pred_y = py + dx_o * s_y + dy_o * c_y
+        pred_yaw = self._norm_angle(pyaw + dyaw_o)
+        pred_pose = (pred_x, pred_y, pred_yaw)
+
+        # ── 2. 雷达双重验证 ──
+        # 将当前扫描转换为点云
+        pts = self._scan_to_points(self.current_scan, apply_frf_filter=True)
+        if len(pts) < 10:
+            return False, None, 'insufficient scan points'
+
+        # 2a. wall coverage 验证
+        wall_ratio, valid_ratio, _ = self._compute_wall_coverage(pts, pred_x, pred_y, pred_yaw)
+        if wall_ratio < self.passive_fusion_wall_threshold:
+            return False, None, f'wall {wall_ratio:.2f} < {self.passive_fusion_wall_threshold:.2f}'
+
+        # 2b. likelihood 验证
+        lf_score, hit_rate, n_valid = self._score_points(pts, pred_x, pred_y, pred_yaw)
+        if lf_score < self.passive_likelihood_threshold:
+            return False, None, f'likelihood {lf_score:.3f} < {self.passive_likelihood_threshold:.2f}'
+
+        # ── 3. AMCL 交叉验证（可选）──
+        if self.passive_amcl_cross_check and self.latest_amcl_pose is not None:
+            ax, ay, _ = self.latest_amcl_pose
+            dev = math.sqrt((pred_x - ax)**2 + (pred_y - ay)**2)
+            if dev > self.passive_amcl_max_deviation:
+                return False, None, f'AMCL deviation {dev:.2f}m > {self.passive_amcl_max_deviation:.1f}m'
+
+        return True, pred_pose, f'ok wall={wall_ratio:.2f} lf={lf_score:.3f}'
+
+    def _do_passive_reverify(self):
+        """二次验证: 使用更多帧 + 更精细搜索重新匹配, 返回 (pose, wall, elapsed) 或 (None, 0, 0)"""
+        if not self.passive_scan_buffer or len(self.passive_scan_buffer) < 10:
+            return None, 0.0, 0.0
+        t0 = time.time()
+        # 使用 2x 帧数, 最少 30 帧
+        extra_frames = max(self.passive_frame_count * 2, 30)
+        recent = self.passive_scan_buffer[-min(extra_frames, len(self.passive_scan_buffer)):]
+        scans = [item[0] for item in recent]
+        if len(scans) < 10:
+            return None, 0.0, 0.0
+
+        mu = self.passive_best_pose
+        sigma = 1.5; sigma_angle = 8.0; min_sigma = 0.2; decay = 0.7
+        total_wall = 0; total_n = 0
+        res = self.map_info.resolution
+        ox = self.map_info.origin.position.x
+        oy = self.map_info.origin.position.y
+        mw = self.map_info.width * res; mh = self.map_info.height * res
+
+        for i, scan in enumerate(scans):
+            pts = self._scan_to_points(scan, apply_frf_filter=True)
+            if len(pts) < 10: continue
+
+            if mu is None:
+                ds0 = max(1, len(pts)//800); pts_ds = pts[::ds0]
+                best_sc = -1e9; best_pose = None
+                # 二次验证用更细的搜索
+                for ax in np.arange(ox+1, ox+mw-1, 1.5):
+                    for ay in np.arange(oy+1, oy+mh-1, 1.5):
+                        for adeg in range(0, 360, 10):
+                            sc, _, _ = self._score_points(pts_ds, ax, ay, math.radians(adeg))
+                            if sc > best_sc: best_sc = sc; best_pose = (ax, ay, math.radians(adeg))
+                if best_pose is None: continue
+                mu = best_pose
+            else:
+                prev_pts = self._scan_to_points(scans[max(0,i-1)])
+                dx_i = dy_i = dyaw_i = 0.0
+                icp_used = False
+                if len(prev_pts) > 10:
+                    dx_i, dy_i, dyaw_i = self._icp_match(prev_pts, pts)
+                    if abs(dyaw_i) > math.radians(30):
+                        dx_i = dy_i = dyaw_i = 0.0
+                    else:
+                        icp_used = True
+                c_m, s_m = math.cos(mu[2]), math.sin(mu[2])
+                pred_x = mu[0] + c_m*dx_i - s_m*dy_i
+                pred_y = mu[1] + s_m*dx_i + c_m*dy_i
+                pred_yaw = mu[2] + dyaw_i
+
+                sr = min(sigma*1.5, 1.5); ar = min(sigma_angle, 10)
+                pose, _ = self._local_search_two_stage(
+                    pts, pred_x, pred_y, pred_yaw,
+                    radius=sr, pos_step=0.15, angle_range=int(ar), angle_step=1)
+                wc, _, _ = self._compute_wall_coverage(pts, pose[0], pose[1], pose[2])
+                icp_jump = math.sqrt(dx_i**2 + dy_i**2) if icp_used else 0
+                if i > 3 and (wc < 0.15 or (icp_jump > 2.0 and wc < 0.30)):
+                    pose = (mu[0], mu[1], pose[2])
+                mu = pose
+                sigma = max(sigma*decay, min_sigma)
+                sigma_angle = max(sigma_angle*decay, 1.5)
+
+            wc, _, _ = self._compute_wall_coverage(pts, mu[0], mu[1], mu[2])
+            total_wall += wc; total_n += 1
+
+        avg_wall = total_wall / max(total_n, 1)
+        elapsed = time.time() - t0
+        return mu, avg_wall, elapsed
 
     def _start_passive_mode(self):
         """启动被动模式"""
@@ -2361,11 +3084,43 @@ class AutoInitialPoseCalibrator(Node):
         return sc
 
 
-    def _publish_and_finish(self, x, y, yaw):
-        """发布初始位姿 (自适应协方差)"""
+    def _publish_and_finish(self, x, y, yaw, sigma_pos=2.0, sigma_yaw_deg=20.0,
+                            buf_frames=30, best_prob=0.0, second_prob=0.0):
+        """发布初始位姿 (自适应协方差 + 置信度门控)。
+
+        门控策略:
+          - confidence ≥ threshold_update → 全量发布 + 更新原点 + 偏差监控
+          - threshold_publish ≤ confidence < threshold_update → 仅发布，不更新原点
+          - confidence < threshold_publish → 拒绝发布，仅记日志
+        """
         quality = getattr(self, '_last_match_quality', {})
         wall_cov = quality.get('wall_cov', 0.5)
         coverage = quality.get('coverage', 0.5)
+        lf_score = quality.get('score', 0.5)
+
+        # ── 置信度计算 ──
+        confidence = self._compute_confidence(
+            wall_ratio=wall_cov, lf_score=lf_score, coverage=coverage,
+            sigma_pos=sigma_pos, sigma_yaw_deg=sigma_yaw_deg, buf_frames=buf_frames,
+            best_prob=best_prob, second_prob=second_prob)
+
+        # ── 置信度门控 ──
+        conf_pct = 100 * confidence
+        th_up = self.confidence_threshold_update
+        th_pub = self.confidence_threshold_publish
+
+        if confidence < th_pub:
+            self._logger.warn(
+                f'[置信度门控✗] 拒绝发布: conf={conf_pct:.0f}% < {100*th_pub:.0f}% '
+                f'(wall={100*wall_cov:.0f}% lf={lf_score:.2f} cov={100*coverage:.0f}% '
+                f'σ=({sigma_pos:.2f}m,{sigma_yaw_deg:.1f}deg) buf={buf_frames}帧)')
+            # 拒收后必须退出状态机, 防止死循环重复相同搜索
+            self._logger.warn('[置信度门控] 定位失败，停止主动校准并转入被动监听模式')
+            self.indoor_phase = IndoorPhase.DONE
+            self.cmd_vel_pub.publish(Twist())
+            return
+
+        # ── 自适应协方差 ──
         pos_sigma = min(0.8 / max(wall_cov, 0.1) * max(1.0 - coverage, 0.3), 2.0)
         yaw_sigma = min(20.0 / max(wall_cov, 0.1) * (1.0 - coverage + 0.2), 30.0)
 
@@ -2382,19 +3137,28 @@ class AutoInitialPoseCalibrator(Node):
 
         self._compare_with_manual_ground_truth(x, y, yaw)
 
+        gate_level = '✓高' if confidence >= th_up else '○中'
+
         if self.auto_publish_initial_pose:
             self.initialpose_pub.publish(msg)
             self._logger.info(
-                f'[主动定位] 发布: ({x:.3f},{y:.3f},{math.degrees(yaw):.1f}deg) '
-                f'sigma=({pos_sigma:.2f}m,{yaw_sigma:.1f}deg) '
+                f'[主动定位{gate_level}] 发布: ({x:.3f},{y:.3f},{math.degrees(yaw):.1f}deg) '
+                f'conf={conf_pct:.0f}% sigma=({pos_sigma:.2f}m,{yaw_sigma:.1f}deg) '
                 f'wall={100*wall_cov:.0f}% cov={100*coverage:.0f}%')
-            self._start_deviation_monitor(x, y, yaw)
+            if confidence >= th_up:
+                self._start_deviation_monitor(x, y, yaw)
         else:
             if hasattr(self, 'debug_auto_pose_pub'):
                 self.debug_auto_pose_pub.publish(msg)
-            self._logger.info(f'[调试] sigma=({pos_sigma:.2f}m,{yaw_sigma:.1f}deg)')
+            self._logger.info(f'[调试{gate_level}] conf={conf_pct:.0f}% sigma=({pos_sigma:.2f}m,{yaw_sigma:.1f}deg)')
 
-        self.last_calibrated_pose = (x, y, yaw)
+        # 只有高置信度才更新原点
+        if confidence >= th_up:
+            self.last_calibrated_pose = (x, y, yaw)
+        else:
+            self._logger.info(
+                f'[置信度门控] conf={conf_pct:.0f}% < {100*th_up:.0f}%, 仅发布位姿，不更新原点')
+
         self.indoor_phase = IndoorPhase.DONE
         self.cmd_vel_pub.publish(Twist())
 
