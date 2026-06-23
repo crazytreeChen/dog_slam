@@ -1,0 +1,69 @@
+lidar_3d_relocalizer_node:
+  ros__parameters:
+    # ─── PCD 地图 ───
+    pcd_map_path: "/home/ztl/slam_data/pcd/test.pcd"
+
+    # ─── 坐标系（必须与 AMCL / Nav2 一致）───
+    map_frame: "map"
+    odom_frame: "odom"
+    base_frame: "base_footprint"
+
+    # ─── 话题（根据 LIO 算法自适应，launch 中覆盖）───
+    cloud_topic: "/lio/body/cloud"      # Super-LIO: /lio/body/cloud; Fast-LIO: /cloud_registered_body
+    odom_topic: "/lio/odom"             # Super-LIO: /lio/odom; Fast-LIO: /Odometry
+    initialpose_topic: "/initialpose"   # 命名空间模式下自动加前缀
+    status_topic: "/relocalizer/status"
+
+    # ─── 多帧点云累积参数 ───
+    # 核心思路：累积云越稠密，KISS-Matcher 的 FPFH 特征越可靠
+    # 体素从 0.15 降到 0.08：理论上点数增约 6.6x（=0.15³/0.08³），
+    # 但受限于 MID360 窄视场角 + 静止机器人，实际约 3-5x
+    accum_frame_count: 120        # 增加到 120 帧，覆盖更多视场范围
+    accum_max_time_sec: 20.0      # 最长累积 20 秒（10Hz LIO=200 帧上限）
+    accum_voxel_size: 0.08        # 体素 8cm，平衡密度与速度（0.15→5k 点，0.08→预估 15-25k 点）
+
+    # ─── KISS-Matcher 全局匹配参数 ───
+    kiss_matcher_voxel_size: 0.25  # 体素过滤：大值=更少但更区分特征，提高收敛稳定性
+
+    # ─── GICP 精细配准参数 ───
+    gicp_voxel_size: 0.2           # 适度降采样
+    gicp_max_iterations: 100       # 更多迭代次数
+    gicp_trans_eps: 1e-5           # 放宽收敛条件（之前 1e-8 太严格，从不收敛）
+    gicp_rot_eps: 1e-5
+    gicp_fitness_threshold: 0.5   # fitness > 此值视为退化场景，拒绝发布
+
+    # ─── 行为控制 ───
+    relocalize_rate_hz: 0.5       # 重定位尝试频率（Hz）
+    publish_tf: false             # 不发布 map→odom TF（避免与 AMCL 冲突）
+    publish_initial_pose: true    # 发布 /initialpose 给 AMCL
+    max_retry: 3                  # 最大重试次数，超过后停止
+
+    # ─── PCD → 2D 地图坐标偏移 ───
+    # PCD 地图原点在 2D 地图坐标系中的位置
+    # 计算方法: 2D坐标 - PCD坐标 = 偏移量
+    # 实测: 同一特征点 2D(27.33, 11.42) - PCD(3.17, 1.53) = (24.16, 9.89)
+    map_offset_x: 24.16
+    map_offset_y: 9.89
+    map_offset_yaw_deg: 0.0
+
+    # PCD -> 2D map alignment.
+    # offset: use map_offset_x/map_offset_y/map_offset_yaw_deg.
+    # landmarks: estimate scale + yaw + translation from marked point pairs.
+    alignment_mode: "offset"
+    # Flattened point pairs: [pcd_x, pcd_y, map_x, map_y, ...]
+    # For production, mark at least 2 points; 3+ points are recommended.
+    alignment_points: [
+      3.17, 1.53, 27.33, 11.42
+    ]
+
+    # ─── 发布模式 ───
+    # "2d": 只发布 x, y, yaw（用于 AMCL 定位）
+    # "3d": 发布完整 6DOF（用于 3D 定位系统）
+    initial_pose_mode: "2d"
+
+    # ─── 搜索窗口 ───
+    # 裁剪 PCD 地图到以累积云质心为中心的局部区域（仅 XY 平面）
+    # 0 = 不裁剪（全局搜索），>0 = 裁剪半径（米）
+    # 注意：PCD 地图在 map 系，累积云质心在 odom 系，两个坐标系不同。
+    # XY 裁剪在 odom 漂移 < 此半径时近似有效；Z 轴不做过滤。
+    search_window_radius: 30.0

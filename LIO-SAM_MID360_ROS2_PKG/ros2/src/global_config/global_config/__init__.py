@@ -71,6 +71,10 @@ config_by_machine = {
 
         #SC-PGO
         'SC_PGO_SAVE_DIRECTORY': '/home/ztl/save_data/',
+        
+        # 3D LiDAR 重定位
+        'ENABLE_3D_RELOCALIZATION': True,
+        'PCD_MAP_DIRECTORY': '/home/ztl/slam_data/pcd/',
     },
     'RK3588ZG': {
         # RK3588主机配置 - 全局配置
@@ -354,6 +358,10 @@ default_config = {
     
     #SC-PGO
     'SC_PGO_SAVE_DIRECTORY': '/home/ztl/save_data/',
+    
+    # 3D LiDAR 重定位
+    'ENABLE_3D_RELOCALIZATION': False,
+    'PCD_MAP_DIRECTORY': '/home/ztl/slam_data/pcd/',
 }
 
 # 根据当前主机名选择配置
@@ -405,6 +413,10 @@ SUPER_LIO_LIDAR_TILT_ANGLE = selected_config['SUPER_LIO_LIDAR_TILT_ANGLE']
 
 # ========== 导出SC-PGO配置参数 ==========
 SC_PGO_SAVE_DIRECTORY = selected_config['SC_PGO_SAVE_DIRECTORY']
+
+# ========== 导出3D LiDAR重定位配置参数 ==========
+ENABLE_3D_RELOCALIZATION = selected_config.get('ENABLE_3D_RELOCALIZATION', False)
+PCD_MAP_DIRECTORY = selected_config.get('PCD_MAP_DIRECTORY', '/home/ztl/slam_data/pcd/')
 
 # ========== 坐标系名称配置 ==========
 MAP_FRAME = 'map'

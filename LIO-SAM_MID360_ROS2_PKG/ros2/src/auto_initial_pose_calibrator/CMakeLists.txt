@@ -31,6 +31,12 @@ install(
   DESTINATION lib/${PROJECT_NAME}
 )
 
+# Install calib_lib Python subpackage (源码目录, 运行时 lib/<pkg>/ 在 sys.path)
+install(
+  DIRECTORY src/calib_lib
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 # Install visualize_scan script
 install(
   PROGRAMS scripts/visualize_scan.py

@@ -1,0 +1,30 @@
+lidar_3d_relocalizer_node:
+  ros__parameters:
+    # PCD 地图路径（建图后手动指定）
+    pcd_map_path: "/home/ywj/slam_data/pcd/test.pcd"
+
+    # 多帧点云累积参数
+    accum_frame_count: 20
+    accum_max_time_sec: 2.0
+    accum_voxel_size: 0.05
+
+    # KISS-Matcher 全局匹配参数
+    kiss_matcher_enabled: true
+    kiss_matcher_voxel_size: 0.5
+    kiss_matcher_debug: false
+
+    # GICP 精细配准参数
+    gicp_voxel_size: 0.1
+    gicp_max_iterations: 50
+    gicp_trans_eps: 1e-8
+    gicp_rot_eps: 1e-8
+    gicp_fitness_threshold: 0.5
+
+    # 重定位触发参数
+    relocalize_rate_hz: 0.5
+    publish_tf: true
+    publish_initial_pose: true
+
+    # 🔑 仿真 Super-LIO 的话题名
+    cloud_topic: "/lio/body/cloud"
+    odom_topic: "/lio/odom"

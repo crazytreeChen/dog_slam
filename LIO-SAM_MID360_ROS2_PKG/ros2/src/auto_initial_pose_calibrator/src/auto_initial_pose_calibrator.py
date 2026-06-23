@@ -43,6 +43,24 @@ try:
 except ImportError:
     NAV2_DEFAULT_MAP_FILE = "/home/ztl/slam_data/grid_map/map.yaml"
 
+# ────── calib_lib 子包导入（模块化拆分后算法层） ──────
+from calib_lib.scan_utils import (
+    norm_angle, quat_to_yaw, scan_to_points, filter_scan_outliers,
+    frf_filter_frame, ScanFilterConfig,
+)
+from calib_lib.icp import icp_match, icp_align_scans
+from calib_lib.temporal import temporal_consistency_filter
+from calib_lib.scoring import (
+    MapContext, build_likelihood, find_free_space,
+    score_points, score_pose_wallhit, score_pose_raycast,
+    compute_wall_coverage, compute_confidence,
+    local_search_two_stage, score_scan,
+)
+from calib_lib.submap import SubmapBuilder
+from calib_lib.matching import ScanMatcher
+from calib_lib.control import MotionController
+from calib_lib.rtk import rtk_to_map_coords, build_pose_covariance
+
 
 class IndoorPhase(Enum):
     IDLE = 0
@@ -73,6 +91,7 @@ class AutoInitialPoseCalibrator(Node):
         self.declare_parameter('map_topic', 'map')
         self.declare_parameter('scan_topic', 'scan')
         self.declare_parameter('odom_topic', 'lio/odom')
+        self.declare_parameter('amcl_pose_topic', 'amcl_pose')
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('outdoor_mode', True)
         self.declare_parameter('indoor_mode', True)
@@ -163,8 +182,10 @@ class AutoInitialPoseCalibrator(Node):
         self.declare_parameter('passive_odom_max_move', 5.0)             # 里程计累计位移上限(m)
         self.declare_parameter('passive_likelihood_threshold', 0.25)      # 似然场评分阈值
         self.declare_parameter('passive_fusion_wall_threshold', 0.20)     # 融合验证墙壁覆盖率阈值
+        self.declare_parameter('passive_bootstrap_threshold', 3)          # 无历史位姿时连续失败 N 次后放宽门控
         self.declare_parameter('passive_amcl_cross_check', True)          # 启用 AMCL 交叉验证
         self.declare_parameter('passive_amcl_max_deviation', 1.0)         # AMCL 与推算位姿最大偏差(m)
+        self.declare_parameter('passive_publish_cooldown', 60.0)         # 发布 /initialpose 后冷却时间 (秒)
 
         # ────── 置信度门控参数 ──────
         self.declare_parameter('confidence_threshold_update', 0.65)       # 允许更新原点/校准位姿的置信度阈值
@@ -188,6 +209,7 @@ class AutoInitialPoseCalibrator(Node):
         self.map_topic = self.get_parameter('map_topic').value
         self.scan_topic = self.get_parameter('scan_topic').value
         self.odom_topic = self.get_parameter('odom_topic').value
+        self.amcl_pose_topic = self.get_parameter('amcl_pose_topic').value
         self.map_frame = self.get_parameter('map_frame').value
         # 自动适配命名空间下的 topic 和 frame (例如 rkbot/map, rkbot/odom)
         ns = self.get_namespace().strip('/')
@@ -200,6 +222,8 @@ class AutoInitialPoseCalibrator(Node):
                 self.scan_topic = f"/{ns}/{self.scan_topic}"
             if not self.odom_topic.startswith('/'):
                 self.odom_topic = f"/{ns}/{self.odom_topic}"
+            if not self.amcl_pose_topic.startswith('/'):
+                self.amcl_pose_topic = f"/{ns}/{self.amcl_pose_topic}"
         self.outdoor_mode = self.get_parameter('outdoor_mode').value
         self.indoor_mode = self.get_parameter('indoor_mode').value
         self.use_sim_time = self.get_parameter('use_sim_time').value
@@ -285,8 +309,10 @@ class AutoInitialPoseCalibrator(Node):
         self.passive_odom_max_move = self.get_parameter('passive_odom_max_move').value
         self.passive_likelihood_threshold = self.get_parameter('passive_likelihood_threshold').value
         self.passive_fusion_wall_threshold = self.get_parameter('passive_fusion_wall_threshold').value
+        self.passive_bootstrap_threshold = self.get_parameter('passive_bootstrap_threshold').value
         self.passive_amcl_cross_check = self.get_parameter('passive_amcl_cross_check').value
         self.passive_amcl_max_deviation = self.get_parameter('passive_amcl_max_deviation').value
+        self.passive_publish_cooldown = self.get_parameter('passive_publish_cooldown').value
 
         # ─── 置信度门控 ───
         self.confidence_threshold_update = self.get_parameter('confidence_threshold_update').value
@@ -359,10 +385,12 @@ class AutoInitialPoseCalibrator(Node):
         self.passive_last_match_time = None # 上次被动匹配时间
         self.passive_best_pose = None       # 被动模式累积最佳位姿 (x, y, yaw)
         self.passive_pose_history = []      # [(timestamp, x, y, yaw, wall_cov), ...]
+        self.passive_bootstrap_failures = 0 # 无历史位姿时连续失败计数, 累计满后放宽门控阈值
         # 里程计融合验证状态
         self.passive_last_odom = None       # 上次被动匹配时的里程计位姿 (ox, oy, oyaw)
         self.passive_odom_accum_dist = 0.0  # 里程计累计位移 (m)
         self.latest_amcl_pose = None        # 最新 AMCL 位姿 (x, y, yaw) from _amcl_cb
+        self._publish_cooldown_until = 0.0  # /initialpose 发布冷却截止时间戳 (秒)
 
         # ────── QoS 配置 ──────
         be_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -377,8 +405,8 @@ class AutoInitialPoseCalibrator(Node):
         self.gps_sub = self.create_subscription(NavSatFix, self.gps_topic, self._gps_cb, be_qos)
         self._setup_rtk_sub(be_qos)
 
-        # 校对 AMCL 话题
-        self.amcl_sub = self.create_subscription(PoseWithCovarianceStamped, 'amcl_pose', self._amcl_cb, 10)
+        # 订阅 AMCL 位姿用于交叉验证和调试对比
+        self.amcl_sub = self.create_subscription(PoseWithCovarianceStamped, self.amcl_pose_topic, self._amcl_cb, 10)
         # 监听 RViz 2D Pose Estimate 触发真值标记或常规设置
         self.initialpose_sub = self.create_subscription(PoseWithCovarianceStamped, '/initialpose', self._initialpose_cb, 10)
 
@@ -427,6 +455,17 @@ class AutoInitialPoseCalibrator(Node):
         self.map_check_timer = self.create_timer(1.5, self._check_map_and_fallback)
 
         self._logger.info('自动初始位姿校准器已就绪，正在自动检测并识别定位模式中...')
+
+        # ────── calib_lib 模块实例化 ──────
+        self._map_ctx = MapContext(likelihood_max_dist=self.likelihood_max_dist)
+        self._outlier_cfg = ScanFilterConfig(
+            enabled=self.scan_outlier_filter,
+            radius=self.scan_outlier_radius,
+            min_neighbors=self.scan_outlier_min_neighbors,
+        )
+        self.submap_builder = SubmapBuilder(self._logger, self._outlier_cfg)
+        self.matcher = ScanMatcher(self._logger)
+        self.controller = MotionController(self._logger)
 
     def _setup_file_logging(self):
         """设置日志文件持久化：创建独立的 Python logging FileHandler，
@@ -712,261 +751,39 @@ class AutoInitialPoseCalibrator(Node):
     #  ICP 扫描匹配相关方法
     # ================================================================
     def _scan_to_points(self, scan, apply_outlier_filter=False, apply_frf_filter=False):
-        """将 LaserScan 转换为 (N, 2) NumPy 点阵 (x, y in scan frame)
-        apply_outlier_filter: 是否应用半径离群点过滤去除动态障碍物/杂点
-        apply_frf_filter: 是否应用 FRF 角度bin间隙过滤去除混合像素/遮挡伪影"""
-        if scan is None:
-            return np.empty((0, 2))
-        ranges = np.array(scan.ranges, dtype=np.float64)
-        angles = scan.angle_min + np.arange(len(ranges)) * scan.angle_increment
-
-        # FRF 过滤 (优先于范围裁剪, 在原始 ranges 上操作)
-        if apply_frf_filter:
-            keep_mask = self._frf_filter_frame(ranges, scan.angle_min, scan.angle_increment)
-            ranges = np.where(keep_mask, ranges, 0.0)
-
-        valid = (ranges > scan.range_min) & (ranges < scan.range_max)
-        if not np.any(valid):
-            return np.empty((0, 2))
-        r_valid = ranges[valid]
-        a_valid = angles[valid]
-        points = np.column_stack((r_valid * np.cos(a_valid), r_valid * np.sin(a_valid)))
-
-        if apply_outlier_filter and self.scan_outlier_filter and len(points) > 10:
-            points = self._filter_scan_outliers(points)
-        return points
+        """delegated to calib_lib.scan_utils.scan_to_points"""
+        return scan_to_points(scan, self._outlier_cfg, self._logger,
+                              apply_outlier_filter, apply_frf_filter)
     
     def _filter_scan_outliers(self, points):
-        """半径离群点过滤：去除邻域内邻居不足的孤立点（动态障碍物、杂点）
-        输入: points (N,2) numpy array
-        输出: 过滤后的 (M,2) numpy array"""
-        if len(points) < self.scan_outlier_min_neighbors + 1:
-            return points  # 点数太少，不过滤
-        
-        # 使用 KD-Tree 加速邻域搜索
-        try:
-            from scipy.spatial import cKDTree
-            tree = cKDTree(points)
-            # 查询每个点在 radius 内的邻居数
-            counts = tree.query_ball_point(points, self.scan_outlier_radius, return_length=True)
-            mask = np.array(counts) >= self.scan_outlier_min_neighbors
-            n_removed = np.sum(~mask)
-            if n_removed > 0:
-                self._logger.debug(f'[离群点过滤] 移除 {n_removed}/{len(points)} 个离群点 (半径={self.scan_outlier_radius}m, 最少邻居={self.scan_outlier_min_neighbors})')
-            return points[mask]
-        except ImportError:
-            # scipy 不可用，回退到简单距离阈值过滤
-            self._logger.warn('[离群点过滤] scipy 未安装，使用简化过滤', throttle_duration_sec=10.0)
-            # 简化版：去除距离超过中位数3倍标准差的点
-            dists = np.sqrt(np.sum(points**2, axis=1))
-            median_dist = np.median(dists)
-            med_abs_dev = np.median(np.abs(dists - median_dist))
-            if med_abs_dev > 0:
-                mask = np.abs(dists - median_dist) < 3.0 * med_abs_dev * 1.4826
-                return points[mask]
-            return points
+        """delegated to calib_lib.scan_utils.filter_scan_outliers"""
+        return filter_scan_outliers(points, self._outlier_cfg, self._logger)
 
     def _frf_filter_frame(self, ranges, angle_min, angle_inc, bin_deg=2.0, gap_thresh=0.3):
-        """FRF (Fast Ray Filter): 逐角度bin过滤混合像素/遮挡伪影。
-        在每个2° bin内按距离排序, 剔除间隙>gap_thresh后的异常束。
-        返回: (N,) bool 数组, True=保留"""
-        bin_size = np.radians(bin_deg)
-        valid = (ranges > 0.15) & (ranges < 50.0)
-        if not np.any(valid):
-            return valid
-        angles = angle_min + np.arange(len(ranges)) * angle_inc
-        bins = np.round(angles / bin_size).astype(int)
-        keep = np.ones(len(ranges), dtype=bool)
-        for b in np.unique(bins[valid]):
-            idx = np.where((bins == b) & valid)[0]
-            if len(idx) < 2:
-                continue
-            sorted_idx = idx[np.argsort(ranges[idx])]
-            gaps = np.diff(ranges[sorted_idx]) > gap_thresh
-            if np.any(gaps):
-                keep[sorted_idx[int(np.argmax(gaps)) + 1:]] = False
-        return valid & keep
+        """delegated to calib_lib.scan_utils.frf_filter_frame"""
+        return frf_filter_frame(ranges, angle_min, angle_inc, bin_deg, gap_thresh)
 
     def _temporal_consistency_filter(self, all_points, frame_ids):
-        """
-        多帧时序一致性过滤：剔除只在少数帧出现的动态障碍物（人、动物等）
-
-        核心原理：
-          - 静态墙壁/障碍物 → 多个不同帧的激光都会打到同一位置
-          - 动态行人/动物 → 只在 1-2 帧出现在某位置，随后移走
-          → 对每个点，检查其邻域内的点来自多少个不同帧，
-            若少于 temporal_merge_min_frames 帧则剔除。
-
-        输入：
-          all_points: (N, 2) numpy array, 所有帧投影到参考帧系后的点坐标
-          frame_ids:  (N,)  numpy array, 每个点所属的源帧索引 (0 ~ n_frames-1)
-        输出：
-          mask: (N,) boolean numpy array, True=保留, False=剔除
-        """
-        n_points = len(all_points)
-        if n_points < self.temporal_merge_min_frames:
-            self._logger.warn('[时序过滤] 总点数过少，跳过过滤')
-            return np.ones(n_points, dtype=bool)
-
-        try:
-            from scipy.spatial import cKDTree
-            tree = cKDTree(all_points)
-            # 对每个点查询半径内的邻居索引
-            neighbors_list = tree.query_ball_point(
-                all_points, self.temporal_merge_radius
-            )
-
-            # 统计每个点的邻居来自多少不同帧
-            distinct_count = np.zeros(n_points, dtype=np.int32)
-            for i in range(n_points):
-                if len(neighbors_list[i]) == 0:
-                    distinct_count[i] = 1  # 自邻域
-                else:
-                    distinct_count[i] = len(np.unique(frame_ids[neighbors_list[i]]))
-
-            mask = distinct_count >= self.temporal_merge_min_frames
-            n_kept = np.sum(mask)
-            n_removed = n_points - n_kept
-
-            self._logger.info(
-                f'[时序过滤] 总点={n_points}, 保留={n_kept}({100*n_kept/max(1,n_points):.1f}%), '
-                f'剔除动态/噪声={n_removed}, '
-                f'(最少帧数={self.temporal_merge_min_frames}, 半径={self.temporal_merge_radius}m)'
-            )
-
-            # 按帧统计过滤效果
-            unique_frames = np.unique(frame_ids)
-            if len(unique_frames) <= 10:
-                for fid in unique_frames:
-                    fmask = frame_ids == fid
-                    f_kept = np.sum(mask[fmask])
-                    f_total = np.sum(fmask)
-                    self._logger.debug(
-                        f'    帧[{fid}]: 保留 {f_kept}/{f_total} '
-                        f'({100*f_kept/max(1,f_total):.0f}%)'
-                    )
-
-            return mask
-
-        except ImportError:
-            self._logger.warn(
-                '[时序过滤] scipy 未安装，回退到纯空间离群点过滤',
-                throttle_duration_sec=10.0
-            )
-            # 回退：简单的空间离群点过滤
-            if len(all_points) < 10:
-                return np.ones(n_points, dtype=bool)
-
-            # 对每个点找最近邻，若最近邻距离超过中位数的3倍则剔除
-            dists = []
-            for i in range(n_points):
-                dx = all_points[:, 0] - all_points[i, 0]
-                dy = all_points[:, 1] - all_points[i, 1]
-                d = np.sqrt(dx*dx + dy*dy)
-                d[i] = np.inf
-                dists.append(np.min(d))
-            dists = np.array(dists)
-            med = np.median(dists)
-            if med > 0:
-                mask = dists < 3.0 * med
-                return mask
-            return np.ones(n_points, dtype=bool)
+        """delegated to calib_lib.temporal.temporal_consistency_filter"""
+        return temporal_consistency_filter(
+            all_points, frame_ids,
+            self.temporal_merge_min_frames, self.temporal_merge_radius, self._logger)
 
     def _icp_match(self, points1, points2, max_iter=15, tol_trans=0.01, tol_rot_deg=0.1):
-        """
-        简化的点对点 ICP 匹配
-        输入：points1 (N,2) 参考帧点阵, points2 (M,2) 源帧点阵
-        输出：(dx, dy, dyaw) 从 points2 到 points1 的变换 (points2 @ R + t -> points1)
-        """
-        if len(points1) < 3 or len(points2) < 3:
-            return 0.0, 0.0, 0.0
-
-        # 降采样
-        step = max(1, len(points2) // 144)  # 降采样到约144点
-        p2 = points2[::step]
-        # 用角度有序特性做对应：直接按角度bin对应（两帧角度范围相同）
-        # 更鲁棒做法：对 points1 每个点找 points2 最近邻（小数据集直接用暴力）
-        p1 = points1
-
-        T = np.eye(3)
-        for i in range(max_iter):
-            # 将 p2 用当前 T 变换到 p1 系
-            p2_h = np.column_stack((p2, np.ones(len(p2))))
-            p2_transformed = (T @ p2_h.T).T[:, :2]
-
-            # 找对应点：对 p2_transformed 每个点，在 p1 中找最近邻
-            # 暴力搜索（点数量少，可接受）
-            dists = np.sum((p1[np.newaxis, :, :] - p2_transformed[:, np.newaxis, :]) ** 2, axis=2)
-            idx = np.argmin(dists, axis=1)
-            matched_p1 = p1[idx]
-
-            # SVD 求解变换：p2 -> matched_p1
-            centroid_p1 = np.mean(matched_p1, axis=0)
-            centroid_p2 = np.mean(p2, axis=0)
-
-            p1_centered = matched_p1 - centroid_p1
-            p2_centered = p2 - centroid_p2
-
-            H = p2_centered.T @ p1_centered
-            try:
-                U, S, Vt = np.linalg.svd(H)
-            except np.linalg.LinAlgError:
-                break
-            R = Vt.T @ U.T
-            # 处理反射矩阵
-            if np.linalg.det(R) < 0:
-                Vt[-1, :] *= -1
-                R = Vt.T @ U.T
-
-            t = centroid_p1 - R @ centroid_p2
-
-            T_new = np.eye(3)
-            T_new[:2, :2] = R
-            T_new[:2, 2] = t
-
-            delta = np.linalg.norm(T_new - T)
-            T = T_new
-            if delta < tol_trans:
-                break
-
-        dx = T[0, 2]
-        dy = T[1, 2]
-        dyaw = math.atan2(T[1, 0], T[0, 0])
-        return dx, dy, dyaw
+        """delegated to calib_lib.icp.icp_match"""
+        return icp_match(points1, points2, max_iter, tol_trans, tol_rot_deg)
 
     def _icp_align_scans(self, scan_list):
-        """
-        将多帧 LaserScan 对齐到第一帧参考系，返回累积变换列表
-        输入：scan_list = [scan_msg1, scan_msg2, ...]
-        输出：transforms = [(0,0,0), (dx1,dy1,dyaw1), (dx2,dy2,dyaw2), ...]
-              每个变换将第 i 帧的点投影到第 0 帧参考系
-        """
-        if not scan_list:
-            return []
-        transforms = [(0.0, 0.0, 0.0)]  # 第一帧为单位变换
-        prev_points = self._scan_to_points(scan_list[0])
-        cum_T = np.eye(3)  # 累积变换：从当前帧到参考帧
+        """delegated to calib_lib.icp.icp_align_scans"""
+        return icp_align_scans(scan_list, self._outlier_cfg, self._logger)
 
-        for i in range(1, len(scan_list)):
-            curr_points = self._scan_to_points(scan_list[i])
-            if len(prev_points) < 3 or len(curr_points) < 3:
-                transforms.append(transforms[-1])  # 跳过，使用单位变换
-                prev_points = curr_points
-                continue
+    def _icp_match(self, points1, points2, max_iter=15, tol_trans=0.01, tol_rot_deg=0.1):
+        """delegated to calib_lib.icp.icp_match"""
+        return icp_match(points1, points2, max_iter, tol_trans, tol_rot_deg)
 
-            dx, dy, dyaw = self._icp_match(prev_points, curr_points)
-            # 从 prev 到 curr 的变换
-            R = np.array([[math.cos(dyaw), -math.sin(dyaw)],
-                          [math.sin(dyaw), math.cos(dyaw)]])
-            T_step = np.eye(3)
-            T_step[:2, :2] = R
-            T_step[:2, 2] = [dx, dy]
-
-            cum_T = cum_T @ np.linalg.inv(T_step)  # 累积：curr -> prev -> ... -> ref
-            transforms.append((cum_T[0, 2], cum_T[1, 2], math.atan2(cum_T[1, 0], cum_T[0, 0])))
-            prev_points = curr_points
-
-        return transforms
+    def _icp_align_scans(self, scan_list):
+        """delegated to calib_lib.icp.icp_align_scans"""
+        return icp_align_scans(scan_list, self._outlier_cfg, self._logger)
 
     # ================================================================
     #  回调与基本数据读取
@@ -981,283 +798,46 @@ class AutoInitialPoseCalibrator(Node):
         self._logger.info(f'载入新网格地图: {msg.info.width}x{msg.info.height} @ {msg.info.resolution}m')
 
     def _build_likelihood(self):
-        if self.map_data is None:
-            return
-        try:
-            import cv2
-            obs = (self.map_data == 100).astype(np.uint8)
-            max_px = self.likelihood_max_dist / self.map_info.resolution
-            dist = cv2.distanceTransform(1 - obs, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
-            self.likelihood_field = np.clip(dist, 0, max_px).astype(np.float32) * self.map_info.resolution
-            # ── 未知区域惩罚: 阻止优化器把扫描藏进灰色区域 ──
-            self.likelihood_field[self.map_data == -1] = self.likelihood_max_dist
-        except Exception as e:
-            self._logger.error(f'似然场构建失败: {e}')
-
+        """delegated to calib_lib.scoring.build_likelihood (同步更新 _map_ctx)"""
+        self._map_ctx.map_data = self.map_data
+        self._map_ctx.map_info = self.map_info
+        build_likelihood(self._map_ctx, self._logger)
+        # 同步回写 likelihood_field（保持原 self.likelihood_field 可用性）
+        self.likelihood_field = self._map_ctx.likelihood_field
 
     def _score_points(self, points_odom, cx, cy, yaw):
-        """向量化点云评分: O(N) with numpy, 替代逐束循环的 _score_scan.
-        
-        返回: (score, hit_rate, n_valid)
-        """
-        if self.likelihood_field is None or self.map_info is None:
-            return -1e9, 0, 0
-        res = self.map_info.resolution
-        ox = self.map_info.origin.position.x
-        oy = self.map_info.origin.position.y
-        H, W = self.map_info.height, self.map_info.width
-
-        c_y, s_y = math.cos(yaw), math.sin(yaw)
-        # 变换到地图坐标系
-        if points_odom.ndim == 2:
-            mx = c_y * points_odom[:, 0] - s_y * points_odom[:, 1] + cx
-            my = s_y * points_odom[:, 0] + c_y * points_odom[:, 1] + cy
-        else:
-            mx = np.array([c_y * points_odom[0] - s_y * points_odom[1] + cx])
-            my = np.array([s_y * points_odom[0] + c_y * points_odom[1] + cy])
-
-        ci = ((mx - ox) / res + 0.5).astype(np.int32)
-        ri = ((my - oy) / res + 0.5).astype(np.int32)
-        # ROS栅格: ri 越大 → y 越小, 需要翻转
-        # ROS栅格: row 0 = y=0 (底部), 直接除res即可
-        ri = ((my - oy) / res + 0.5).astype(np.int32)
-        # ROS栅格: ri 越大 → y 越大, 无需翻转 (与离线NPZ一致)
-
-        valid = (ci >= 0) & (ci < W) & (ri >= 0) & (ri < H)
-        nv = int(np.sum(valid))
-        if nv < max(len(points_odom) * 0.10, 5):
-            return -1e9, 0, nv
-
-        dists = self.likelihood_field[ri[valid], ci[valid]]
-        # Gaussian kernel 评分
-        lf_score = float(np.mean(np.exp(-dists**2 / 0.045)))
-        n_hit = int(np.sum(dists < 0.15))
-        hit_rate = n_hit / nv
-        return lf_score + hit_rate * 0.5, hit_rate, nv
+        """delegated to calib_lib.scoring.score_points"""
+        return score_points(points_odom, cx, cy, yaw, self._map_ctx)
 
     def _score_pose_wallhit(self, points_odom, cx, cy, yaw):
-        """墙壁命中评分: 只统计真正落在墙壁像素(100)上的点。
-        比似然场更严格 — 不给"靠近墙壁"的点分数, 只在确实命中时计分。
-        用于障碍物遮挡场景下区分相似走廊。
-        要求: map_data 已加载 (self.map_data 不为 None)
-        返回: (score, n_wall, n_valid) 或 (-1e9,0,0) 表示无效"""
-        if self.map_data is None or self.map_info is None:
-            return -1e9, 0, 0
-        res = self.map_info.resolution
-        ox = self.map_info.origin.position.x
-        oy = self.map_info.origin.position.y
-        H, W = self.map_info.height, self.map_info.width
-
-        c_y, s_y = math.cos(yaw), math.sin(yaw)
-        mx = c_y * points_odom[:, 0] - s_y * points_odom[:, 1] + cx
-        my = s_y * points_odom[:, 0] + c_y * points_odom[:, 1] + cy
-        ci = ((mx - ox) / res + 0.5).astype(np.int32)
-        ri = ((my - oy) / res + 0.5).astype(np.int32)
-        v = (ci >= 0) & (ci < W) & (ri >= 0) & (ri < H)
-        nv = int(np.sum(v))
-        if nv < max(len(points_odom) * 0.1, 3):
-            return -1e9, 0, 0
-        cells = self.map_data[ri[v], ci[v]]
-        valid_c = (cells != -1)
-        n_v = int(np.sum(valid_c))
-        if n_v < 5:
-            return -1e9, 0, 0
-        n_wall = int(np.sum(cells[valid_c] == 100))
-        n_free = int(np.sum(cells[valid_c] == 0))
-        # 扫描不能大部分落在空地上
-        if n_free / max(n_v, 1) > 0.60:
-            return -1e9, 0, 0
-        hit_rate = n_wall / max(n_wall + n_free, 1)
-        coverage = n_v / len(points_odom)
-        return hit_rate * coverage * 2.0, n_wall, n_v
+        """delegated to calib_lib.scoring.score_pose_wallhit"""
+        return score_pose_wallhit(points_odom, cx, cy, yaw, self._map_ctx)
 
     def _score_pose_raycast(self, points_odom, cx, cy, yaw, range_tol=1.0, max_beams=200):
-        """光线投射评分: 只对"实测距离 ≈ 地图预期距离"的束评分。
-        自动过滤被障碍物/家具遮挡的异常束。
-        原理: 对每个扫描点沿射线方向步进, 检查是否在预期距离处碰到墙壁。
-        返回: (score, n_valid_beams, n_evaluated)"""
-        if self.map_data is None or self.map_info is None:
-            return -1e9, 0, 0
-        res = self.map_info.resolution
-        ox = self.map_info.origin.position.x
-        oy = self.map_info.origin.position.y
-        H, W = self.map_info.height, self.map_info.width
-
-        n_pts = len(points_odom)
-        beam_step = max(1, n_pts // max_beams)
-        n_valid = 0
-        total_score = 0.0
-
-        c_y, s_y = math.cos(yaw), math.sin(yaw)
-        for i in range(0, n_pts, beam_step):
-            px, py = points_odom[i, 0], points_odom[i, 1]
-            dist_measured = math.sqrt(px * px + py * py)
-            if dist_measured < 0.1:
-                continue
-
-            # 扫描点在 map 中的位置
-            mx = c_y * px - s_y * py + cx
-            my = s_y * px + c_y * py + cy
-            ray_angle = math.atan2(my - cy, mx - cx)
-
-            # 沿射线方向步进 (半像素步进)
-            dx_r = math.cos(ray_angle) * res * 0.5
-            dy_r = math.sin(ray_angle) * res * 0.5
-            rx, ry = cx, cy
-            hit_wall = False
-            dist_expected = 50.0
-
-            for _ in range(int(50.0 / (res * 0.5))):
-                col = int((rx - ox) / res)
-                row = int((ry - oy) / res)
-                if col < 0 or col >= W or row < 0 or row >= H:
-                    break
-                cell = self.map_data[row, col]
-                if cell == 100:
-                    dist_expected = math.sqrt((rx - cx) ** 2 + (ry - cy) ** 2)
-                    hit_wall = True
-                    break
-                elif cell == -1:
-                    dist_expected = -1
-                    break
-                rx += dx_r
-                ry += dy_r
-
-            if hit_wall and abs(dist_measured - dist_expected) < range_tol:
-                n_valid += 1
-                total_score += 1.0
-
-        if n_valid < 5:
-            return -1e9, 0, n_pts // max(1, beam_step)
-
-        n_evaluated = n_pts // max(1, beam_step)
-        return total_score / max(n_evaluated, 1), n_valid, n_evaluated
+        """delegated to calib_lib.scoring.score_pose_raycast"""
+        return score_pose_raycast(points_odom, cx, cy, yaw, self._map_ctx, range_tol, max_beams)
 
     def _compute_wall_coverage(self, points_odom, cx, cy, yaw):
-        """计算有效区域内的墙壁覆盖率 (排除灰色区域)"""
-        if self.map_data is None:
-            return 0.0, 0.0, 0.0
-        res = self.map_info.resolution
-        ox = self.map_info.origin.position.x
-        oy = self.map_info.origin.position.y
-        H, W = self.map_info.height, self.map_info.width
+        """delegated to calib_lib.scoring.compute_wall_coverage"""
+        return compute_wall_coverage(points_odom, cx, cy, yaw, self._map_ctx)
 
-        c_y, s_y = math.cos(yaw), math.sin(yaw)
-        mx = c_y * points_odom[:, 0] - s_y * points_odom[:, 1] + cx
-        my = s_y * points_odom[:, 0] + c_y * points_odom[:, 1] + cy
-        ci = ((mx - ox) / res + 0.5).astype(np.int32)
-        ri = ((my - oy) / res + 0.5).astype(np.int32)
-        valid = (ci >= 0) & (ci < W) & (ri >= 0) & (ri < H)
-        cells = self.map_data[ri[valid], ci[valid]]
-        valid_cell = (cells != -1)
-        n_valid = int(np.sum(valid_cell))
-        n_total = len(points_odom)
-        if n_valid < 5:
-            return 0.0, float(n_valid) / n_total, 0.0
-        w = int(np.sum(cells[valid_cell] == 100))
-        f = int(np.sum(cells[valid_cell] == 0))
-        return float(w) / (w + f), float(n_valid) / n_total, float(f) / (w + f)
-
-    # ────── 综合置信度计算 ──────
     def _compute_confidence(self, wall_ratio, lf_score, coverage,
                             sigma_pos, sigma_yaw_deg, buf_frames,
                             best_prob=0.0, second_prob=0.0):
-        """综合置信度计算 (0.0 ~ 1.0)。
-
-        加权方案:
-          - wall_ratio:  30% — 墙壁命中率，最重要的约束强度指标
-          - lf_score:    25% — 似然场匹配质量
-          - coverage:    15% — 有效区域覆盖率
-          - sigma_penalty: 20% — 不确定性惩罚 (位置+角度，越小越高)
-          - buffer_bonus: 10% — 数据量奖励
-
-        额外惩罚:
-          - 多峰惩罚: 主/次候选概率比 < 2.0 → ×0.8
-          - 过拟合检测: lf_score > 2.5 且 coverage < 0.5 → ×0.7 (罕见高分布空洞模式)
-        """
-        import numpy as np
-
-        # 1. wall_ratio 归一化 (0% → 0.0,  60% → 1.0, clipping)
-        w = np.clip(wall_ratio / 0.60, 0.0, 1.0)
-
-        # 2. lf_score 归一化 (0.0 → 0.0,  1.5 → 1.0)
-        l = np.clip(lf_score / 1.5, 0.0, 1.0)
-
-        # 3. coverage 归一化 (30% → 0.0,  90% → 1.0)
-        c = np.clip((coverage - 0.30) / 0.60, 0.0, 1.0)
-
-        # 4. sigma 惩罚 (位置: 0.3m → 1.0,  3.0m → 0.0)
-        s = max(1.0 - max(sigma_pos - 0.3, 0.0) / 2.7, 0.0)
-        #    角度: 5° → 1.0,  45° → 0.0
-        sy = max(1.0 - max(sigma_yaw_deg - 5.0, 0.0) / 40.0, 0.0)
-        sigma_score = 0.6 * s + 0.4 * sy
-
-        # 5. buffer 奖励 (10帧 → 0.0,  60帧 → 1.0)
-        b = np.clip((buf_frames - 10) / 50.0, 0.0, 1.0)
-
-        # 加权综合
-        confidence = 0.30 * w + 0.25 * l + 0.15 * c + 0.20 * sigma_score + 0.10 * b
-
-        # 多峰惩罚: 主/次候选概率比 < 2.0 → 存在歧义
-        if best_prob > 0 and second_prob > 0 and (best_prob / max(second_prob, 1e-9)) < 2.0:
-            confidence *= 0.8
-
-        # 过拟合检测: 似然高但覆盖率低 → 可能匹配到了局部特征
-        if lf_score > 2.5 and coverage < 0.5:
-            confidence *= 0.7
-
-        return float(np.clip(confidence, 0.0, 1.0))
+        """delegated to calib_lib.scoring.compute_confidence"""
+        return compute_confidence(wall_ratio, lf_score, coverage,
+                                  sigma_pos, sigma_yaw_deg, buf_frames,
+                                  best_prob, second_prob)
 
     def _local_search_two_stage(self, points_odom, cx_pred, cy_pred, yaw_pred,
                                  radius=3.0, pos_step=0.2, angle_range=15, angle_step=2):
-        """两级粗→细局部搜索: 大幅减少计算量同时保持精度。
-        Stage1: 大步长遍历全半径 → Stage2: 围绕粗搜最优做小窗口精修。
-        返回: (best_pose, best_score)
-            best_pose: (x, y, yaw) in map frame"""
-        # 降采样
-        n_pts = min(len(points_odom), 800)
-        rng = np.random.default_rng()
-        if len(points_odom) > n_pts:
-            idx = rng.choice(len(points_odom), size=n_pts, replace=False)
-            pts_ds = points_odom[idx]
-        else:
-            pts_ds = points_odom
-
-        # Stage 1: 粗搜索 (大步长, 定位大致区域)
-        coarse_ps = max(pos_step * 2.0, 0.5)
-        coarse_as = max(angle_step * 2, 5)
-        best_sc = -1e9
-        best_pose = (cx_pred, cy_pred, yaw_pred)
-        for dx in np.arange(-radius, radius + 1e-5, coarse_ps):
-            for dy in np.arange(-radius, radius + 1e-5, coarse_ps):
-                for da in np.arange(-int(angle_range), int(angle_range) + 1, int(coarse_as)):
-                    ax, ay = cx_pred + dx, cy_pred + dy
-                    ayaw = yaw_pred + math.radians(da)
-                    sc, _, _ = self._score_points(pts_ds, ax, ay, ayaw)
-                    if sc > best_sc:
-                        best_sc = sc
-                        best_pose = (ax, ay, ayaw)
-
-        # Stage 2: 细搜索 (围绕粗搜最优, 小窗口精修)
-        fine_rad = pos_step * 1.5
-        cx_r, cy_r, yaw_r = best_pose
-        for dx in np.arange(-fine_rad, fine_rad + 1e-5, pos_step):
-            for dy in np.arange(-fine_rad, fine_rad + 1e-5, pos_step):
-                for da in np.arange(-int(angle_step * 2), int(angle_step * 2) + 1, int(angle_step)):
-                    ax, ay = cx_r + dx, cy_r + dy
-                    ayaw = yaw_r + math.radians(da)
-                    sc, _, _ = self._score_points(pts_ds, ax, ay, ayaw)
-                    if sc > best_sc:
-                        best_sc = sc
-                        best_pose = (ax, ay, ayaw)
-        return best_pose, best_sc
+        """delegated to calib_lib.scoring.local_search_two_stage"""
+        return local_search_two_stage(points_odom, cx_pred, cy_pred, yaw_pred, self._map_ctx,
+                                      radius, pos_step, angle_range, angle_step)
 
     def _find_free_space(self):
-        if self.map_data is None:
-            return
-        free = (self.map_data == 0)
-        rows, cols = np.where(free)
-        self.free_space_indices = np.stack([rows, cols], axis=1)
+        """delegated to calib_lib.scoring.find_free_space"""
+        self.free_space_indices = find_free_space(self._map_ctx)
 
     def _scan_cb(self, msg):
         self.current_scan = msg
@@ -1536,152 +1116,15 @@ class AutoInitialPoseCalibrator(Node):
         self.cmd_vel_pub.publish(cmd)
     
     def _build_submap(self):
-        """利用缓存的 scan_buffer，使用 ICP 帧间匹配合成为高精度激光帧"""
-        if not self.scan_buffer:
-            return None
-        
-        # 提取扫描消息列表
-        scans = [item[0] for item in self.scan_buffer]
-        num_beams = len(scans[0].ranges)
-        
-        if self.use_icp_for_submap:
-            # 使用 ICP 计算帧间变换
-            self._logger.info(f'[子图构建] 使用 ICP 帧间匹配拼接 {len(scans)} 帧...')
-            # 计算每帧到第0帧的变换
-            transforms = [(0.0, 0.0, 0.0)]  # 第0帧单位变换
-            for i in range(1, len(scans)):
-                pts_prev = self._scan_to_points(scans[i-1], apply_outlier_filter=True)
-                pts_curr = self._scan_to_points(scans[i], apply_outlier_filter=True)
-                if len(pts_prev) < 3 or len(pts_curr) < 3:
-                    transforms.append(transforms[-1])  # 跳过
-                    continue
-                dx, dy, dyaw = self._icp_match(pts_prev, pts_curr)
-                # 累积变换：从帧 i 到帧 0
-                prev_dx, prev_dy, prev_dyaw = transforms[-1]
-                cum_dx = prev_dx + dx * math.cos(prev_dyaw) - dy * math.sin(prev_dyaw)
-                cum_dy = prev_dy + dx * math.sin(prev_dyaw) + dy * math.cos(prev_dyaw)
-                cum_dyaw = self._norm_angle(prev_dyaw + dyaw)
-                transforms.append((cum_dx, cum_dy, cum_dyaw))
-            
-            self._logger.info(f'[子图构建] ICP 变换计算完成: {transforms}')
-        else:
-            # 保留原有 odom 方式（作为备用）
-            transforms = []
-            for scan, sx, sy, syaw in self.scan_buffer:
-                if transforms:
-                    prev_rx, prev_ry, prev_ryaw = self.scan_buffer[len(transforms)][1:]
-                    dx = sx - prev_rx
-                    dy = sy - prev_ry
-                    rel_x = dx * math.cos(prev_ryaw) + dy * math.sin(prev_ryaw)
-                    rel_y = -dx * math.sin(prev_ryaw) + dy * math.cos(prev_ryaw)
-                    rel_yaw = self._norm_angle(syaw - prev_ryaw)
-                    # 累积到第一帧
-                    prev_cum_dx, prev_cum_dy, prev_cum_dyaw = transforms[-1]
-                    cum_dx = prev_cum_dx + rel_x * math.cos(prev_cum_dyaw) - rel_y * math.sin(prev_cum_dyaw)
-                    cum_dy = prev_cum_dy + rel_x * math.sin(prev_cum_dyaw) + rel_y * math.cos(prev_cum_dyaw)
-                    cum_dyaw = self._norm_angle(prev_cum_dyaw + rel_yaw)
-                    transforms.append((cum_dx, cum_dy, cum_dyaw))
-                else:
-                    transforms.append((0.0, 0.0, 0.0))
-        
-        # ────── 多帧时序一致性合并（带动态物体过滤）──────
-        if self.temporal_merge_enabled and len(scans) >= self.temporal_merge_min_frames:
-            self._logger.info(
-                f'[子图构建] 启用多帧时序一致性过滤 '
-                f'(最少帧数={self.temporal_merge_min_frames}, 半径={self.temporal_merge_radius}m)...'
-            )
-            # 步骤1: 收集所有帧的有效点，带帧ID标签
-            all_projected = []   # [(px, py), ...]
-            all_frame_ids = []   # [frame_idx, ...]
-
-            for i, (scan, _) in enumerate(self.scan_buffer):
-                rel_x, rel_y, rel_yaw = transforms[i]
-                for j in range(num_beams):
-                    r = scan.ranges[j]
-                    if not (scans[0].range_min < r < scans[0].range_max):
-                        continue
-                    beam_angle = scans[0].angle_min + j * scans[0].angle_increment
-                    lx = r * math.cos(beam_angle)
-                    ly = r * math.sin(beam_angle)
-                    # 投影到参考帧系
-                    px = rel_x + lx * math.cos(rel_yaw) - ly * math.sin(rel_yaw)
-                    py = rel_y + lx * math.sin(rel_yaw) + ly * math.cos(rel_yaw)
-                    all_projected.append((px, py))
-                    all_frame_ids.append(i)
-
-            if len(all_projected) < 10:
-                self._logger.warn('[子图构建] 投影后有效点过少，回退到传统合并')
-            else:
-                proj_pts = np.array(all_projected)
-                frame_ids = np.array(all_frame_ids)
-
-                # 步骤2: 时序一致性过滤（剔除只在少数帧出现的动态点）
-                keep_mask = self._temporal_consistency_filter(proj_pts, frame_ids)
-                static_pts = proj_pts[keep_mask]
-
-                self._logger.info(
-                    f'[子图构建] 时序过滤后保留 {len(static_pts)}/{len(proj_pts)} 个静态点 '
-                    f'({100*len(static_pts)/max(1,len(proj_pts)):.1f}%)'
-                )
-
-                # 步骤3: 将过滤后的静态点转换为 LaserScan (极坐标 bin + 取最近)
-                merged_ranges = np.full(num_beams, scans[0].range_max, dtype=np.float32)
-                for (px, py) in static_pts:
-                    r_proj = math.sqrt(px*px + py*py)
-                    theta_proj = math.atan2(py, px)
-                    bin_idx = int(round((theta_proj - scans[0].angle_min) / scans[0].angle_increment))
-                    if 0 <= bin_idx < num_beams:
-                        if r_proj < merged_ranges[bin_idx]:
-                            merged_ranges[bin_idx] = r_proj
-
-                # 统计各角度bin填充情况
-                filled_bins = np.sum(merged_ranges < scans[0].range_max)
-                self._logger.info(
-                    f'[子图构建] 合成 Scan: {filled_bins}/{num_beams} 个角度 bin 被填充 '
-                    f'({100*filled_bins/num_beams:.1f}%)'
-                )
-        else:
-            # ────── 传统合并（无时序过滤）──────
-            merged_ranges = np.full(num_beams, scans[0].range_max, dtype=np.float32)
-
-            for i, (scan, _) in enumerate(self.scan_buffer):
-                rel_x, rel_y, rel_yaw = transforms[i]
-                for j in range(num_beams):
-                    r = scan.ranges[j]
-                    if not (scans[0].range_min < r < scans[0].range_max):
-                        continue
-                    beam_angle = scans[0].angle_min + j * scans[0].angle_increment
-                    lx = r * math.cos(beam_angle)
-                    ly = r * math.sin(beam_angle)
-                    px = rel_x + lx * math.cos(rel_yaw) - ly * math.sin(rel_yaw)
-                    py = rel_y + lx * math.sin(rel_yaw) + ly * math.cos(rel_yaw)
-                    r_proj = math.sqrt(px*px + py*py)
-                    theta_proj = math.atan2(py, px)
-                    bin_idx = int(round((theta_proj - scans[0].angle_min) / scans[0].angle_increment))
-                    if 0 <= bin_idx < num_beams:
-                        if r_proj < merged_ranges[bin_idx]:
-                            merged_ranges[bin_idx] = r_proj
-
-        # 封装成合成 LaserScan
-        composite_scan = LaserScan()
-        composite_scan.header.stamp = scans[0].header.stamp
-        composite_scan.header.frame_id = scans[0].header.frame_id
-        composite_scan.angle_min = scans[0].angle_min
-        composite_scan.angle_max = scans[0].angle_max
-        composite_scan.angle_increment = scans[0].angle_increment
-        composite_scan.range_min = scans[0].range_min
-        composite_scan.range_max = scans[0].range_max
-        composite_scan.ranges = merged_ranges.tolist()
-        
-        self._logger.info(
-            f'[子图构建] {len(self.scan_buffer)} 帧合并完成 '
-            f'(ICP: {self.use_icp_for_submap}, 时序过滤: {self.temporal_merge_enabled})'
+        """delegated to calib_lib.submap.SubmapBuilder.build"""
+        return self.submap_builder.build(
+            self.scan_buffer,
+            self.use_icp_for_submap,
+            self.temporal_merge_enabled,
+            self.temporal_merge_min_frames,
+            self.temporal_merge_radius,
+            self.submap_scan_pub,
         )
-        
-        # 发布可视化
-        self.submap_scan_pub.publish(composite_scan)
-        
-        return composite_scan
 
     # ================================================================
     #  室内校准核心状态机定时循环
@@ -1909,15 +1352,39 @@ class AutoInitialPoseCalibrator(Node):
         real_lf, _, _ = self._score_points(scan_pts, best_x, best_y, best_yaw)
         self._last_match_quality = {'wall_cov': wall_cov, 'coverage': coverage, 'score': real_lf}
 
-        # 估计不确定度: 从前N个候选的空间/角度分散度推算
-        top_n = min(5, len(self.candidates))
-        xs = np.array([c[1] for c in self.candidates[:top_n]])
-        ys = np.array([c[2] for c in self.candidates[:top_n]])
-        yaws = np.array([c[3] for c in self.candidates[:top_n]])
+        # 估计不确定度: 空间聚类过滤后推算 (排除远距离双峰候选干扰)
+        # 问题: 全局搜索常产生两个地理位置完全不同的候选群
+        #   → 直接 std() 会将远距离群混入, sigma 被拉至 2.88m/34.7° 上限
+        #   → 经置信度公式后 sigma_score≈0, 加权总 conf 从 70% 降至 44%
+        # 修复: 仅在与最佳候选 3m 以内的邻近候选上计算 std
+        SIGMA_CLUSTER_RADIUS = 3.0  # 邻近候选最大距离 (m)
+        top_n = min(10, len(self.candidates))
+        best_x, best_y = self.candidates[0][1], self.candidates[0][2]
+        nearby_candidates = []
+        for c in self.candidates[:top_n]:
+            dx = c[1] - best_x
+            dy = c[2] - best_y
+            if dx * dx + dy * dy <= SIGMA_CLUSTER_RADIUS * SIGMA_CLUSTER_RADIUS:
+                nearby_candidates.append(c)
+        if len(nearby_candidates) >= 3:
+            xs = np.array([c[1] for c in nearby_candidates])
+            ys = np.array([c[2] for c in nearby_candidates])
+            yaws = np.array([c[3] for c in nearby_candidates])
+            self._logger.info(
+                f'[sigma聚类] {len(nearby_candidates)}/{top_n}候选在{SIGMA_CLUSTER_RADIUS}m内, '
+                f'排除 {top_n - len(nearby_candidates)} 个远距离候选')
+        else:
+            # 候选过于分散 (聚类太小), 退回全量但额外放大惩罚
+            xs = np.array([c[1] for c in self.candidates[:top_n]])
+            ys = np.array([c[2] for c in self.candidates[:top_n]])
+            yaws = np.array([c[3] for c in self.candidates[:top_n]])
+            self._logger.warn(
+                f'[sigma聚类] 候选分散: 仅{len(nearby_candidates)}/{top_n}候选在'
+                f'{SIGMA_CLUSTER_RADIUS}m内, 退回全量计算')
         sigma_pos = float(np.std(xs) + np.std(ys)) / 2.0
         sigma_pos = min(max(sigma_pos, 0.5), 3.0)  # clamp [0.5, 3.0]
-        sigma_yaw_deg = float(np.std([self._norm_angle(yw) for yw in yaws]))
-        sigma_yaw_deg = math.degrees(min(max(sigma_yaw_deg, math.radians(5)), math.radians(45)))
+        sigma_yaw_rad = float(np.std([self._norm_angle(yw) for yw in yaws]))
+        sigma_yaw_deg = math.degrees(min(max(sigma_yaw_rad, math.radians(5)), math.radians(45)))
         buf_frames = len(self.scan_buffer) if hasattr(self, 'scan_buffer') else 30
 
         is_unique = best_prob > 0.5 and (second_prob == 0.0 or best_prob / max(second_prob, 1e-9) >= 1.5)
@@ -2223,6 +1690,9 @@ class AutoInitialPoseCalibrator(Node):
                     f'[融合门控✗] 拒绝发布: conf={conf_pct:.0f}% < {100*th_pub:.0f}% '
                     f'(wall={100*fusion_wall:.0f}% lf={fusion_lf:.3f} '
                     f'σ=({pos_sigma:.2f}m,{yaw_sigma_deg:.1f}deg))')
+                # 调试模式：即使拒绝也输出对比日志
+                if self.debug_comparison_mode:
+                    self._debug_compare_all_references(px, py, pyaw, source='被动融合(拒绝)')
                 self.indoor_phase = IndoorPhase.PASSIVE_COLLECTING
                 return
 
@@ -2242,6 +1712,8 @@ class AutoInitialPoseCalibrator(Node):
 
             if self.auto_publish_initial_pose:
                 self.initialpose_pub.publish(msg)
+                # 设置冷却期: 给 AMCL 时间收敛, 避免立即再次触发完整扫描匹配
+                self._publish_cooldown_until = self.get_clock().now().nanoseconds * 1e-9 + self.passive_publish_cooldown
                 # 仅高置信度更新原点 + 重置 odom 推算基准
                 if confidence >= th_up:
                     self.last_calibrated_pose = (px, py, pyaw)
@@ -2255,7 +1727,9 @@ class AutoInitialPoseCalibrator(Node):
             else:
                 if hasattr(self, 'debug_auto_pose_pub'):
                     self.debug_auto_pose_pub.publish(msg)
-                self._logger.info(f'[被动融合{gate_level}] debug模式 conf={conf_pct:.0f}% [{reason}]')
+                self._logger.info(f'[被动融合{gate_level}] conf={conf_pct:.0f}% [{reason}]')
+                if self.debug_comparison_mode:
+                    self._debug_compare_all_references(px, py, pyaw, source='被动融合')
             return
 
         # 验证失败：记录原因，走完整扫描匹配
@@ -2366,7 +1840,7 @@ class AutoInitialPoseCalibrator(Node):
         # ── 偏差检查: 与上次定位结果对比, 偏差过大触发二次验证 ──
         pose_to_publish = mu
         publish_wall = avg_wall
-        recheck_done = False
+        recheck_passed = False  # 二次验证是否完成（两候选一致，局部匹配可靠）
         if self.last_calibrated_pose is not None:
             last_x, last_y, last_yaw = self.last_calibrated_pose
             dev_dist = math.sqrt((mu[0] - last_x)**2 + (mu[1] - last_y)**2)
@@ -2380,11 +1854,11 @@ class AutoInitialPoseCalibrator(Node):
                 if mu2 is not None:
                     dev2 = math.sqrt((mu[0] - mu2[0])**2 + (mu[1] - mu2[1])**2)
                     dev2_yaw = abs(self._norm_angle(mu[2] - mu2[2]))
+                    recheck_passed = True  # 二次验证完成: 两个独立扫描匹配到同一区域
                     # 比较主辅结果, 取墙壁覆盖率更高的那个（不再硬丢弃）
                     if wall2 > avg_wall:
                         pose_to_publish = mu2
                         publish_wall = wall2
-                        recheck_done = True
                         self._logger.info(
                             f'[被动二次验证] 辅优于主: 主({mu[0]:.2f},{mu[1]:.2f},{math.degrees(mu[2]):.1f}° '
                             f'wall={100*avg_wall:.0f}%) ↔ '
@@ -2420,12 +1894,39 @@ class AutoInitialPoseCalibrator(Node):
         th_up = self.confidence_threshold_update
         th_pub = self.confidence_threshold_publish
 
+        # 二次验证确认: 两个独立扫描匹配到同一区域 → 降低发布门槛
+        if recheck_passed:
+            th_pub = min(th_pub, self.confidence_threshold_amcl)
+            self._logger.info(
+                f'[被动二次验证] 两候选一致 → 发布阈值放宽至 {100*th_pub:.0f}%')
+
+        # 无历史位姿引导 (bootstrap): 连续多次被动匹配失败后, 阈值逐步放宽
+        # 适用于从未成功发布过位姿的死锁场景 (如开放区域 wall 长期偏低)
+        if self.last_calibrated_pose is None and confidence >= self.confidence_threshold_amcl:
+            self.passive_bootstrap_failures += 1
+            if self.passive_bootstrap_failures >= self.passive_bootstrap_threshold:
+                th_pub = min(th_pub, self.confidence_threshold_amcl)
+                self._logger.info(
+                    f'[被动引导] 连续 {self.passive_bootstrap_failures} 次无历史位姿匹配, '
+                    f'阈值放宽至 {100*th_pub:.0f}% 以打破死锁')
+            else:
+                self._logger.info(
+                    f'[被动引导] 第 {self.passive_bootstrap_failures}/'
+                    f'{self.passive_bootstrap_threshold} 次等待 (conf={conf_pct:.0f}%)')
+        elif self.last_calibrated_pose is not None:
+            self.passive_bootstrap_failures = 0
+
         # ── 置信度门控 ──
         if confidence < th_pub:
             self._logger.warn(
                 f'[被动门控✗] 拒绝发布: conf={conf_pct:.0f}% < {100*th_pub:.0f}% '
                 f'(wall={100*publish_wall:.0f}% lf={est_lf:.2f} '
                 f'σ=({pos_sigma:.2f}m,{yaw_sigma_deg:.1f}deg) buf={total_n}帧)')
+            # 调试模式：即使拒绝也输出对比日志
+            if self.debug_comparison_mode:
+                self._debug_compare_all_references(
+                    pose_to_publish[0], pose_to_publish[1], pose_to_publish[2],
+                    source=f'被动{method}(拒绝)')
             self.indoor_phase = IndoorPhase.PASSIVE_COLLECTING
             return
 
@@ -2446,25 +1947,39 @@ class AutoInitialPoseCalibrator(Node):
         if self.auto_publish_initial_pose:
             msg.pose.covariance = cov
             self.initialpose_pub.publish(msg)
-            # 仅高置信度更新原点 + 重置 odom 推算基准
-            if confidence >= th_up:
+            # 设置冷却期: 给 AMCL 时间收敛, 避免立即再次触发完整扫描匹配
+            self._publish_cooldown_until = self.get_clock().now().nanoseconds * 1e-9 + self.passive_publish_cooldown
+            self.passive_bootstrap_failures = 0  # 成功发布后重置引导计数器
+            # 高置信度或 bootstrap 模式: 设置校准位姿与 odom 基准
+            # bootstrap 模式下即使 conf 低于 th_up 也必须设置, 否则引导永远无法打破死锁
+            set_reference = (confidence >= th_up) or (
+                self.last_calibrated_pose is None and confidence >= th_pub)
+            if set_reference:
                 self.last_calibrated_pose = (pose_to_publish[0], pose_to_publish[1], pose_to_publish[2])
                 if self.current_odom is not None:
                     curr_pos = self.current_odom.pose.pose.position
                     curr_yaw = self._quat_to_yaw(self.current_odom.pose.pose.orientation)
                     self.passive_last_odom = (curr_pos.x, curr_pos.y, curr_yaw)
                     self.passive_odom_accum_dist = 0.0  # 重置累计位移
-            status = '发布→/initialpose ' + gate_level + ('[二次验证]' if recheck_done else '')
+            status = '发布→/initialpose ' + gate_level + ('[二次验证]' if recheck_passed else '')
         else:
             if hasattr(self, 'debug_auto_pose_pub'):
                 self.debug_auto_pose_pub.publish(msg)
-            status = 'debug模式' + ('[二次验证]' if recheck_done else '')
+            status = 'debug模式' + ('[二次验证]' if recheck_passed else '')
+            # debug模式也重置计数器, 防止无限累积累积触发阈值异常放宽
+            self.passive_bootstrap_failures = 0
 
         self._logger.info(
             f'[被动{method}] {elapsed:.1f}s {total_n}帧: '
             f'({pose_to_publish[0]:.2f},{pose_to_publish[1]:.2f},{math.degrees(pose_to_publish[2]):.1f}deg) '
             f'conf={conf_pct:.0f}% wall={100*publish_wall:.0f}% σ={pos_sigma:.2f}m yσ={yaw_sigma_deg:.1f}deg '
             f'buf={len(self.passive_scan_buffer)}帧 [{status}]')
+
+        # 调试模式: 与参考源对比
+        if not self.auto_publish_initial_pose and self.debug_comparison_mode:
+            self._debug_compare_all_references(
+                pose_to_publish[0], pose_to_publish[1], pose_to_publish[2],
+                source=f'被动{method}')
         self.indoor_phase = IndoorPhase.PASSIVE_COLLECTING
 
     def _try_odom_fusion_verify(self):
@@ -2485,6 +2000,20 @@ class AutoInitialPoseCalibrator(Node):
         if self.current_scan is None:
             return False, None, 'no current scan'
 
+        # ── 冷却期判定: 最近发布了 /initialpose, 给 AMCL 时间收敛 ──
+        now = self.get_clock().now().nanoseconds * 1e-9
+        in_cooldown = now < self._publish_cooldown_until
+        if in_cooldown:
+            remaining = self._publish_cooldown_until - now
+            # 冷却期内: 放宽验证阈值, 跳过 AMCL 检查
+            odom_threshold = max(self.passive_odom_max_move * 2.0, 10.0)
+            wall_threshold = max(self.passive_fusion_wall_threshold * 0.5, 0.10)
+            skip_amcl = True
+        else:
+            odom_threshold = self.passive_odom_max_move
+            wall_threshold = self.passive_fusion_wall_threshold
+            skip_amcl = False
+
         # ── 1. 里程计推算 ──
         last_x, last_y, last_yaw = self.passive_last_odom
         curr_pos = self.current_odom.pose.pose.position
@@ -2498,8 +2027,8 @@ class AutoInitialPoseCalibrator(Node):
         self.passive_odom_accum_dist += move_dist
 
         # 累计位移超阈值 → 强制重匹配
-        if self.passive_odom_accum_dist > self.passive_odom_max_move:
-            return False, None, f'odom accum {self.passive_odom_accum_dist:.1f}m > {self.passive_odom_max_move:.1f}m'
+        if self.passive_odom_accum_dist > odom_threshold:
+            return False, None, f'odom accum {self.passive_odom_accum_dist:.1f}m > {odom_threshold:.1f}m'
 
         # 推算 map 位姿
         px, py, pyaw = self.last_calibrated_pose
@@ -2517,22 +2046,31 @@ class AutoInitialPoseCalibrator(Node):
 
         # 2a. wall coverage 验证
         wall_ratio, valid_ratio, _ = self._compute_wall_coverage(pts, pred_x, pred_y, pred_yaw)
-        if wall_ratio < self.passive_fusion_wall_threshold:
-            return False, None, f'wall {wall_ratio:.2f} < {self.passive_fusion_wall_threshold:.2f}'
+        if wall_ratio < wall_threshold:
+            reason = f'wall {wall_ratio:.2f} < {wall_threshold:.2f}'
+            if in_cooldown:
+                reason += f' [冷却中 {remaining:.0f}s]'
+            return False, None, reason
 
         # 2b. likelihood 验证
         lf_score, hit_rate, n_valid = self._score_points(pts, pred_x, pred_y, pred_yaw)
         if lf_score < self.passive_likelihood_threshold:
-            return False, None, f'likelihood {lf_score:.3f} < {self.passive_likelihood_threshold:.2f}'
+            reason = f'likelihood {lf_score:.3f} < {self.passive_likelihood_threshold:.2f}'
+            if in_cooldown:
+                reason += f' [冷却中 {remaining:.0f}s]'
+            return False, None, reason
 
-        # ── 3. AMCL 交叉验证（可选）──
-        if self.passive_amcl_cross_check and self.latest_amcl_pose is not None:
+        # ── 3. AMCL 交叉验证（可选, 冷却期跳过）──
+        if self.passive_amcl_cross_check and not skip_amcl and self.latest_amcl_pose is not None:
             ax, ay, _ = self.latest_amcl_pose
             dev = math.sqrt((pred_x - ax)**2 + (pred_y - ay)**2)
             if dev > self.passive_amcl_max_deviation:
                 return False, None, f'AMCL deviation {dev:.2f}m > {self.passive_amcl_max_deviation:.1f}m'
 
-        return True, pred_pose, f'ok wall={wall_ratio:.2f} lf={lf_score:.3f}'
+        reason = f'ok wall={wall_ratio:.2f} lf={lf_score:.3f}'
+        if in_cooldown:
+            reason += f' [冷却中 {remaining:.0f}s, 放宽验证]'
+        return True, pred_pose, reason
 
     def _do_passive_reverify(self):
         """二次验证: 使用更多帧 + 更精细搜索重新匹配, 返回 (pose, wall, elapsed) 或 (None, 0, 0)"""
@@ -2618,6 +2156,7 @@ class AutoInitialPoseCalibrator(Node):
         self.passive_scan_buffer.clear()
         self.passive_best_pose = None
         self.passive_last_match_time = None
+        self.passive_bootstrap_failures = 0  # 新被动会话重置引导计数器
         self.indoor_phase = IndoorPhase.PASSIVE_COLLECTING
         self._logger.info(
             f'[被动模式] 已启动, 间隔={self.passive_interval}s, '
@@ -3041,6 +2580,47 @@ class AutoInitialPoseCalibrator(Node):
         if len(self.comparison_history) % 5 == 0:
             self._print_comparison_statistics()
 
+    def _debug_compare_all_references(self, algo_x, algo_y, algo_yaw, source=""):
+        """调试模式: 输出 [DEBUG] 当前坐标, 推理坐标, 偏差(Δx,Δy,Δyaw)
+        
+        用于 auto_publish_initial_pose=false 时验证算法精度。
+        优先使用手动GT, 其次使用AMCL当前位姿作为"当前坐标"。
+        """
+        algo_yaw_deg = math.degrees(algo_yaw)
+        has_gt = self.gt_received and self.gt_pose is not None
+        has_amcl = self.latest_amcl_pose is not None
+
+        if not has_gt and not has_amcl:
+            self._logger.info(
+                f'[DEBUG] 无参考源 (GT/AMCL均未就绪), '
+                f'推理坐标: ({algo_x:.3f}, {algo_y:.3f}, {algo_yaw_deg:.1f}°)'
+                f'{" [" + source + "]" if source else ""}')
+            return
+
+        # 选择参考源: GT优先
+        if has_gt:
+            ref_label = "手动GT"
+            ref_x, ref_y, ref_yaw = self.gt_pose
+        else:
+            ref_label = "AMCL"
+            ref_x, ref_y, ref_yaw = self.latest_amcl_pose
+
+        ref_yaw_deg = math.degrees(ref_yaw)
+        dx = algo_x - ref_x
+        dy = algo_y - ref_y
+        dyaw = math.degrees(self._norm_angle(algo_yaw - ref_yaw))
+        dist = math.sqrt(dx**2 + dy**2)
+
+        label = f"[{source}]" if source else ""
+        self._logger.info(
+            f'[DEBUG]{label} 当前坐标({ref_label}): ({ref_x:.3f}, {ref_y:.3f}, {ref_yaw_deg:.1f}°), '
+            f'推理坐标: ({algo_x:.3f}, {algo_y:.3f}, {algo_yaw_deg:.1f}°), '
+            f'偏差: Δx={dx:+.3f}m, Δy={dy:+.3f}m, Δyaw={dyaw:+.1f}° (距离={dist:.3f}m)')
+
+        # 同时记录到累积统计
+        if has_gt:
+            self._compare_with_manual_ground_truth(algo_x, algo_y, algo_yaw)
+
     def _print_comparison_statistics(self):
         """输出多轮对比的统计结果（均值/方差/最大误差）"""
         if not hasattr(self, "comparison_history") or len(self.comparison_history) < 2:
@@ -3070,18 +2650,9 @@ class AutoInitialPoseCalibrator(Node):
     #  激光评分实现 (似然场模型)
     # ================================================================
     def _score_scan(self, scan, x, y, yaw, max_beams):
-        """Beam model 评分 (兼容旧接口, 内部调用 _score_points)"""
-        if self.likelihood_field is None or self.map_info is None or scan is None:
-            return -1e9
-        
-        pts = self._scan_to_points(scan)
-        if len(pts) < 10:
-            return -1e9
-        # 降采样
-        ds = max(1, len(pts) // max_beams)
-        pts_ds = pts[::ds]
-        sc, _, _ = self._score_points(pts_ds, x, y, yaw)
-        return sc
+        """delegated to calib_lib.scoring.score_scan"""
+        return score_scan(scan, x, y, yaw, self._map_ctx,
+                          lambda s: self._scan_to_points(s), max_beams)
 
 
     def _publish_and_finish(self, x, y, yaw, sigma_pos=2.0, sigma_yaw_deg=20.0,
@@ -3116,6 +2687,9 @@ class AutoInitialPoseCalibrator(Node):
                 f'σ=({sigma_pos:.2f}m,{sigma_yaw_deg:.1f}deg) buf={buf_frames}帧)')
             # 拒收后必须退出状态机, 防止死循环重复相同搜索
             self._logger.warn('[置信度门控] 定位失败，停止主动校准并转入被动监听模式')
+            # 调试模式：即使拒绝也输出对比日志
+            if self.debug_comparison_mode:
+                self._debug_compare_all_references(x, y, yaw, source='主动定位(拒绝)')
             self.indoor_phase = IndoorPhase.DONE
             self.cmd_vel_pub.publish(Twist())
             return
@@ -3141,6 +2715,7 @@ class AutoInitialPoseCalibrator(Node):
 
         if self.auto_publish_initial_pose:
             self.initialpose_pub.publish(msg)
+            self.passive_bootstrap_failures = 0  # 主动定位成功后重置引导计数器
             self._logger.info(
                 f'[主动定位{gate_level}] 发布: ({x:.3f},{y:.3f},{math.degrees(yaw):.1f}deg) '
                 f'conf={conf_pct:.0f}% sigma=({pos_sigma:.2f}m,{yaw_sigma:.1f}deg) '
@@ -3151,6 +2726,8 @@ class AutoInitialPoseCalibrator(Node):
             if hasattr(self, 'debug_auto_pose_pub'):
                 self.debug_auto_pose_pub.publish(msg)
             self._logger.info(f'[调试{gate_level}] conf={conf_pct:.0f}% sigma=({pos_sigma:.2f}m,{yaw_sigma:.1f}deg)')
+            if self.debug_comparison_mode:
+                self._debug_compare_all_references(x, y, yaw, source='主动定位')
 
         # 只有高置信度才更新原点
         if confidence >= th_up:

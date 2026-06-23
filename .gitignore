@@ -231,3 +231,16 @@ LIO-SAM_MID360_ROS2_PKG/ros2/src/Super-LIO/src/super_lio/map/
 **/scan_viz/
 .codebuddy/plans/passive_odom_fusion_verification_13520bfb.md
 .omo/run-continuation/ses_12aa6cc2effeAidsO63NTgHw3I.json
+
+# Local IDE/tool configurations (should not be committed)
+.codebuddy/
+.mimocode/
+.omo/
+.reasonix/
+.codegraph/
+
+# Windows special file
+nul
+
+# Point cloud data (large binary files)
+*.pcd

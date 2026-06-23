@@ -86,6 +86,8 @@ sudo systemctl restart lio_sam_nav2.service
 # 查看日志（启动后尽快运行，避免错过ERROR）：
 sudo journalctl -u lio_sam_nav2.service -f
 
+sudo systemctl status lio_sam_nav2.service
+
 # 设置初始点：
 rviz2内点击2d pose estimate后点击地图拖动方向
 

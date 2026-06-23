@@ -1,0 +1,12 @@
+# 源码脚本强制LF换行
+*.py         text eol=lf
+*.sh         text eol=lf
+*.cmake      text eol=lf
+CMakeLists.txt text eol=lf
+*.txt        text eol=lf
+# 二进制资源不处理换行
+*.bag        binary
+*.pcd        binary
+*.png        binary
+*.jpg        binary
+*.stl        binary

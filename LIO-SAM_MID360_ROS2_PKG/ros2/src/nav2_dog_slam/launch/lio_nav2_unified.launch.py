@@ -37,6 +37,12 @@ try:
         BASE_LINK_FRAME, LIVOX_FRAME, SLAM_ALGORITHM,
         SC_PGO_SAVE_DIRECTORY,DEFAULT_NAMESPACE
     )
+    # 3D 重定位配置（可选，旧版 global_config 可能没有）
+    try:
+        from global_config import ENABLE_3D_RELOCALIZATION, PCD_MAP_DIRECTORY
+    except ImportError:
+        ENABLE_3D_RELOCALIZATION = False
+        PCD_MAP_DIRECTORY = '/home/ztl/slam_data/pcd/'
 except Exception as e:
     print(f"导入global_config失败: {e}")
     # 如果导入失败，使用默认值
@@ -64,6 +70,8 @@ except Exception as e:
     SLAM_ALGORITHM = 'super_lio'  # 默认算法
     SC_PGO_SAVE_DIRECTORY = '/home/ztl/save_data/'
     DEFAULT_NAMESPACE = ''
+    ENABLE_3D_RELOCALIZATION = False
+    PCD_MAP_DIRECTORY = '/home/ztl/slam_data/pcd/'
 
 # 获取当前launch文件所在目录
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -600,6 +608,37 @@ def generate_launch_description():
         ],
         prefix=['taskset -c 6'],
     )
+
+    # ─── 3D LiDAR 初始位姿估计节点 ───
+    # 使用 KISS-Matcher + GICP 做全局匹配，发布 /initialpose 给 AMCL
+    # 仅在导航模式下启用，建图模式下不启动
+    lidar_3d_relocalizer_params = os.path.join(
+        get_package_share_directory('lidar_3d_relocalizer'),
+        'config', 'relocalizer_params.yaml'
+    )
+
+    lidar_3d_relocalizer_node = Node(
+        package='lidar_3d_relocalizer',
+        executable='lidar_3d_relocalizer_node',
+        name='lidar_3d_relocalizer_node',
+        namespace=ns if str(ns) != '' else '',
+        output='screen',
+        parameters=[
+            lidar_3d_relocalizer_params,
+            {
+                'use_sim_time': use_sim_time,
+                'cloud_topic': lio_config['pointcloud_topic'],
+                'odom_topic': lio_config['odom_topic'],
+                'map_frame': str(ns_map_frame).strip("'") if str(ns) != '' else MAP_FRAME,
+                'odom_frame': str(ns_odom_frame).strip("'") if str(ns) != '' else ODOM_FRAME,
+                'base_frame': str(ns_base_footprint_frame).strip("'") if str(ns) != '' else BASE_LINK_FRAME,
+                'publish_tf': False,
+                'publish_initial_pose': True,
+                'max_retry': 3,
+            }
+        ],
+        prefix=['taskset -c 5,6'],
+    )
     
 
 
@@ -683,6 +722,15 @@ def generate_launch_description():
                 actions=[lifecycle_manager_map_server]
             )
         )
+
+        # 3D LiDAR 初始位姿估计（在 AMCL 之前启动，给 AMCL 提供初始位姿）
+        if ENABLE_3D_RELOCALIZATION:
+            nav2_actions.append(
+                TimerAction(
+                    period=3.0,  # 等待 LIO 和 map_server 就绪
+                    actions=[lidar_3d_relocalizer_node]
+                )
+            )
 
     # 4. 导航模式配置
     if BUILD_TOOL != 'slam_toolbox' :
