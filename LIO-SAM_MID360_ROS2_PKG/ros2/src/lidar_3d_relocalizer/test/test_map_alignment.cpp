@@ -28,13 +28,49 @@ TEST(MapAlignmentTest, EstimatesSimilarityTransformFromLandmarks)
   };
 
   std::string error;
-  const auto transform = MapAlignment::estimateFromLandmarks(points, &error);
+  const auto transform = MapAlignment::estimateFromLandmarks(points, true, &error);
 
   EXPECT_TRUE(transform.valid) << error;
   EXPECT_NEAR(transform.scale, 2.0, kTolerance);
   EXPECT_NEAR(transform.yaw, yaw, kTolerance);
   EXPECT_NEAR(transform.tx, 10.0, kTolerance);
   EXPECT_NEAR(transform.ty, -3.0, kTolerance);
+  EXPECT_NEAR(transform.rms_error, 0.0, kTolerance);
+}
+
+TEST(MapAlignmentTest, EstimatesRigidTransformFromNoisyLandmarks)
+{
+  const std::vector<AlignmentPoint> points = {
+    {-1.65958, -3.69628, -3.17743, -3.71891},
+    {-11.11288, -11.18596, -10.42140, -10.11060},
+    {16.66528, -6.13897, 16.47700, -6.96873},
+  };
+
+  std::string error;
+  const auto transform = MapAlignment::estimateFromLandmarks(points, false, &error);
+
+  EXPECT_TRUE(transform.valid) << error;
+  EXPECT_NEAR(transform.scale, 1.0, kTolerance);
+  EXPECT_NEAR(transform.yaw, -2.471985 * M_PI / 180.0, 1e-6);
+  EXPECT_NEAR(transform.tx, -0.034788024, 1e-6);
+  EXPECT_NEAR(transform.ty, 0.123769691, 1e-6);
+  EXPECT_GT(transform.rms_error, 0.0);
+}
+
+TEST(MapAlignmentTest, EstimatesTranslationOnlyTransformFromSingleLandmark)
+{
+  const std::vector<AlignmentPoint> points = {
+    {-1.659582, -3.696284, -3.17743, -3.71891},
+  };
+
+  std::string error;
+  const auto transform = MapAlignment::estimateFromLandmarks(points, false, &error);
+
+  EXPECT_TRUE(transform.valid) << error;
+  EXPECT_NEAR(transform.scale, 1.0, kTolerance);
+  EXPECT_NEAR(transform.yaw, 0.0, kTolerance);
+  EXPECT_NEAR(transform.tx, -1.517848, kTolerance);
+  EXPECT_NEAR(transform.ty, -0.022626, kTolerance);
   EXPECT_NEAR(transform.rms_error, 0.0, kTolerance);
 }
 

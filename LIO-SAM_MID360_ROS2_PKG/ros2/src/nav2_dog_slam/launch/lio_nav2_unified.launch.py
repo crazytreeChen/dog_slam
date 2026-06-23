@@ -616,6 +616,7 @@ def generate_launch_description():
         get_package_share_directory('lidar_3d_relocalizer'),
         'config', 'relocalizer_params.yaml'
     )
+    lidar_3d_relocalizer_pcd = os.path.join(PCD_MAP_DIRECTORY, 'test.pcd')
 
     lidar_3d_relocalizer_node = Node(
         package='lidar_3d_relocalizer',
@@ -627,6 +628,7 @@ def generate_launch_description():
             lidar_3d_relocalizer_params,
             {
                 'use_sim_time': use_sim_time,
+                'pcd_map_path': lidar_3d_relocalizer_pcd,
                 'cloud_topic': lio_config['pointcloud_topic'],
                 'odom_topic': lio_config['odom_topic'],
                 'map_frame': str(ns_map_frame).strip("'") if str(ns) != '' else MAP_FRAME,

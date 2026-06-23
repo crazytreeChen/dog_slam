@@ -41,19 +41,24 @@ lidar_3d_relocalizer_node:
     # ─── PCD → 2D 地图坐标偏移 ───
     # PCD 地图原点在 2D 地图坐标系中的位置
     # 计算方法: 2D坐标 - PCD坐标 = 偏移量
-    # 实测: 同一特征点 2D(27.33, 11.42) - PCD(3.17, 1.53) = (24.16, 9.89)
-    map_offset_x: 24.16
-    map_offset_y: 9.89
-    map_offset_yaw_deg: 0.0
+    # fallback: 3 组人工点固定尺度最小二乘估计值
+    map_offset_x: -0.034788
+    map_offset_y: 0.123770
+    map_offset_yaw_deg: -2.471985
 
     # PCD -> 2D map alignment.
     # offset: use map_offset_x/map_offset_y/map_offset_yaw_deg.
     # landmarks: estimate scale + yaw + translation from marked point pairs.
-    alignment_mode: "offset"
+    alignment_mode: "landmarks"
+    # Keep false for ROS/Nav2 metric maps. Enable only when map scale is known to differ.
+    alignment_allow_scale: false
     # Flattened point pairs: [pcd_x, pcd_y, map_x, map_y, ...]
-    # For production, mark at least 2 points; 3+ points are recommended.
+    # One point gives translation only; 2+ points estimate yaw/scale/translation.
+    # 3+ manually marked correspondences are recommended for production.
     alignment_points: [
-      3.17, 1.53, 27.33, 11.42
+      -1.65958, -3.69628, -3.17743, -3.71891,
+      -11.11288, -11.18596, -10.42140, -10.11060,
+      16.66528, -6.13897, 16.47700, -6.96873
     ]
 
     # ─── 发布模式 ───

@@ -19,8 +19,10 @@
   <build_depend>pcl_conversions</build_depend>
   <build_depend>pcl-dev</build_depend>
   <build_depend>PCL</build_depend>
+  <build_depend>libeigen3-dev</build_depend>
   <build_depend>OpenMP</build_depend>
   <build_depend>ndt_omp_ros2</build_depend>
+  <test_depend>ament_cmake_gtest</test_depend>
 
   <exec_depend>rclcpp</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
@@ -31,6 +33,7 @@
   <exec_depend>pcl_ros</exec_depend>
   <exec_depend>pcl_conversions</exec_depend>
   <exec_depend>pcl</exec_depend>
+  <exec_depend>libeigen3-dev</exec_depend>
   <exec_depend>ndt_omp_ros2</exec_depend>
 
   <export>

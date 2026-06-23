@@ -1,0 +1,14 @@
+{
+  "skills": {
+    "disabled": [
+      "ab-testing",
+      "sms",
+      "baoyu-article-illustrator",
+      "churn-prevention",
+      "marketing-psychology",
+      "copy-editing",
+      "baoyu-markdown-to-html",
+      "baoyu-comic"
+    ]
+  }
+}

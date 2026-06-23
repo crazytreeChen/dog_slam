@@ -14,8 +14,10 @@
  *   - fitness 低于阈值时不发布，回退到 2D 方案
  */
 
+#include <cmath>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -119,18 +121,27 @@ public:
     {
       has_tf_ = false;
       const int max_wait_sec = 15;
-      const double poll_timeout = 1.0;  // 每次 canTransform 最多 1 秒
+      const auto frame_exists = [this](const std::string& frame) {
+        return tf_buffer_->allFramesAsString().find(frame) != std::string::npos;
+      };
       auto start = this->now();
       while (rclcpp::ok() && !has_tf_) {
-        try {
-          tf_buffer_->canTransform(odom_frame_, base_frame_,
-                                   tf2::TimePointZero,
-                                   tf2::durationFromSec(poll_timeout));
-          has_tf_ = true;
-        } catch (const tf2::TransformException&) {
-          auto elapsed = (this->now() - start).seconds();
-          if (elapsed > max_wait_sec) break;
+        const auto elapsed = (this->now() - start).seconds();
+        if (elapsed > max_wait_sec) break;
+
+        if (!frame_exists(odom_frame_) || !frame_exists(base_frame_)) {
           rclcpp::sleep_for(std::chrono::milliseconds(1500));  // 等发布者启动
+          continue;
+        }
+
+        std::string tf_error;
+        if (tf_buffer_->canTransform(odom_frame_, base_frame_,
+                                     tf2::TimePointZero,
+                                     tf2::durationFromSec(0.0),
+                                     &tf_error)) {
+          has_tf_ = true;
+        } else {
+          rclcpp::sleep_for(std::chrono::milliseconds(1500));
         }
       }
     }
@@ -208,6 +219,7 @@ private:
   std::string initial_pose_mode_;
   double search_window_radius_;
   std::string alignment_mode_;
+  bool alignment_allow_scale_{false};
   std::vector<double> alignment_points_flat_;
   AlignmentTransform alignment_transform_;
 
@@ -268,6 +280,7 @@ private:
     map_offset_y_ = this->declare_parameter<double>("map_offset_y", 0.0);
     map_offset_yaw_deg_ = this->declare_parameter<double>("map_offset_yaw_deg", 0.0);
     alignment_mode_ = this->declare_parameter<std::string>("alignment_mode", "offset");
+    alignment_allow_scale_ = this->declare_parameter<bool>("alignment_allow_scale", false);
     alignment_points_flat_ = this->declare_parameter<std::vector<double>>(
         "alignment_points", std::vector<double>{});
     initializeAlignment();
@@ -313,7 +326,8 @@ private:
     }
 
     std::string error;
-    auto estimated = MapAlignment::estimateFromLandmarks(points, &error);
+    auto estimated =
+        MapAlignment::estimateFromLandmarks(points, alignment_allow_scale_, &error);
     if (!estimated.valid) {
       RCLCPP_WARN(this->get_logger(),
                   "Landmark alignment invalid: %s. Falling back to offset alignment.",
@@ -323,19 +337,42 @@ private:
 
     alignment_transform_ = estimated;
     RCLCPP_INFO(this->get_logger(),
-                "Using landmark alignment: points=%zu scale=%.6f yaw=%.3fdeg "
+                "Using landmark alignment: points=%zu allow_scale=%s scale=%.6f yaw=%.3fdeg "
                 "tx=%.3f ty=%.3f rms=%.4f",
                 points.size(),
+                alignment_allow_scale_ ? "true" : "false",
                 alignment_transform_.scale,
                 alignment_transform_.yaw * 180.0 / M_PI,
                 alignment_transform_.tx,
                 alignment_transform_.ty,
                 alignment_transform_.rms_error);
+    const double c = std::cos(alignment_transform_.yaw);
+    const double s = std::sin(alignment_transform_.yaw);
+    const double scale = alignment_transform_.scale;
+    RCLCPP_INFO(this->get_logger(),
+                "PCD->2D map matrix: [[%.6f, %.6f, %.6f], "
+                "[%.6f, %.6f, %.6f], [0, 0, 1]]",
+                scale * c,
+                -scale * s,
+                alignment_transform_.tx,
+                scale * s,
+                scale * c,
+                alignment_transform_.ty);
   }
 
   void cloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
   {
-    if (!has_odom_ || is_localized_) return;
+    if (is_localized_) return;
+
+    auto pcl_cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
+    pcl::fromROSMsg(*msg, *pcl_cloud);
+    latest_cloud_ = pcl_cloud;
+
+    if (!has_odom_) {
+      RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                           "Cloud received, waiting for odom before accumulation");
+      return;
+    }
 
     // 存储第一个 odom 姿态
     if (!has_first_odom_) {
@@ -348,11 +385,6 @@ private:
                    std::atan2(2.0*(first_odom_pose_.orientation.w*first_odom_pose_.orientation.z + first_odom_pose_.orientation.x*first_odom_pose_.orientation.y),
                               1.0 - 2.0*(first_odom_pose_.orientation.y*first_odom_pose_.orientation.y + first_odom_pose_.orientation.z*first_odom_pose_.orientation.z)) * 180.0 / M_PI);
     }
-
-    // 存储最新单帧 body frame（用于 KISS-Matcher）
-    auto pcl_cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZI>>();
-    pcl::fromROSMsg(*msg, *pcl_cloud);
-    latest_cloud_ = pcl_cloud;
 
     // 将 body 云变换到 odom 系，然后送入累积器
     if (has_tf_) {
@@ -420,6 +452,13 @@ private:
   // ─── 执行重定位 ───
   void tryRelocalize()
   {
+    if (!has_odom_) {
+      RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                           "Waiting for odom before relocalization");
+      publishStatus("WAITING_FOR_ODOM");
+      return;
+    }
+
     // 用累积云（odom 系，多帧融合更密）
     auto current_cloud = accumulator_->getAccumulatedCloud(
         accum_frame_count_, accum_max_time_s_, accum_voxel_size_);
@@ -430,7 +469,8 @@ private:
         current_cloud = latest_cloud_;
         RCLCPP_INFO(this->get_logger(), "Fallback to single frame (%zu pts)", current_cloud->size());
       } else {
-        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "No cloud");
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                             "Waiting for cloud before relocalization");
         publishStatus("WAITING_FOR_CLOUD");
         return;
       }

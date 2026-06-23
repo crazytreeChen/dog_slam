@@ -40,6 +40,11 @@ public:
       const std::vector<AlignmentPoint>& points,
       std::string* error_message = nullptr);
 
+  static AlignmentTransform estimateFromLandmarks(
+      const std::vector<AlignmentPoint>& points,
+      bool allow_scale,
+      std::string* error_message = nullptr);
+
   static AlignmentTransform fromOffset(double offset_x,
                                        double offset_y,
                                        double offset_yaw_deg);

@@ -23,6 +23,7 @@ find_package(tf2_ros REQUIRED)
 find_package(pcl_ros REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(PCL REQUIRED)
+find_package(Eigen3 REQUIRED)
 find_package(OpenMP REQUIRED)
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
@@ -124,6 +125,7 @@ ament_target_dependencies(lidar_3d_relocalizer_node
 
 target_link_libraries(lidar_3d_relocalizer_node
   ${PCL_LIBRARIES}
+  Eigen3::Eigen
   OpenMP::OpenMP_CXX
   kiss_matcher::kiss_matcher_core
   ${NDT_OMP_LIB}
@@ -151,6 +153,7 @@ if(BUILD_TESTING)
     src/map_alignment.cpp
   )
   target_include_directories(test_map_alignment PRIVATE include)
+  target_link_libraries(test_map_alignment Eigen3::Eigen)
 endif()
 
 ament_package()

@@ -21,9 +21,29 @@ AlignmentTransform MapAlignment::estimateFromLandmarks(
     const std::vector<AlignmentPoint>& points,
     std::string* error_message)
 {
+  return estimateFromLandmarks(points, false, error_message);
+}
+
+AlignmentTransform MapAlignment::estimateFromLandmarks(
+    const std::vector<AlignmentPoint>& points,
+    bool allow_scale,
+    std::string* error_message)
+{
   AlignmentTransform transform;
-  if (points.size() < 2) {
-    if (error_message) *error_message = "at least two alignment points are required";
+  if (points.empty()) {
+    if (error_message) *error_message = "at least one alignment point is required";
+    return transform;
+  }
+
+  if (points.size() == 1) {
+    const auto& point = points.front();
+    transform.scale = 1.0;
+    transform.yaw = 0.0;
+    transform.tx = point.map_x - point.pcd_x;
+    transform.ty = point.map_y - point.pcd_y;
+    transform.rms_error = 0.0;
+    transform.valid = true;
+    if (error_message) error_message->clear();
     return transform;
   }
 
@@ -57,15 +77,16 @@ AlignmentTransform MapAlignment::estimateFromLandmarks(
 
   const double scale_cos = a / denom;
   const double scale_sin = b / denom;
-  transform.scale = std::hypot(scale_cos, scale_sin);
+  transform.yaw = std::atan2(scale_sin, scale_cos);
+  transform.scale = allow_scale ? std::hypot(scale_cos, scale_sin) : 1.0;
   if (transform.scale <= std::numeric_limits<double>::epsilon()) {
     if (error_message) *error_message = "estimated alignment scale is zero";
     return transform;
   }
 
-  transform.yaw = std::atan2(scale_sin, scale_cos);
   const Eigen::Rotation2Dd rotation(transform.yaw);
-  const Eigen::Vector2d translation = map_center - transform.scale * rotation * pcd_center;
+  const Eigen::Vector2d rotated_center = rotation * pcd_center;
+  const Eigen::Vector2d translation = map_center - transform.scale * rotated_center;
   transform.tx = translation.x();
   transform.ty = translation.y();
 
@@ -73,7 +94,7 @@ AlignmentTransform MapAlignment::estimateFromLandmarks(
   for (const auto& point : points) {
     const Eigen::Vector2d p(point.pcd_x, point.pcd_y);
     const Eigen::Vector2d q(point.map_x, point.map_y);
-    const Eigen::Vector2d q_est = transform.scale * rotation * p + translation;
+    const Eigen::Vector2d q_est = transform.scale * (rotation * p) + translation;
     squared_error_sum += (q_est - q).squaredNorm();
   }
   transform.rms_error = std::sqrt(squared_error_sum / static_cast<double>(points.size()));
@@ -103,7 +124,7 @@ PlanarPose MapAlignment::transformPose(const Eigen::Isometry3f& pcd_pose,
   const Eigen::Vector2d pcd_xy(pcd_pose.translation().x(), pcd_pose.translation().y());
   const Eigen::Rotation2Dd rotation(transform.yaw);
   const Eigen::Vector2d map_xy =
-      transform.scale * rotation * pcd_xy + Eigen::Vector2d(transform.tx, transform.ty);
+      transform.scale * (rotation * pcd_xy) + Eigen::Vector2d(transform.tx, transform.ty);
 
   const Eigen::Matrix3f pcd_rotation = pcd_pose.rotation();
   const double pcd_yaw = std::atan2(pcd_rotation(1, 0), pcd_rotation(0, 0));
