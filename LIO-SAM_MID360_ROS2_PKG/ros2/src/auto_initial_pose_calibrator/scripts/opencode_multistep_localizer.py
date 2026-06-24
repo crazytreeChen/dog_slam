@@ -269,8 +269,206 @@ def score_pose_raycast(points_odom, cx, cy, yaw, map_data, info, range_tol=1.0):
     return score, n_valid, n_evaluated
 
 
-def global_search_first_frame(pts_odom, lf, map_data, info, step=1.5, angle_step=8, top_k=8):
-    """首帧全局搜索 (带自动过滤: 排除灰色区域和穿墙候选)"""
+def load_region_mask(map_shape, regions_json_path):
+    """从 segmentation_regions.json 构建有效区域掩膜。
+    
+    返回:
+        valid_mask: (h,w) bool, True=有效区域(属于某个region的free space)
+        region_centers: List[Tuple[float,float,str]] 世界坐标 (x,y,label)
+        regions_data: dict 原始JSON数据
+    """
+    import json
+    if not regions_json_path or not os.path.exists(regions_json_path):
+        print(f"  [Region] No regions file: {regions_json_path}")
+        return None, None, None
+    
+    with open(regions_json_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    
+    h, w = map_shape
+    valid_mask = np.zeros((h, w), dtype=bool)
+    centers = []
+    
+    for r in data.get('regions', []):
+        r1, c1, r2, c2 = r['bbox_px']
+        # 区域中心在有效mask内
+        r1 = max(0, r1); c1 = max(0, c1)
+        r2 = min(h, r2); c2 = min(w, c2)
+        # 标记整个 bbox 区域为有效 (watershed mask 更精确, 但 bbox 近似足够用于搜索约束)
+        valid_mask[r1:r2, c1:c2] = True
+        centers.append((r['center_xy'][0], r['center_xy'][1], r['label']))
+    
+    n_valid = int(np.sum(valid_mask))
+    print(f"  [Region] Loaded {len(centers)} regions, valid_px={n_valid} "
+          f"({100*n_valid/(h*w):.1f}% of map)")
+    return valid_mask, centers, data
+
+
+def region_constrained_search(pts_odom, lf, map_data, info, 
+                              region_mask, region_centers,
+                              step=1.5, angle_step=8, top_k=8):
+    """基于结构化区域约束的首帧搜索。
+    
+    只在有效区域内搜索, 利用区域中心作为优先候选位置。
+    """
+    res = info['resolution']; ox = info['origin_x']; oy = info['origin_y']
+    mw = info['width']*res; mh = info['height']*res; H, W = info['height'], info['width']
+    
+    # 降采样
+    n_pts = min(len(pts_odom), 1000)
+    rng = np.random.default_rng(42)
+    idx = rng.choice(len(pts_odom), size=n_pts, replace=False) if len(pts_odom) > n_pts else np.arange(len(pts_odom))
+    pts_ds = pts_odom[idx]
+    
+    # 生成候选位置: 区域中心 + 区域内网格采样
+    candidates_positions = []
+    
+    # 1. 区域中心点 (高权重: 扫描大概率在某个区域中心附近)
+    for cx, cy, label in region_centers:
+        # 房间中心直接作为候选
+        candidates_positions.append((cx, cy, label))
+        # 区域中心周围也采样一些点
+        for dx in np.arange(-3, 4, step):
+            for dy in np.arange(-3, 4, step):
+                if dx == 0 and dy == 0:
+                    continue
+                candidates_positions.append((cx + dx, cy + dy, label))
+    
+    # 2. 在有效区域内额外网格采样 (作为补充)
+    # 生成 world 坐标网格, 只保留在 region_mask 内的
+    xs_world = np.arange(ox + 2, ox + mw - 2, step)
+    ys_world = np.arange(oy + 2, oy + mh - 2, step)
+    
+    for xw in xs_world:
+        for yw in ys_world:
+            ci = int((xw - ox) / res)
+            ri = int((yw - oy) / res)
+            if 0 <= ri < H and 0 <= ci < W and region_mask[ri, ci]:
+                candidates_positions.append((xw, yw, 'grid'))
+    
+    # 去重
+    seen = set()
+    unique_positions = []
+    for cx, cy, label in candidates_positions:
+        key = (round(cx, 2), round(cy, 2))
+        if key not in seen:
+            seen.add(key)
+            unique_positions.append((cx, cy, label))
+    
+    print(f"  [RegionSearch] {len(unique_positions)} candidate positions "
+          f"(from {len(region_centers)} region centers + grid)")
+    
+    n_ang = int(360 / angle_step)
+    results = []
+    n_filtered = 0
+    n_total = 0
+    
+    for cx, cy, label in unique_positions:
+        # 快速检查: 该位置是否在地图范围内
+        ci_c = int((cx - ox) / res)
+        ri_c = int((cy - oy) / res)
+        if ci_c < 0 or ci_c >= W or ri_c < 0 or ri_c >= H:
+            continue
+        # 该位置不能是墙壁或未知
+        cell = map_data[ri_c, ci_c]
+        if cell == 100 or cell == -1:
+            n_filtered += 1
+            continue
+        
+        for adeg in range(n_ang):
+            n_total += 1
+            ayaw = math.radians(adeg * angle_step)
+            sc, _, _ = score_pose(pts_ds, cx, cy, ayaw, lf, info)
+            if sc < 0.3:
+                continue
+            
+            # 快速过滤: 检查扫描点是否在有效区域内
+            c_y, s_y = math.cos(ayaw), math.sin(ayaw)
+            check_n = min(len(pts_ds), 100)
+            mx = c_y * pts_ds[:check_n, 0] - s_y * pts_ds[:check_n, 1] + cx
+            my = s_y * pts_ds[:check_n, 0] + c_y * pts_ds[:check_n, 1] + cy
+            ci = ((mx - ox) / res + 0.5).astype(np.int32)
+            ri = ((my - oy) / res + 0.5).astype(np.int32)
+            v = (ci >= 0) & (ci < W) & (ri >= 0) & (ri < H)
+            if int(np.sum(v)) < 20:
+                n_filtered += 1
+                continue
+            cells = map_data[ri[v], ci[v]]
+            n_unk = int(np.sum(cells == -1))
+            n_wall = int(np.sum(cells == 100))
+            n_valid = len(cells)
+            
+            # 过滤: 未知区域 > 50% 或 墙壁 > 60%
+            if n_unk / n_valid > 0.50 or n_wall / n_valid > 0.60:
+                n_filtered += 1
+                continue
+            
+            # 额外检查: 扫描点是否大部分落在有效区域 (region_mask) 内
+            n_in_region = int(np.sum(region_mask[ri[v], ci[v]]))
+            if n_in_region / n_valid < 0.30:
+                n_filtered += 1
+                continue
+            
+            results.append((sc, cx, cy, adeg * angle_step, label))
+    
+    if n_filtered > 0:
+        print(f"  [RegionSearch] Filtered {n_filtered}/{n_total} candidates")
+    
+    results.sort(key=lambda x: x[0], reverse=True)
+    
+    # NMS
+    nms = []
+    for sc, ax, ay, ad, label in results:
+        dup = any(math.sqrt((ax - px) ** 2 + (ay - py) ** 2) < 1.5 
+                  and abs(ad - pa) < 20 for _, px, py, pa, _ in nms)
+        if not dup:
+            nms.append((sc, ax, ay, ad, label))
+            if len(nms) >= top_k * 2:
+                break
+    
+    print(f"  [RegionSearch] Top candidates:")
+    for i, (sc, ax, ay, ad, label) in enumerate(nms[:top_k]):
+        print(f"    #{i}: ({ax:.1f},{ay:.1f},{ad:.0f}deg) sc={sc:.3f} region={label}")
+    
+    # 光线投射精选
+    if len(nms) >= 2:
+        rc_scored = []
+        for sc, ax, ay, ad, label in nms[:top_k * 2]:
+            ayaw = math.radians(ad)
+            rc_sc, rc_valid, rc_total = score_pose_raycast(pts_ds, ax, ay, ayaw, map_data, info)
+            if rc_sc > -1e8 and rc_valid >= 5:
+                rc_valid_rate = rc_valid / rc_total
+                joint = sc * 0.4 + rc_sc * 0.6
+                rc_scored.append((joint, sc, rc_sc, rc_valid_rate, ax, ay, ad, label))
+        if rc_scored:
+            rc_scored.sort(key=lambda x: x[0], reverse=True)
+            best = rc_scored[0]
+            print(f"  [Joint] Best: ({best[4]:.1f},{best[5]:.1f},{best[6]:.0f}deg) "
+                  f"lf={best[1]:.3f} rc={best[2]:.3f} rc_valid={best[3]:.1%} "
+                  f"region={best[7]}")
+            valid_cands = [(c[0], c[4], c[5], c[6]) for c in rc_scored if c[3] > 0.15]
+            if valid_cands:
+                nms = valid_cands[:top_k]
+            else:
+                nms = [(c[1], c[4], c[5], c[6]) for c in rc_scored[:top_k]]
+            return nms
+    else:
+        nms = [(s, x, y, a) for s, x, y, a, _ in nms[:top_k]]
+    
+    return nms if nms else []
+
+
+def global_search_first_frame(pts_odom, lf, map_data, info, step=1.5, angle_step=8, top_k=8,
+                               region_mask=None, region_centers=None):
+    """首帧全局搜索 (带自动过滤: 排除灰色区域和穿墙候选)。
+    
+    如果提供 region_mask, 则使用区域约束搜索; 否则退化为全图搜索。
+    """
+    if region_mask is not None and region_centers is not None:
+        return region_constrained_search(pts_odom, lf, map_data, info,
+                                         region_mask, region_centers,
+                                         step=step, angle_step=angle_step, top_k=top_k)
+    
     res = info['resolution']; ox = info['origin_x']; oy = info['origin_y']
     mw = info['width']*res; mh = info['height']*res; H, W = info['height'], info['width']
     xs = np.arange(ox+2, ox+mw-2, step); ys = np.arange(oy+2, oy+mh-2, step)
@@ -329,17 +527,22 @@ def global_search_first_frame(pts_odom, lf, map_data, info, step=1.5, angle_step
             ayaw = math.radians(ad)
             rc_sc, rc_valid, rc_total = score_pose_raycast(pts_ds, ax, ay, ayaw, map_data, info)
             if rc_sc > -1e8 and rc_valid >= 5:
-                rc_scored.append((sc, rc_sc, rc_valid/rc_total, ax, ay, ad))
+                rc_valid_rate = rc_valid / rc_total
+                # 联合评分: likelihood 40% + raycast 60%
+                joint = sc * 0.4 + rc_sc * 0.6
+                rc_scored.append((joint, sc, rc_sc, rc_valid_rate, ax, ay, ad))
         if rc_scored:
-            best_rc = rc_scored[0]
-            # 光线投射有效束比例 > 30% 才启用 (否则障碍物太多, 回退似然场)
-            if best_rc[2] > 0.30:
-                rc_scored.sort(key=lambda x: x[0]*0.3 + x[1]*0.7, reverse=True)
-                nms = [(s, ax, ay, ad) for s, _, _, ax, ay, ad in rc_scored[:top_k]]
-                print(f"  [RayCast] Best: ({best_rc[3]:.1f},{best_rc[4]:.1f},{best_rc[5]:.0f}deg) "
-                      f"rc_score={best_rc[1]:.3f} valid={best_rc[2]:.1%}")
+            rc_scored.sort(key=lambda x: x[0], reverse=True)
+            best = rc_scored[0]
+            print(f"  [Joint] Best: ({best[4]:.1f},{best[5]:.1f},{best[6]:.0f}deg) "
+                  f"lf={best[1]:.3f} rc={best[2]:.3f} rc_valid={best[3]:.1%}")
+            # 保留 raycast 有效率 > 15% 的候选
+            valid_cands = [(c[0], c[4], c[5], c[6]) for c in rc_scored if c[3] > 0.15]
+            if valid_cands:
+                nms = valid_cands[:top_k]
             else:
-                print(f"  [RayCast] valid={best_rc[2]:.1%}<30%, fallback to likelihood")
+                print(f"  [Joint] 无有效联合候选, 回退 likelihood")
+                nms = [(c[1], c[4], c[5], c[6]) for c in rc_scored[:top_k]]
     else:
         nms = nms[:top_k]
     return nms
@@ -387,7 +590,9 @@ def local_search(pts_odom, cx_pred, cy_pred, yaw_pred, lf, info,
 # ============================================================
 class MultiStepLocalizer:
     def __init__(self, map_data, info, lf, frame_pts_list, uncertainty_decay=0.7, min_sigma=0.5,
-                 prior_x=None, prior_y=None, prior_yaw=None, prior_radius=10.0):
+                 prior_x=None, prior_y=None, prior_yaw=None, prior_radius=10.0,
+                 reloc_score_threshold=0.8, reloc_wall_threshold=0.30, reloc_consecutive=3,
+                 regions_json_path=None):
         self.map_data = map_data
         self.info = info
         self.lf = lf
@@ -403,6 +608,21 @@ class MultiStepLocalizer:
         self.prior_y = prior_y
         self.prior_yaw = prior_yaw
         self.prior_radius = prior_radius
+
+        # 重定位恢复参数
+        self.reloc_score_th = reloc_score_threshold
+        self.reloc_wall_th = reloc_wall_threshold
+        self.reloc_consecutive = reloc_consecutive
+        self._low_count = 0  # 连续低分帧计数
+        
+        # 区域约束
+        self.region_mask = None
+        self.region_centers = None
+        self.regions_data = None
+        if regions_json_path:
+            h, w = map_data.shape
+            self.region_mask, self.region_centers, self.regions_data = load_region_mask(
+                (h, w), regions_json_path)
         
         self.history = []
     
@@ -433,9 +653,12 @@ class MultiStepLocalizer:
                         self.mu = best_pose
                         print(f"  Init: ({self.mu[0]:.2f}, {self.mu[1]:.2f}, {math.degrees(self.mu[2]):.1f}deg)")
                 else:
-                    print(f"\n--- Frame 0: Global Search ---")
+                    search_mode = "Region Constrained" if self.region_mask is not None else "Global"
+                    print(f"\n--- Frame 0: {search_mode} Search ---")
                     t0 = time.time()
-                    candidates = global_search_first_frame(pts, self.lf, self.map_data, self.info)
+                    candidates = global_search_first_frame(
+                        pts, self.lf, self.map_data, self.info,
+                        region_mask=self.region_mask, region_centers=self.region_centers)
                     if not candidates:
                         print("  [ERROR] No initial candidates found"); return False
                     
@@ -469,7 +692,25 @@ class MultiStepLocalizer:
                         pose, lf_sc = local_search(pts, hx, hy, math.radians(had), self.lf, self.info, radius=2.0, pos_step=0.3)
                         if lf_sc > best_sc: best_sc = lf_sc; best_pose = pose
                     self.mu = best_pose
-                    print(f"  Init: ({self.mu[0]:.2f}, {self.mu[1]:.2f}, {math.degrees(self.mu[2]):.1f}deg) sigma={self.sigma:.1f}m ({time.time()-t0:.1f}s)")
+                    
+                    # 报告当前位姿所在的区域
+                    if self.region_mask is not None and self.mu is not None:
+                        ci_r = int((self.mu[0] - self.info['origin_x']) / self.info['resolution'])
+                        ri_r = int((self.mu[1] - self.info['origin_y']) / self.info['resolution'])
+                        if 0 <= ri_r < self.info['height'] and 0 <= ci_r < self.info['width']:
+                            in_region = self.region_mask[ri_r, ci_r]
+                            region_label = "valid" if in_region else "unknown"
+                            print(f"  Init: ({self.mu[0]:.2f}, {self.mu[1]:.2f}, "
+                                  f"{math.degrees(self.mu[2]):.1f}deg) sigma={self.sigma:.1f}m "
+                                  f"region={region_label} ({time.time()-t0:.1f}s)")
+                        else:
+                            print(f"  Init: ({self.mu[0]:.2f}, {self.mu[1]:.2f}, "
+                                  f"{math.degrees(self.mu[2]):.1f}deg) sigma={self.sigma:.1f}m "
+                                  f"({time.time()-t0:.1f}s)")
+                    else:
+                        print(f"  Init: ({self.mu[0]:.2f}, {self.mu[1]:.2f}, "
+                              f"{math.degrees(self.mu[2]):.1f}deg) sigma={self.sigma:.1f}m "
+                              f"({time.time()-t0:.1f}s)")
             else:
                 # 后续帧: ICP + 局部搜索
                 prev_pts = self.frames[i-1][0]
@@ -504,27 +745,89 @@ class MultiStepLocalizer:
                                            angle_range=int(angle_range))
                 
                 # ── ICP 失败保护 ──
-                # 计算当前帧的墙壁覆盖率
+                # 计算墙壁覆盖率（统一计算，用于 REJECT 和 RELOC 判断）
+                res = self.info['resolution']
+                ox = self.info['origin_x']; oy = self.info['origin_y']
+                H_m, W_m = self.info['height'], self.info['width']
                 c_y, s_y = math.cos(pose[2]), math.sin(pose[2])
                 mx = c_y*pts[:,0] - s_y*pts[:,1] + pose[0]
                 my = s_y*pts[:,0] + c_y*pts[:,1] + pose[1]
-                ci = ((mx-self.info['origin_x'])/self.info['resolution']+0.5).astype(np.int32)
-                ri = ((my-self.info['origin_y'])/self.info['resolution']+0.5).astype(np.int32)
-                mv = (ci>=0)&(ci<self.info['width'])&(ri>=0)&(ri<self.info['height'])
+                ci = ((mx-ox)/res+0.5).astype(np.int32)
+                ri = ((my-oy)/res+0.5).astype(np.int32)
+                mv = (ci>=0)&(ci<W_m)&(ri>=0)&(ri<H_m)
                 cells = self.map_data[ri[mv], ci[mv]] if int(np.sum(mv)) > 10 else np.array([-1])
                 valid_c = (cells != -1); n_vc = int(np.sum(valid_c))
                 w_v = int(np.sum(cells[valid_c]==100)) if n_vc > 0 else 0
                 f_v = int(np.sum(cells[valid_c]==0)) if n_vc > 0 else 0
-                wall_pct = w_v / max(w_v+f_v, 1)
+                wall_pct = 100.0 * w_v / max(w_v+f_v, 1)
                 icp_jump = math.sqrt(t_icp[0]**2 + t_icp[1]**2) if icp_used else 0
                 
                 # 条件1: 墙壁覆盖率 < 20% → 直接拒绝
-                # 条件2: ICP跳变 > 2m 且覆盖率 < 35% → 拒绝
-                if i > 3 and (wall_pct < 0.20 or (icp_jump > 2.0 and wall_pct < 0.35)):
+                # 条件2: ICP跳变 > 1m 且覆盖率 < 40% → 拒绝
+                # 条件3: 时序一致性 — 与最近5帧中位数偏差 > 1.5m → 拒绝
+                temporal_reject = False
+                if i > 5 and len(self.history) >= 5:
+                    recent_x = [h[1] for h in self.history[-5:]]
+                    recent_y = [h[2] for h in self.history[-5:]]
+                    med_x = np.median(recent_x)
+                    med_y = np.median(recent_y)
+                    drift = math.sqrt((pose[0] - med_x)**2 + (pose[1] - med_y)**2)
+                    if drift > 1.5 and wall_pct < 50:
+                        temporal_reject = True
+
+                if i > 3 and (wall_pct < 20 or (icp_jump > 1.0 and wall_pct < 40) or temporal_reject):
                     pose = (self.mu[0], self.mu[1], pose[2])
                     lf_sc = -1
-                    print(f"  f{i:02d} [REJECT] wall={100*wall_pct:.0f}% jump={icp_jump:.1f}m, keeping prev")
+                    if temporal_reject:
+                        print(f"  f{i:02d} [REJECT] temporal drift={drift:.2f}m wall={wall_pct:.0f}%, keeping prev")
+                    else:
+                        print(f"  f{i:02d} [REJECT] wall={wall_pct:.0f}% jump={icp_jump:.1f}m, keeping prev")
                 
+                # ── 重定位恢复检测 ──
+                is_low = wall_pct < 20 or lf_sc < 0
+                if is_low:
+                    self._low_count += 1
+                else:
+                    self._low_count = 0
+
+                if self._low_count >= self.reloc_consecutive:
+                    print(f"  f{i:02d} [RELOC] 连续{self._low_count}帧低分, 触发全局重定位...")
+                    t_reloc = time.time()
+                    candidates = global_search_first_frame(pts, self.lf, self.map_data, self.info)
+                    if candidates:
+                        best_sc2 = -1e9; best_pose2 = None
+                        for sc2, hx2, hy2, had2 in candidates[:3]:
+                            pose2, lf_sc2 = local_search(pts, hx2, hy2, math.radians(had2),
+                                                         self.lf, self.info, radius=2.0, pos_step=0.3)
+                            if lf_sc2 > best_sc2:
+                                best_sc2 = lf_sc2; best_pose2 = pose2
+                        if best_pose2 and best_sc2 > lf_sc:
+                            self.mu = best_pose2
+                            self.sigma = 3.0
+                            self.sigma_angle = 15.0
+                            self._low_count = 0
+                            print(f"  f{i:02d} [RELOC] 成功: ({self.mu[0]:.2f},{self.mu[1]:.2f},"
+                                  f"{math.degrees(self.mu[2]):.0f}deg) sc={best_sc2:.3f} "
+                                  f"({time.time()-t_reloc:.1f}s)")
+                            # 重新计算 wall_pct
+                            c_y2, s_y2 = math.cos(self.mu[2]), math.sin(self.mu[2])
+                            mx2 = c_y2*pts[:,0] - s_y2*pts[:,1] + self.mu[0]
+                            my2 = s_y2*pts[:,0] + c_y2*pts[:,1] + self.mu[1]
+                            ci2 = ((mx2-self.info['origin_x'])/self.info['resolution']+0.5).astype(np.int32)
+                            ri2 = ((my2-self.info['origin_y'])/self.info['resolution']+0.5).astype(np.int32)
+                            mv2 = (ci2>=0)&(ci2<self.info['width'])&(ri2>=0)&(ri2<self.info['height'])
+                            cells2 = self.map_data[ri2[mv2], ci2[mv2]] if int(np.sum(mv2)) > 10 else np.array([-1])
+                            vc2 = (cells2 != -1)
+                            wv2 = int(np.sum(cells2[vc2]==100)); fv2 = int(np.sum(cells2[vc2]==0))
+                            wall_pct = wv2 / max(wv2+fv2, 1)
+                            lf_sc = best_sc2
+                        else:
+                            print(f"  f{i:02d} [RELOC] 未找到更优位姿, 保持当前")
+                    else:
+                        print(f"  f{i:02d} [RELOC] 无候选, 保持当前")
+                    # 无论如何重置计数, 避免每帧都触发
+                    self._low_count = 0
+
                 # 更新
                 self.mu = pose
                 self.sigma = max(self.sigma * self.decay, self.min_sigma)
@@ -691,6 +994,11 @@ def main():
     parser.add_argument('--prior-y', type=float, default=None, help='Prior Y position constraint')
     parser.add_argument('--prior-yaw', type=float, default=None, help='Prior yaw constraint (deg)')
     parser.add_argument('--prior-radius', type=float, default=10.0, help='Search radius around prior (m)')
+    parser.add_argument('--reloc-score', type=float, default=0.8, help='Score threshold for relocalization trigger')
+    parser.add_argument('--reloc-wall', type=float, default=0.30, help='Wall% threshold for relocalization')
+    parser.add_argument('--reloc-consecutive', type=int, default=3, help='Consecutive low frames to trigger reloc')
+    parser.add_argument('--regions', type=str, default=None, 
+                        help='Path to segmentation_regions.json for region-constrained search')
     args = parser.parse_args()
     
     npz_path = os.path.normpath(args.data)
@@ -722,8 +1030,12 @@ def main():
     prior_x = args.prior_x; prior_y = args.prior_y
     prior_yaw = math.radians(args.prior_yaw) if args.prior_yaw is not None else None
     localizer = MultiStepLocalizer(map_data, info, lf, frame_pts, uncertainty_decay=args.decay,
-                                   prior_x=prior_x, prior_y=prior_y, prior_yaw=prior_yaw,
-                                   prior_radius=args.prior_radius)
+                                    prior_x=prior_x, prior_y=prior_y, prior_yaw=prior_yaw,
+                                    prior_radius=args.prior_radius,
+                                    reloc_score_threshold=args.reloc_score,
+                                    reloc_wall_threshold=args.reloc_wall,
+                                    reloc_consecutive=args.reloc_consecutive,
+                                    regions_json_path=args.regions)
     success = localizer.run()
     
     if success:
