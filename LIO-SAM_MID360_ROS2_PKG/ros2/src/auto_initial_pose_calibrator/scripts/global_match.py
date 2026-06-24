@@ -140,7 +140,7 @@ def visualize_result(npz_path, best_pose):
     plt.show()
 
 if __name__ == "__main__":
-    file_path = "../scan_viz/debug_match_data_1.npz"
+    file_path = "../scan_viz/debug_match_data_3.npz"
     # 获取之前计算的位姿 (这里直接填入你刚算出的结果)
     calculated_pose = (28.600, 29.150, np.deg2rad(170.00)) 
     visualize_result(file_path, calculated_pose)

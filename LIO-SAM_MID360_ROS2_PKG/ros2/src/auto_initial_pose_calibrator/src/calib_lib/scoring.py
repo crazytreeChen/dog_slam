@@ -1,6 +1,7 @@
 """评分引擎 —— 纯函数。
 
-包含：似然场构建、点云/墙壁/光线投射评分、综合置信度、两级局部搜索。
+包含：似然场构建、点云/墙壁/光线投射评分、综合置信度、两级局部搜索、
+双模板光线投射全局匹配 (global_match2)。
 仅依赖 numpy + math + 可选 cv2，无 ROS 依赖（map_info 用 duck-typed 对象）。
 与原 AutoInitialPoseCalibrator 对应方法行为一致。
 
@@ -8,6 +9,7 @@
 _local_search_two_stage 无随机种子导致不可复现）原样保留，已记入 UNFINISHED_TASKS.md。
 """
 import math
+import time
 
 import numpy as np
 
@@ -25,6 +27,11 @@ class MapContext:
         self.map_info = map_info
         self.likelihood_field = likelihood_field  # (H, W) float32 距离场
         self.likelihood_max_dist = likelihood_max_dist
+        self.dist_field = None            # (H, W) float64, 原始距离场 (用于距离场匹配)
+        # ── 双模板匹配地图 (global_match2 核心) ──
+        self.dt_likelihood_map = None     # (H, W) float32, 似然图 (奖励命中墙壁)
+        self.dt_ray_penalty_map = None    # (H, W) float32, 射线惩罚图 (墙壁=1.0, 未知=2.0)
+        self.dt_valid_center_mask = None  # (H, W) bool, 合法机器狗中心区域
 
     def is_valid(self):
         return self.map_data is not None and self.map_info is not None
@@ -59,6 +66,79 @@ def find_free_space(map_ctx):
     free = (map_ctx.map_data == 0)
     rows, cols = np.where(free)
     return np.stack([rows, cols], axis=1)
+
+
+# ──────────────────────────────────────────────────────────────
+#  距离场匹配: 原始距离场构建 + 距离场评分 (来自 global_match.py)
+# ──────────────────────────────────────────────────────────────
+def build_distance_field(map_ctx, logger=None):
+    """构建原始距离场（不裁剪），用于距离场全局匹配。
+
+    与 build_likelihood 的区别:
+      - 二值化阈值: map_data > 50 (而非 == 100), 更宽松
+      - 不裁剪距离上限, 保留完整距离信息
+      - 存储为 float64 像素距离
+
+    要求 cv2 可用。
+    """
+    if map_ctx.map_data is None:
+        return
+    try:
+        import cv2
+        # 二值化: > 50 视为障碍物 (ROS 栅格图中 > 50 为 likely occupied)
+        binary = np.zeros_like(map_ctx.map_data, dtype=np.uint8)
+        binary[map_ctx.map_data > 50] = 255
+        # 距离变换: 离墙壁越近值越小
+        map_ctx.dist_field = cv2.distanceTransform(
+            255 - binary, cv2.DIST_L2, 5).astype(np.float64)
+    except Exception as e:
+        if logger is not None:
+            logger.error(f'距离场构建失败: {e}')
+
+
+def score_distance_field(points_odom, cx, cy, yaw, map_ctx):
+    """距离场评分: 平均像素距离（越小越贴合墙壁）。
+
+    原理与 global_match.py 一致:
+      - 将点云变换到地图坐标系
+      - 转换到像素坐标
+      - 查询距离场中的值（像素距离）
+      - 返回所有合法点的平均距离
+
+    返回: (score, n_valid)
+      score: float, 平均像素距离 (越小越好, float('inf') 表示无效)
+      n_valid: int, 有效点数
+    """
+    if map_ctx.dist_field is None or map_ctx.map_info is None:
+        return float('inf'), 0
+
+    res = map_ctx.map_info.resolution
+    ox = map_ctx.map_info.origin.position.x
+    oy = map_ctx.map_info.origin.position.y
+    H, W = map_ctx.map_info.height, map_ctx.map_info.width
+
+    # 变换到地图坐标系
+    c_y, s_y = math.cos(yaw), math.sin(yaw)
+    if points_odom.ndim == 2:
+        mx = c_y * points_odom[:, 0] - s_y * points_odom[:, 1] + cx
+        my = s_y * points_odom[:, 0] + c_y * points_odom[:, 1] + cy
+    else:
+        mx = np.array([c_y * points_odom[0] - s_y * points_odom[1] + cx])
+        my = np.array([s_y * points_odom[0] + c_y * points_odom[1] + cy])
+
+    # 转换到像素坐标
+    pix_x = ((mx - ox) / res + 0.5).astype(np.int32)
+    pix_y = ((my - oy) / res + 0.5).astype(np.int32)
+
+    valid = (pix_x >= 0) & (pix_x < W) & (pix_y >= 0) & (pix_y < H)
+    n_valid = int(np.sum(valid))
+
+    # 超过一半点在地图外 → 无效
+    if n_valid < len(points_odom) * 0.5:
+        return float('inf'), n_valid
+
+    score = np.sum(map_ctx.dist_field[pix_y[valid], pix_x[valid]]) / n_valid
+    return float(score), n_valid
 
 
 def score_points(points_odom, cx, cy, yaw, map_ctx):
@@ -343,6 +423,238 @@ def local_search_two_stage(points_odom, cx_pred, cy_pred, yaw_pred, map_ctx,
                     best_sc = sc
                     best_pose = (ax, ay, ayaw)
     return best_pose, best_sc
+
+
+# ──────────────────────────────────────────────────────────────
+#  双模板光线投射全局匹配 (来自 global_match2.py)
+#  核心: 命中模板 (likelihood) + 射线惩罚模板 (ray penalty)
+#  使用 cv2.matchTemplate 做全图卷积加速
+# ──────────────────────────────────────────────────────────────
+def build_dual_template_maps(map_ctx, logger=None):
+    """构建双模板匹配所需的似然地图和射线惩罚地图。
+
+    写入 map_ctx 的新字段:
+      - dt_likelihood_map: (H, W) float32, 用于奖励扫描点命中墙壁
+      - dt_ray_penalty_map: (H, W) float32, 用于惩罚射线穿过墙壁/未知区域
+      - dt_valid_center_mask: (H, W) bool, 标记机器狗中心可放置的合法区域
+
+    依赖 cv2 可用。
+    """
+    if map_ctx.map_data is None:
+        return
+    try:
+        import cv2
+        map_data = map_ctx.map_data
+        res = map_ctx.map_info.resolution
+
+        # 墙壁掩码 (ROS occupancy: 51-100 视为潜在墙壁)
+        walls_mask = (map_data > 50) & (map_data <= 100)
+        binary_walls = np.zeros_like(map_data, dtype=np.uint8)
+        binary_walls[walls_mask] = 255
+
+        # 似然地图: 距离墙壁越近越高
+        dist_map = cv2.distanceTransform(255 - binary_walls, cv2.DIST_L2, 5)
+        max_dist_px = 10.0  # 最大奖励距离 (像素)
+        likelihood_map = np.clip(max_dist_px - dist_map, 0, max_dist_px) / max_dist_px
+        map_ctx.dt_likelihood_map = likelihood_map.astype(np.float32)
+
+        # 射线惩罚地图: 墙壁=1.0, 未知区域=2.0, 空地=0.0
+        ray_penalty_map = np.zeros_like(map_data, dtype=np.float32)
+        ray_penalty_map[walls_mask] = 1.0
+        unknown_mask = (map_data < 0) | (map_data > 100)
+        ray_penalty_map[unknown_mask] = 2.0
+        map_ctx.dt_ray_penalty_map = ray_penalty_map
+
+        # 合法机器狗中心区域 (已知空地)
+        map_ctx.dt_valid_center_mask = (map_data >= 0) & (map_data < 50)
+
+        if logger is not None:
+            logger.info(
+                f'[双模板] 地图构建完成: 似然图 {likelihood_map.shape}, '
+                f'惩罚图 {ray_penalty_map.shape}, '
+                f'合法中心区域 {np.sum(map_ctx.dt_valid_center_mask)} 像素')
+
+    except Exception as e:
+        if logger is not None:
+            logger.error(f'[双模板] 地图构建失败: {e}')
+
+
+def dual_template_global_match(scan_pts, map_ctx,
+                               coarse_angle_step_deg=2.0,
+                               fine_angle_step_deg=0.5,
+                               penalty_weight=3.0,
+                               scan_max_points=500,
+                               logger=None):
+    """双模板光线投射全局匹配 — 核心算法。
+
+    原理:
+      - 命中模板: 扫描点投影到似然地图上获得正奖励
+      - 射线模板: 从机器狗原点到扫描点的连线, 穿过墙壁/未知区则惩罚
+      - 使用 cv2.matchTemplate 做全图卷积, 一次性计算所有 (x,y) 位置得分
+      - 粗搜 (coarse_angle_step_deg) → 精搜 (fine_angle_step_deg) 两阶段
+
+    参数:
+      scan_pts:   (N, 2) numpy array, 雷达扫描点在 odom 坐标系下的坐标
+      map_ctx:    MapContext 对象, 需已调用 build_dual_template_maps
+      coarse_angle_step_deg: 粗搜角度步长 (度)
+      fine_angle_step_deg:   精修角度步长 (度)
+      penalty_weight:        射线穿透惩罚权重 (越大越排斥穿墙)
+      scan_max_points:       扫描点最大采样数 (提高速度)
+      logger:                日志器
+
+    返回: (best_pose, best_score)
+      best_pose: (x, y, yaw) in map frame (世界坐标)
+      best_score: float, 最终得分 (越高越贴合)
+    """
+    try:
+        import cv2
+    except ImportError:
+        if logger is not None:
+            logger.error('[双模板] cv2 不可用')
+        return None, -float('inf')
+
+    t0 = time.time()
+
+    if map_ctx.dt_likelihood_map is None or map_ctx.dt_ray_penalty_map is None:
+        if logger is not None:
+            logger.error('[双模板] 双模板地图未构建')
+        return None, -float('inf')
+
+    likelihood_map = map_ctx.dt_likelihood_map
+    ray_penalty_map = map_ctx.dt_ray_penalty_map
+    valid_center_mask = map_ctx.dt_valid_center_mask
+
+    res = map_ctx.map_info.resolution
+    ox = map_ctx.map_info.origin.position.x
+    oy = map_ctx.map_info.origin.position.y
+    H, W = map_ctx.map_info.height, map_ctx.map_info.width
+
+    # 降采样扫描点
+    pts = scan_pts.copy()
+    if len(pts) > scan_max_points:
+        rng = np.random.default_rng(42)  # 种子固定使结果可复现
+        indices = rng.choice(len(pts), scan_max_points, replace=False)
+        pts = pts[indices]
+
+    if logger is not None:
+        logger.info(f'[双模板] 启动, {len(pts)} 个扫描点')
+
+    best_score = -float('inf')
+    best_pose = (0.0, 0.0, 0.0)
+    pad = 0.5  # 模板边距 (米)
+
+    def _build_templates(rotated_pts):
+        """为给定旋转后的点云构建命中/射线模板。"""
+        min_x, max_x = min(0.0, np.min(rotated_pts[:, 0])), max(0.0, np.max(rotated_pts[:, 0]))
+        min_y, max_y = min(0.0, np.min(rotated_pts[:, 1])), max(0.0, np.max(rotated_pts[:, 1]))
+
+        tpw = int((max_x - min_x + 2 * pad) / res)
+        tph = int((max_y - min_y + 2 * pad) / res)
+
+        if tpw <= 0 or tph <= 0 or tpw > W or tph > H:
+            return None
+
+        tpl_hit = np.zeros((tph, tpw), dtype=np.float32)
+        tpl_ray = np.zeros((tph, tpw), dtype=np.float32)
+        tpl_ox = min_x - pad
+        tpl_oy = min_y - pad
+
+        robot_x_tpl = int(-tpl_ox / res)
+        robot_y_tpl = int(-tpl_oy / res)
+
+        pix_x = ((rotated_pts[:, 0] - tpl_ox) / res).astype(int)
+        pix_y = ((rotated_pts[:, 1] - tpl_oy) / res).astype(int)
+        valid = (pix_x >= 0) & (pix_x < tpw) & (pix_y >= 0) & (pix_y < tph)
+        vx, vy = pix_x[valid], pix_y[valid]
+
+        if len(vx) == 0:
+            return None
+
+        # 绘制射线模板 (机器狗 → 各扫描点)
+        for px, py in zip(vx, vy):
+            cv2.line(tpl_ray, (robot_x_tpl, robot_y_tpl), (px, py), 1.0, 1)
+        # 擦除终点 (扫描点命中墙壁是合法结果)
+        tpl_ray[vy, vx] = 0.0
+
+        # 绘制命中模板
+        tpl_hit[vy, vx] = 1.0
+
+        return (tpl_hit, tpl_ray, tpl_ox, tpl_oy, robot_x_tpl, robot_y_tpl, tpw, tph)
+
+    def _score_one_angle(cos_t, sin_t):
+        """对一个旋转角度评分, 返回 (best_local_x, best_local_y, score)。"""
+        rotated = np.column_stack([
+            pts[:, 0] * cos_t - pts[:, 1] * sin_t,
+            pts[:, 0] * sin_t + pts[:, 1] * cos_t,
+        ])
+
+        tpl_result = _build_templates(rotated)
+        if tpl_result is None:
+            return None
+
+        tpl_hit, tpl_ray, tpl_ox, tpl_oy, rxt, ryt, tpw, tph = tpl_result
+
+        # 全图卷积
+        res_hit = cv2.matchTemplate(likelihood_map, tpl_hit, cv2.TM_CCORR)
+        res_ray = cv2.matchTemplate(ray_penalty_map, tpl_ray, cv2.TM_CCORR)
+        res_final = res_hit - (res_ray * penalty_weight)
+
+        rh, rw = res_final.shape
+        ys, ye = ryt, ryt + rh
+        xs, xe = rxt, rxt + rw
+
+        if ye >= H or xe >= W:
+            return None
+
+        # 过滤机器狗中心不在合法空地的位置
+        valid_slice = valid_center_mask[ys:ye, xs:xe]
+        res_final[~valid_slice] = -float('inf')
+
+        _, max_val, _, max_loc = cv2.minMaxLoc(res_final)
+        if max_val <= -1e8:
+            return None
+
+        match_x, match_y = max_loc
+        rx = match_x * res + ox - tpl_ox
+        ry = match_y * res + oy - tpl_oy
+        return (rx, ry, max_val)
+
+    # ── Phase 1: 粗搜索 ──
+    coarse_angles = np.arange(-np.pi, np.pi, np.deg2rad(coarse_angle_step_deg))
+    if logger is not None:
+        logger.info(f'[双模板] 粗搜: {len(coarse_angles)} 个角度 (步长 {coarse_angle_step_deg}°)')
+
+    for theta in coarse_angles:
+        result = _score_one_angle(math.cos(theta), math.sin(theta))
+        if result is not None and result[2] > best_score:
+            best_score = result[2]
+            best_pose = (result[0], result[1], theta)
+
+    if logger is not None:
+        t1 = time.time()
+        logger.info(f'[双模板] 粗搜完成 ({t1 - t0:.2f}s), best=({best_pose[0]:.2f},{best_pose[1]:.2f},'
+                    f'{math.degrees(best_pose[2]):.1f}deg) score={best_score:.1f}')
+
+    # ── Phase 2: 精细局部角度搜索 ──
+    fine_angles = np.arange(
+        best_pose[2] - np.deg2rad(coarse_angle_step_deg),
+        best_pose[2] + np.deg2rad(coarse_angle_step_deg) + 1e-5,
+        np.deg2rad(fine_angle_step_deg))
+
+    for theta in fine_angles:
+        result = _score_one_angle(math.cos(theta), math.sin(theta))
+        if result is not None and result[2] > best_score:
+            best_score = result[2]
+            best_pose = (result[0], result[1], theta)
+
+    elapsed = time.time() - t0
+    if logger is not None:
+        logger.info(
+            f'[双模板] 全部完成 ({elapsed:.2f}s): '
+            f'({best_pose[0]:.3f},{best_pose[1]:.3f},{math.degrees(best_pose[2]):.2f}deg) '
+            f'score={best_score:.1f}')
+
+    return best_pose, best_score
 
 
 def score_scan(scan, x, y, yaw, map_ctx, scan_to_points_fn, max_beams):

@@ -32,7 +32,7 @@
       rkbot:     # 中狗 ZG
         map_topic: "/rkbot/map"
         scan_topic: "/rkbot/scan"
-        odom_topic: "/odom/slam_odom"
+        odom_topic: "/rkbot/lio/odom"
         amcl_pose_topic: "/rkbot/amcl_pose"
 
     # ────── 模式 ──────
@@ -44,10 +44,11 @@
     log_level: "INFO"                    # 文件日志级别: DEBUG/INFO/WARN/ERROR
 
     # ────── 开机自动启动 ──────
-    auto_start: true              # 开机收到地图+scan+odom后自动触发校准
+    auto_start: false              # 开机收到地图+scan+odom后自动触发校准
     auto_start_delay: 3.0         # 数据就绪后等待延迟 (秒)
-    quick_mode: true              # 快速模式：跳过旋转+运动探索，仅做一次全局匹配
-    auto_publish_initial_pose: false   # 自动发布 /initialpose (false=仅输出日志+debug话题+对比误差, 供验证)
+    quick_mode: false             # 快速模式：跳过旋转 (false=保留旋转检查)
+    publish_after_rotation: true  # 旋转采集+多步匹配完成后直接发布初始位姿 (跳过运动探索)
+    auto_publish_initial_pose: true   # 自动发布 /initialpose (true=发布到话题)
 
     # ────── 被动持续定位模式 ──────
     passive_mode_enabled: true     # 启用被动持续定位 (服务启动即进入)
@@ -69,8 +70,8 @@
     passive_publish_cooldown: 60.0      # 发布 /initialpose 后冷却时间, 期间放松融合验证 (秒)
 
     # ────── 置信度门控 ──────
-    confidence_threshold_update: 0.65   # 允许更新原点/校准位姿的置信度阈值 (0.0~1.0)
-    confidence_threshold_publish: 0.50  # 允许发布 /initialpose 的置信度阈值 (0.0~1.0)
+    confidence_threshold_update: 0.50   # 允许更新原点/校准位姿的置信度阈值 (0.0~1.0)
+    confidence_threshold_publish: 0.30  # 允许发布 /initialpose 的置信度阈值 (0.0~1.0)
     confidence_threshold_amcl: 0.35     # 低置信度仍可辅助 AMCL 的阈值 (0.0~1.0, 当前仅监控)
 
     # ────── 旋转采集 ──────
@@ -78,7 +79,7 @@
     rotation_scan_interval_deg: 15.0
     rotation_enabled: true          # 是否启用旋转360°全覆盖采集 (quick_mode=true时跳过)
     rotation_total_deg: 360.0       # 旋转总角度（覆盖完整闭环空间）
-    rotation_angular_vel: 0.3       # 旋转角速度 (rad/s)
+    rotation_angular_vel: 0.5       # 旋转角速度 (rad/s)
 
     # ────── 粗匹配 ──────
     rough_match_particles: 5000     # 粗匹配全局粒子数（提高覆盖率）
@@ -154,6 +155,25 @@
     fine_search_angle_step: 3.0     # 精细搜索角度步长 (deg)
     min_match_wall_coverage: 0.50   # 最低墙壁覆盖率阈值
     min_match_coverage: 0.15        # 最低有效区域覆盖率
+
+    # ────── 距离场全局匹配 (来自 global_match.py 算法) ──────
+    use_distance_field_matching: false    # 启用距离场匹配替代网格搜索 (true=距离场 / false=似然场网格)
+    df_angle_step_deg: 5.0               # 距离场匹配角度步长 (度, 越小越精细但越慢)
+    df_n_positions: 1000                  # 随机采样的自由空间位置数 (越大覆盖越全但越慢)
+    df_scan_max_points: 500              # 匹配用最大扫描点数 (降采样)
+    df_multistep_enabled: true            # 多步递推首帧使用距离场搜索
+    df_passive_enabled: true              # 被动匹配首帧使用距离场搜索
+
+    # ────── 双模板光线投射全局匹配 (来自 global_match2.py 算法) ──────
+    # 核心: 命中模板(奖励) + 射线惩罚模板(惩罚穿墙) + cv2.matchTemplate全图卷积
+    # 优点: 速度极快(全图卷积), 天然防穿墙, 角度精修达0.5°
+    use_dual_template_matching: true      # 启用双模板匹配替代网格/距离场 (优先级最高)
+    dt_angle_step_deg: 2.0               # 双模板粗搜角度步长 (度, 默认2°)
+    dt_fine_angle_step_deg: 0.5          # 双模板精修角度步长 (度, 默认0.5°)
+    dt_penalty_weight: 3.0               # 射线穿透惩罚权重 (越大越排斥穿墙, 默认3.0)
+    dt_scan_max_points: 500              # 匹配用最大扫描点数
+    dt_multistep_enabled: true            # 多步递推首帧使用双模板搜索
+    dt_passive_enabled: true              # 被动匹配首帧使用双模板搜索
 
     # ────── 偏差监控 ──────
     deviation_monitor_enabled: true  # 是否启用偏差监控

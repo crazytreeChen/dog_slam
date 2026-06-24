@@ -93,12 +93,14 @@ class ScanCollector(Node):
         self.declare_parameter('output_dir', '/tmp/scan_viz')
         self.declare_parameter('rotation_speed', 0.3)       # 旋转角速度 rad/s
         self.declare_parameter('rotation_total_deg', 360.0)  # 旋转总角度
-        self.declare_parameter('save_interval', 1.0)         # 保存间隔秒
+        self.declare_parameter('save_interval', 0.7)         # 保存间隔秒（~30帧/360°）
         self.declare_parameter('explore_radius', 1.0)        # 探索半径 m
         self.declare_parameter('min_safe_distance', 0.5)     # 避障安全距离 m
         self.declare_parameter('enable_explore', True)       # 是否启用小范围移动
         self.declare_parameter('enable_rotation', True)      # 是否启用旋转
-        self.declare_parameter('target_frame', 'odom')       # TF目标坐标系
+        # target_frame 需要 namespace 感知（中狗用 rkbot/odom 而非裸 odom）
+        default_target_frame = f"{ns}/odom" if ns else "odom"
+        self.declare_parameter('target_frame', default_target_frame)
 
         self.scan_topic = self.get_parameter('scan_topic').value
         self.map_topic = self.get_parameter('map_topic').value
@@ -140,6 +142,7 @@ class ScanCollector(Node):
 
         # 阶段: rotation, explore, done
         self.phase = 'rotation' if self.enable_rotation else 'explore'
+        self._finished = False  # 防重入（Ctrl+C 可能触发 _finish() 多次）
 
         # ────── QoS ──────
         be_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
@@ -185,6 +188,7 @@ class ScanCollector(Node):
     def _map_cb(self, msg):
         self.map_data = np.array(msg.data, dtype=np.int8).reshape((msg.info.height, msg.info.width))
         self.map_info = msg.info
+        self.map_frame_id = msg.header.frame_id  # 记录 map frame_id（带 namespace 时如 rkbot/map）
         self.get_logger().info(f'[map] 已收到: {msg.info.width}x{msg.info.height} @ {msg.info.resolution}m')
 
     # ────── 工具 ──────
@@ -201,6 +205,18 @@ class ScanCollector(Node):
         while a < -math.pi:
             a += 2 * math.pi
         return a
+
+    def _get_current_scan_tf_yaw(self):
+        """查询 scan_frame→target_frame 的 TF yaw（用于旋转累计，odom yaw 在定位未收敛时不变）"""
+        if self.current_scan is None or self.scan_frame_id is None:
+            return None
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                self.target_frame, self.scan_frame_id, rclpy.time.Time(),
+                timeout=rclpy.duration.Duration(seconds=0.05))
+            return self._quat_to_yaw(transform.transform.rotation)
+        except Exception:
+            return None
 
     def _scan_to_xy(self, scan):
         if scan is None:
@@ -259,37 +275,38 @@ class ScanCollector(Node):
 
     # ────── 阶段1：旋转360° ──────
     def _do_rotation(self):
-        curr_yaw = self._quat_to_yaw(self.current_odom.pose.pose.orientation)
+        # 用 scan→target_frame 的 TF yaw 做累计（odom yaw 在定位未收敛时几乎不变）
+        scan_yaw = self._get_current_scan_tf_yaw()
+        if scan_yaw is None:
+            # TF 还没就绪，跳过本轮
+            return
 
         # 初始化旋转起始角度
         if self.rotation_start_yaw is None:
-            self.rotation_start_yaw = curr_yaw
+            self.rotation_start_yaw = scan_yaw
+            self.rotation_prev_yaw = scan_yaw
             self.last_save_time = self.get_clock().now()
             self._last_yaw_log_time = self.get_clock().now()
+            self.rotation_accumulated = 0.0
             self.get_logger().info(f'[旋转] 开始360°旋转采集，角速度={self.rotation_speed}rad/s, '
-                                   f'保存间隔={self.save_interval}s, 起始yaw={math.degrees(curr_yaw):.1f}°')
+                                   f'保存间隔={self.save_interval}s, 起始yaw={math.degrees(scan_yaw):.1f}°')
 
-        # 累积旋转角度
-        delta = abs(self._norm_angle(curr_yaw - self.rotation_start_yaw))
-        self.rotation_start_yaw = curr_yaw
-        self.rotation_accumulated += delta
+        # 符号带方向增量累加（正负抵消噪声，真实旋转不抵消）
+        diff = self._norm_angle(scan_yaw - self.rotation_prev_yaw)
+        self.rotation_prev_yaw = scan_yaw
+        self.rotation_accumulated += diff  # signed, 噪声会正负抵消，净旋转不会
 
         # 每2秒输出一次 yaw 变化诊断
         now = self.get_clock().now()
         if (now - self._last_yaw_log_time).nanoseconds > 2.0 * 1e9:
             self._last_yaw_log_time = now
             self.get_logger().info(
-                f'[旋转诊断] 当前 yaw={math.degrees(curr_yaw):.1f}°, '
-                f'扫␋计={math.degrees(self.rotation_accumulated):.0f}°, '
+                f'[旋转诊断] 扫描朝向={math.degrees(scan_yaw):.1f}°, '
+                f'累计={math.degrees(self.rotation_accumulated):.0f}°, '
                 f'odom位置=({self.current_odom.pose.pose.position.x:.2f}, '
                 f'{self.current_odom.pose.pose.position.y:.2f}), '
                 f'已保存{len(self.saved_scans)}帧'
             )
-
-        # 累积旋转角度
-        delta = abs(self._norm_angle(curr_yaw - self.rotation_start_yaw))
-        self.rotation_start_yaw = curr_yaw
-        self.rotation_accumulated += delta
 
         # 定时保存帧
         now = self.get_clock().now()
@@ -298,11 +315,11 @@ class ScanCollector(Node):
             self._save_current_scan()
             self.last_save_time = now
 
-        # 判断旋转完成
-        if self.rotation_accumulated >= self.rotation_total_rad:
+        # 判断旋转完成（rotation_accumulated 带符号，用绝对值比较）
+        if abs(self.rotation_accumulated) >= self.rotation_total_rad:
             self.cmd_vel_pub.publish(Twist())  # 停止
             self._save_current_scan()  # 保存最后一帧
-            self.get_logger().info(f'[旋转] 完成！已转 {math.degrees(self.rotation_accumulated):.0f}°, '
+            self.get_logger().info(f'[旋转] 完成！已转 {math.degrees(abs(self.rotation_accumulated)):.0f}°, '
                                    f'共保存 {len(self.saved_scans)} 帧')
             if self.enable_explore:
                 self.phase = 'explore'
@@ -336,9 +353,11 @@ class ScanCollector(Node):
                 self._save_current_scan()
                 return
 
-            # 计算目标里程计位姿（相对于机器人当前位置+朝向）
+            # 用 TF yaw 计算目标（odom yaw 不跟踪身体旋转，与旋转阶段一致）
             curr_pos = self.current_odom.pose.pose.position
-            curr_yaw = self._quat_to_yaw(self.current_odom.pose.pose.orientation)
+            curr_yaw = self._get_current_scan_tf_yaw()
+            if curr_yaw is None:
+                return  # TF 还没就绪，等待
 
             tx = curr_pos.x + self.explore_radius * math.cos(curr_yaw + direction)
             ty = curr_pos.y + self.explore_radius * math.sin(curr_yaw + direction)
@@ -373,10 +392,12 @@ class ScanCollector(Node):
             self._reset_motion()
             return
 
-        # 获取当前位置和目标
+        # 获取当前位置和目标（用 TF yaw，与旋转阶段一致）
         tx, ty = self.target_odom_pose
         curr_pos = self.current_odom.pose.pose.position
-        curr_yaw = self._quat_to_yaw(self.current_odom.pose.pose.orientation)
+        curr_yaw = self._get_current_scan_tf_yaw()
+        if curr_yaw is None:
+            return  # TF 还没就绪
 
         dx = tx - curr_pos.x
         dy = ty - curr_pos.y
@@ -407,13 +428,13 @@ class ScanCollector(Node):
 
         # ── 核心策略：旋转优先 ──
         # 非完整约束机器人必须先对准目标方向才能有效前进。
-        # 阈值 0.25 rad (~14°)：低于此才允许前进，否则原地旋转。
-        ROTATE_THRESHOLD = 0.25  # rad
+        # 阈值 0.10 rad (~5.7°)：低于此才允许前进，否则原地旋转。
+        ROTATE_THRESHOLD = 0.10  # rad
 
         if yaw_error_abs > ROTATE_THRESHOLD:
             # 原地旋转，不前进
-            wz = 0.6 * yaw_error                  # P控制（比之前更激进）
-            wz = max(-0.4, min(0.4, wz))          # 限幅稍提高
+            wz = 0.8 * yaw_error                  # P控制（提升增益）
+            wz = max(-0.5, min(0.5, wz))          # 限幅 0.5 rad/s
             cmd = Twist()
             cmd.angular.z = wz
             self.cmd_vel_pub.publish(cmd)
@@ -424,8 +445,8 @@ class ScanCollector(Node):
         vx = 0.2                                      # 恒速前进
 
         # yaw 纠偏（漂移补偿）
-        wz = 0.8 * yaw_error                          # 较强纠偏
-        wz = max(-0.35, min(0.35, wz))
+        wz = 1.0 * yaw_error                          # 更强纠偏
+        wz = max(-0.4, min(0.4, wz))
 
         cmd = Twist()
         cmd.linear.x = vx
@@ -497,21 +518,14 @@ class ScanCollector(Node):
             self.get_logger().warn(f'[保存] TF 查询失败 ({self.scan_frame_id}→{self.target_frame}): {e}')
             return
 
-    # ────── 完成 ──────
     # ────── Scan-to-Map 配准算法 ──────
     def _build_likelihood_field(self):
-        """从 OccupancyGrid 构建障碍物距离场
-
-        使用 cv2.distanceTransform 计算每个像素到最近障碍物的距离（米）。
-        用于评分函数查询扫描点到地图墙壁的接近程度。
-        """
+        """从 OccupancyGrid 构建障碍物距离场"""
         if self.map_data is None or self.map_info is None:
             return None, None
 
         obs = (self.map_data == 100).astype(np.uint8)
-        # distanceTransform: 非零像素（非障碍物）到最近零像素（障碍物）的距离
         dist_px = cv2.distanceTransform(1 - obs, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
-        # 转换为米
         dist_m = dist_px * self.map_info.resolution
         self.get_logger().info(
             f'[似然场] 构建完成: {self.map_info.width}x{self.map_info.height}, '
@@ -520,26 +534,12 @@ class ScanCollector(Node):
         return dist_m, None
 
     def _world_to_pixel(self, x, y):
-        """世界坐标 (m) → 像素坐标 (row, col)"""
         res = self.map_info.resolution
         col = int((x - self.map_info.origin.position.x) / res)
         row = int(self.map_info.height - 1 - (y - self.map_info.origin.position.y) / res)
         return row, col
 
     def _score_points_at_pose(self, points, x, y, yaw):
-        """向量化评分：近墙命中率 + 距离中位数（双指标）
-
-        核心思想：激光扫描点本质上是"打在墙面上的点"，
-        正确匹配位置应该让**大量点同时贴近地图障碍物边缘**。
-        空白区域（无墙）的命中率≈0，自然被淘汰。
-
-        Args:
-            points: (N,2) numpy — 归一化后的扫描点（相对点云中心）
-            x, y, yaw: 候选位姿（map frame 中点云中心的位置和朝向）
-
-        Returns:
-            score: float（越高越好，正值=有足够近墙命中）
-        """
         if self.likelihood_field is None:
             return -1e9
 
@@ -547,12 +547,10 @@ class ScanCollector(Node):
         if N < 10:
             return -1e9
 
-        # ── 1. 刚体变换（向量化）──
         cos_y, sin_y = math.cos(yaw), math.sin(yaw)
         wx = cos_y * points[:, 0] - sin_y * points[:, 1] + x
         wy = sin_y * points[:, 0] + cos_y * points[:, 1] + y
 
-        # ── 2. 世界坐标 → 像素坐标（向量化）──
         res = self.map_info.resolution
         ox = self.map_info.origin.position.x
         oy = self.map_info.origin.position.y
@@ -561,37 +559,27 @@ class ScanCollector(Node):
         cols_f = (wx - ox) / res
         rows_f = H - 1 - (wy - oy) / res
 
-        # ── 3. 边界掩码 ──
         valid = (cols_f >= 0) & (cols_f < W - 0.5) & (rows_f >= 0) & (rows_f < H - 0.5)
 
-        # ── 4. 查询距离场（仅有效点）──
         n_valid = np.sum(valid)
-        if n_valid < N * 0.3:  # 少于30%的点在地图范围内 → 无效
+        if n_valid < N * 0.3:
             return -1e9
 
         cols_i = np.clip(cols_f[valid].astype(np.int32), 0, W - 1)
         rows_i = np.clip(rows_f[valid].astype(np.int32), 0, H - 1)
         dists = self.likelihood_field[rows_i, cols_i]
 
-        # ── 5. 双指标评分 ──
-        hit_threshold = 0.5      # "近墙"判定距离 m
-        good_threshold = 1.5     # "良好匹配"距离 m
+        hit_threshold = 0.5
+        good_threshold = 1.5
 
-        n_hits = np.sum(dists < hit_threshold)     # 近墙命中数
-        n_good = np.sum(dists < good_threshold)     # 良好匹配数
-        hit_rate = n_hits / N                       # 近墙命中率
-        good_rate = n_good / N                      # 良好匹配率
+        n_hits = np.sum(dists < hit_threshold)
+        n_good = np.sum(dists < good_threshold)
+        hit_rate = n_hits / N
+        good_rate = n_good / N
 
-        # 距离统计
         med_dist = float(np.median(dists))
         p90_dist = float(np.percentile(dists, 90))
-        mean_dist = float(np.mean(dists))
 
-        # 综合评分公式:
-        #   主项: hit_rate * 100（命中率驱动，上限100）
-        #   副项: good_rate * 20（良好率加分）
-        #   惩罚: -med_dist（中位数距离越小越好）
-        #   惩罚: -p90_dist * 0.3（90百分位惩罚离群点）
         score = (
             hit_rate * 100.0 +
             good_rate * 20.0 -
@@ -601,26 +589,11 @@ class ScanCollector(Node):
 
         return score
 
-    # ────── Hu矩 形状匹配 ──────
     def _points_to_scan_contour(self, points, img_size=200, phys_size_m=20.0):
-        """将扫描点渲染为封闭多边形，提取外轮廓用于Hu矩匹配
-
-        核心逻辑：360° LiDAR 扫描点按角度排序后连接→封闭多边形→填充→提取轮廓。
-        该轮廓的 Hu 矩对旋转/平移/缩放不变，适合与地图局部房间轮廓做形状比较。
-
-        Args:
-            points: (N,2) numpy — 已居中的扫描点
-            img_size: 渲染图像边长 px
-            phys_size_m: 图像覆盖的物理尺寸 m
-
-        Returns:
-            (contour, img) — OpenCV contour 和渲染后的二值图像
-        """
         meters_per_px = phys_size_m / img_size
         img = np.zeros((img_size, img_size), dtype=np.uint8)
         half = img_size // 2
 
-        # 按角度排序（LiDAR 扫描点天然有序，但降采样后顺序可能被打乱）
         angles = np.arctan2(points[:, 1], points[:, 0])
         sorted_idx = np.argsort(angles)
 
@@ -635,12 +608,9 @@ class ScanCollector(Node):
             return None, img
 
         pts_arr = np.array(pts_px, dtype=np.int32)
-
-        # 画轮廓线 + 填充内部
         cv2.polylines(img, [pts_arr], isClosed=True, color=255, thickness=1)
         cv2.fillPoly(img, [pts_arr], 255)
 
-        # 形态学闭操作：填补小间隙
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         img = cv2.morphologyEx(img, cv2.MORPH_CLOSE, kernel)
 
@@ -651,24 +621,13 @@ class ScanCollector(Node):
         return max(contours, key=cv2.contourArea), img
 
     def _extract_map_contour_at(self, x, y, phys_size_m=20.0):
-        """在地图位置 (x,y) 周围提取房间墙面轮廓（用于 Hu 矩比较）
-
-        Args:
-            x, y: 地图坐标系下的候选位置 (m)
-            phys_size_m: 提取窗口物理尺寸 (m)，与 scan_contour 窗口一致
-
-        Returns:
-            (contour, img) — OpenCV contour 和提取窗口的二值图
-        """
         res = self.map_info.resolution
         half_w_px = max(int(phys_size_m / 2 / res), 10)
 
-        # 世界坐标 → 像素中心
         cx_px = int((x - self.map_info.origin.position.x) / res)
         cy_px = int(self.map_info.height - 1 -
                       (y - self.map_info.origin.position.y) / res)
 
-        # 窗口边界
         r1 = max(0, cy_px - half_w_px)
         r2 = min(self.map_info.height, cy_px + half_w_px)
         c1 = max(0, cx_px - half_w_px)
@@ -680,10 +639,9 @@ class ScanCollector(Node):
         roi = self.map_data[r1:r2, c1:c2]
         wall_binary = (roi == 100).astype(np.uint8) * 255
 
-        if np.sum(wall_binary) < 50:  # 墙面太少 → 空白区域
+        if np.sum(wall_binary) < 50:
             return None, None
 
-        # 形态学：膨胀连接邻近墙面断点
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
         wall_binary = cv2.dilate(wall_binary, kernel, iterations=2)
         wall_binary = cv2.erode(wall_binary, kernel, iterations=1)
@@ -693,25 +651,18 @@ class ScanCollector(Node):
         if len(contours) == 0:
             return None, wall_binary
 
-        # 取面积最大的轮廓（主房间墙壁）
         main_contour = max(contours, key=cv2.contourArea)
 
-        # 过滤太小或太大的轮廓
-        min_area = 20   # 至少 20 px²
-        if cv2.contourArea(main_contour) < min_area:
+        if cv2.contourArea(main_contour) < 20:
             return None, wall_binary
 
         return main_contour, wall_binary
 
     def _get_odom_to_map_transform(self):
-        """查询最新的 odom → map 变换（用于把扫描数据从odom转到map坐标系）
-
-        Returns:
-            (odom_x_in_map, odom_y_in_map, odom_yaw_in_map) 或 None 失败时
-        """
+        map_frame = self.map_frame_id if hasattr(self, 'map_frame_id') and self.map_frame_id else 'map'
         try:
             t = self.tf_buffer.lookup_transform(
-                'map', self.target_frame, rclpy.time.Time(),
+                map_frame, self.target_frame, rclpy.time.Time(),
                 timeout=rclpy.duration.Duration(seconds=1.0))
             tx = t.transform.translation.x
             ty = t.transform.translation.y
@@ -724,7 +675,6 @@ class ScanCollector(Node):
             return None
 
     def _merge_all_scan_points(self):
-        """将所有保存的扫描帧合并为一个点云（odom/target_frame 系）"""
         all_points = []
         for saved in self.saved_scans:
             pts = self._scan_to_world_xy(saved)
@@ -733,28 +683,20 @@ class ScanCollector(Node):
         if not all_points:
             return np.empty((0, 2))
         merged = np.vstack(all_points)
-        # 降采样加速匹配
         step = max(1, len(merged) // 500)
         return merged[::step]
 
     def _merge_all_scan_points_map_frame(self):
-        """将所有扫描帧合并并变换到 map 坐标系
-
-        流程：scan_frame → odom(通过保存的TF) → map(通过最新TF)
-        """
         tf_info = self._get_odom_to_map_transform()
         if tf_info is None:
             self.get_logger().warn('[配准] 无法获取 odom→map，回退到 odom 系点云')
             return self._merge_all_scan_points(), None
 
         odom_x, odom_y, odom_yaw = tf_info
-
-        # 先得到 odom 系下的合并点云
         odom_points = self._merge_all_scan_points()
         if len(odom_points) == 0:
             return np.empty((0, 2)), tf_info
 
-        # odom → map 刚体变换
         cos_o, sin_o = math.cos(odom_yaw), math.sin(odom_yaw)
         mx = cos_o * odom_points[:, 0] - sin_o * odom_points[:, 1] + odom_x
         my = sin_o * odom_points[:, 0] + cos_o * odom_points[:, 1] + odom_y
@@ -766,20 +708,8 @@ class ScanCollector(Node):
         return map_points, tf_info
 
     def _scan_to_map_match(self):
-        """Scan-to-Map 图形配准：Hu矩粗定位 + 似然场精搜
-
-        两阶段策略，利用 Hu 矩的旋转不变性大幅加速：
-          Phase 1 (Hu矩粗搜): 逐位置网格，用 cv2.matchShapes 比较扫描轮廓与地图房间轮廓。
-                             Hu 矩天然旋转/缩放不变 → 不需要遍历角度，极快。
-          Phase 2 (似然场精搜): 在 Top-K 粗搜候选位置，遍历角度+细网格，用似然场精确评分。
-
-        Returns:
-            best_pose: (x, y, yaw) in map frame, 或 None 失败时
-            match_score: 最佳评分值
-        """
         self.get_logger().info('[配准] 开始 Scan-to-Map 配准 (Hu矩粗搜 + 似然场精搜)...')
 
-        # ── 0. 准备 ──
         self.likelihood_field, _ = self._build_likelihood_field()
         if self.likelihood_field is None:
             self.get_logger().error('[配准] 地图不可用')
@@ -791,7 +721,6 @@ class ScanCollector(Node):
             return None, -1e9
         self.get_logger().info(f'[配准] 合并点云: {len(scan_points_odom)} 个点')
 
-        # 居中归一化
         cx_odom = scan_points_odom[:, 0].mean()
         cy_odom = scan_points_odom[:, 1].mean()
         centered_pts = scan_points_odom.copy()
@@ -800,11 +729,9 @@ class ScanCollector(Node):
 
         t0 = time.time()
 
-        # ── 1. 预计算扫描轮廓（Hu矩用）──
         scan_extent = max(
             centered_pts[:, 0].max() - centered_pts[:, 0].min(),
             centered_pts[:, 1].max() - centered_pts[:, 1].min())
-        # 窗口至少 15m，确保扫描轮廓与地图房间有足够上下文比较
         scan_window_m = max(scan_extent * 1.5, 15.0)
 
         scan_contour, _ = self._points_to_scan_contour(
@@ -822,11 +749,8 @@ class ScanCollector(Node):
             f'[配准] 扫描轮廓: 窗口={scan_window_m:.1f}m, '
             f'面积={scan_area_px:.0f}px², 凸度={scan_solidity:.2f}')
 
-        # ══════════════════════════════════════════════════════════════
-        # Phase 1: Hu矩粗搜 — 只搜位置，不搜角度 (Hu矩旋转不变)
-        # ══════════════════════════════════════════════════════════════
-        coarse_step_m = 1.5   # 位置采样步长 m（比之前更密，但免去角度乘数）
-        n_keep = 5             # 保留 Top-K 进入 Phase 2
+        coarse_step_m = 1.5
+        n_keep = 5
 
         res = self.map_info.resolution
         map_w_m = self.map_info.width * res
@@ -843,10 +767,7 @@ class ScanCollector(Node):
             f'网格 {len(xs_coarse)}x{len(ys_coarse)}={n_positions} 位置 '
             f'(窗口={scan_window_m:.1f}m, 免角度遍历)')
 
-        # Top-K 小顶堆: (score, x, y)
-        # score = -matchShapes距离 → 越大越好 → 用小顶堆保留最小的K个→K个最好的
-        top_candidates = []  # [(score, x, y), ...] 升序, 保留最好的 K 个
-
+        top_candidates = []
         count_hu = 0
         for ax_val in xs_coarse:
             for ay_val in ys_coarse:
@@ -856,24 +777,21 @@ class ScanCollector(Node):
                 if map_contour is None:
                     continue
 
-                # matchShapes: 越小越相似 (I2方式用Hu矩不变量)
                 dist = cv2.matchShapes(scan_contour, map_contour,
                                        cv2.CONTOURS_MATCH_I2, 0)
 
-                # 额外过滤: 轮廓面积差异太大 → 惩罚
                 map_area = cv2.contourArea(map_contour)
                 area_ratio = min(map_area, scan_area_px) / max(map_area, scan_area_px, 1.0)
                 penalty = (1.0 - area_ratio) * 2.0
-                score = -(dist + penalty)  # 越高越好
+                score = -(dist + penalty)
 
                 if len(top_candidates) < n_keep:
                     top_candidates.append((score, ax_val, ay_val))
-                    top_candidates.sort(key=lambda x: x[0])  # 升序
+                    top_candidates.sort(key=lambda x: x[0])
                 elif score > top_candidates[0][0]:
                     top_candidates[0] = (score, ax_val, ay_val)
                     top_candidates.sort(key=lambda x: x[0])
 
-                # 进度日志
                 if count_hu % 200 == 0:
                     elapsed = time.time() - t0
                     self.get_logger().info(
@@ -885,7 +803,6 @@ class ScanCollector(Node):
             self.get_logger().warn('[配准] Hu粗搜无有效候选（地图无房间轮廓？）')
             return None, -1e9
 
-        # 排序从最好到最差
         top_candidates.sort(key=lambda x: x[0], reverse=True)
 
         self.get_logger().info(
@@ -895,13 +812,10 @@ class ScanCollector(Node):
             self.get_logger().info(
                 f'  Hu #{rank}: score={s:.3f}, map=({x:.2f}, {y:.2f})')
 
-        # ══════════════════════════════════════════════════════════════
-        # Phase 2: 似然场精搜 — 在 Top-K 位置做全角度+细网格搜索
-        # ══════════════════════════════════════════════════════════════
-        angle_step_deg = 10.0   # 角度步长 °
-        n_angles = int(360.0 / angle_step_deg)  # 36 个角度
-        pos_radius_m = 2.0      # 位置微调半径 m
-        n_pos_fine = 7          # 位置细搜格点数（7x7=49个点）
+        angle_step_deg = 10.0
+        n_angles = int(360.0 / angle_step_deg)
+        pos_radius_m = 2.0
+        n_pos_fine = 7
 
         best_score = -1e9
         best_pose = None
@@ -944,7 +858,6 @@ class ScanCollector(Node):
             f'最佳=({full_fx:.2f}, {full_fy:.2f}, {math.degrees(fyaw):.1f}°), '
             f'score={best_score:.2f}')
 
-        # Top-5 精搜候选
         all_fine_results.sort(key=lambda x: x[0], reverse=True)
         for rank in range(min(5, len(all_fine_results))):
             s, x, y, yaw = all_fine_results[rank]
@@ -957,16 +870,8 @@ class ScanCollector(Node):
         return (full_fx, full_fy, fyaw), best_score
 
     def _plot_scan_on_map(self):
-        """将扫描数据通过图形配准放到地图正确位置，画红框标区域+机器人位置
-
-        流程：
-          1. 调用 _scan_to_map_match() 做似然场全局搜索
-          2. 用匹配结果将 odom 系点云转到 map 系
-          3. 地图背景 + 扫描数据叠加 + 红色边界框 + 机器人位置标记
-        """
         self.get_logger().info('[可视化] 开始 Scan-on-Map 图形配准标注...')
 
-        # ── 0. 前置检查 ──
         if self.map_data is None or self.map_info is None:
             fig, ax = plt.subplots(figsize=(10, 8))
             ax.text(0.5, 0.5, '无地图数据\n请确认 SLAM / map_server 正在运行',
@@ -978,7 +883,6 @@ class ScanCollector(Node):
             self.get_logger().warn('[可视化] 无地图数据')
             return None
 
-        # ── 1. 图形配准（两阶段全局搜索）──
         match_result, score = self._scan_to_map_match()
         if match_result is None:
             fig, ax = plt.subplots(figsize=(10, 8))
@@ -993,36 +897,29 @@ class ScanCollector(Node):
 
         robot_x, robot_y, robot_yaw = match_result
 
-        # ── 2. 用配准结果将点云转到 map 系 ──
         odom_points = self._merge_all_scan_points()
         if len(odom_points) == 0:
             self.get_logger().warn('[可视化] 无扫描数据')
             return None
 
-        # 点云中心（与 _scan_to_map_match 中的归一化一致）
         cx_odom = odom_points[:, 0].mean()
         cy_odom = odom_points[:, 1].mean()
         centered = odom_points.copy()
         centered[:, 0] -= cx_odom
         centered[:, 1] -= cy_odom
 
-        # 用配准的 (robot_x, robot_y, robot_yaw) 变换到 map 系
         cos_r, sin_r = math.cos(robot_yaw), math.sin(robot_yaw)
-        # 旋转 + 平移
         rx = cos_r * centered[:, 0] - sin_r * centered[:, 1]
         ry = sin_r * centered[:, 0] + cos_r * centered[:, 1]
         map_pts_x = rx + robot_x
         map_pts_y = ry + robot_y
         map_pts = np.stack([map_pts_x, map_pts_y], axis=1)
 
-        # 也记录 TF 位置用于对比标注
         tf_info = self._get_odom_to_map_transform()
 
-        # ── 3. 绘制 ──
         fig, ax = plt.subplots(figsize=(14, 12))
         ax.set_aspect('equal')
 
-        # 地图背景
         map_display = np.zeros((self.map_info.height, self.map_info.width, 3), dtype=np.float32)
         map_display[self.map_data == 0] = [1.0, 1.0, 1.0]
         map_display[self.map_data == 100] = [0.0, 0.0, 0.0]
@@ -1034,11 +931,9 @@ class ScanCollector(Node):
                   origin_y, origin_y + self.map_info.height * res]
         ax.imshow(map_display, origin='lower', extent=extent)
 
-        # 扫描点云（绿色半透明）
         ax.scatter(map_pts[:, 0], map_pts[:, 1], s=2, c='lime', alpha=0.6,
                    edgecolors='none', label=f'Scan Data ({len(map_pts)} pts)')
 
-        # ── 4. 红色边界框（包围所有扫描点）──
         x_min, x_max = map_pts[:, 0].min(), map_pts[:, 0].max()
         y_min, y_max = map_pts[:, 1].min(), map_pts[:, 1].max()
         pad = 0.5
@@ -1056,11 +951,9 @@ class ScanCollector(Node):
                 va='bottom', ha='left',
                 bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7))
 
-        # ── 5. 机器人位置（配准结果）──
         ax.plot(robot_x, robot_y, 'rX', markersize=20, markeredgewidth=4,
                 zorder=15, label=f'Robot (matched) ({robot_x:.2f}, {robot_y:.2f})')
 
-        # 朝向箭头
         arrow_len = 2.0
         ax.arrow(robot_x, robot_y,
                  arrow_len * math.cos(robot_yaw),
@@ -1068,7 +961,6 @@ class ScanCollector(Node):
                  head_width=0.4, head_length=0.25,
                  fc='red', ec='darkred', linewidth=2.5, zorder=15)
 
-        # 机器人标签
         yaw_deg = math.degrees(robot_yaw)
         if yaw_deg < 0: yaw_deg += 360
         ax.annotate(f'({robot_x:.1f}, {robot_y:.1f})\nyaw={yaw_deg:.0f}°\nscore={score:.1f}',
@@ -1076,13 +968,11 @@ class ScanCollector(Node):
                     fontsize=10, color='darkred', fontweight='bold',
                     arrowprops=dict(arrowstyle='->', color='darkred', lw=1.5))
 
-        # ── 如果 TF 可用，用蓝色标记 TF 位置作为对比 ──
         if tf_info is not None:
             tf_x, tf_y, tf_yaw = tf_info
             ax.plot(tf_x, tf_y, 'b+', markersize=18, markeredgewidth=3,
                     zorder=14, label=f'TF (drifted) ({tf_x:.2f}, {tf_y:.2f})')
 
-            # TF 朝向箭头（蓝色）
             ax.arrow(tf_x, tf_y,
                      arrow_len * math.cos(tf_yaw),
                      arrow_len * math.sin(tf_yaw),
@@ -1096,7 +986,6 @@ class ScanCollector(Node):
                 f'[对比] 配准 vs TF: 偏差 Δ={dist_err:.2f}m '
                 f'(TF→配准: dx={dx:.2f}m, dy={dy:.2f}m)')
 
-        # ── 6. 视图范围：以机器人为中心 ──
         view_margin = 3.0
         ax_xlim = max(abs(x_max - robot_x), abs(x_min - robot_x)) + view_margin
         ax_ylim = max(abs(y_max - robot_y), abs(y_min - robot_y)) + view_margin
@@ -1123,21 +1012,10 @@ class ScanCollector(Node):
         return match_result
 
     def _export_debug_data(self):
-        """导出调试数据到 npz 文件，供离线算法测试
-
-        导出内容:
-          - scan_points_odom: (N,2) 合并后的扫描点云（odom系）
-          - map_data: (H,W) 占据栅格地图
-          - map_info: dict {resolution, width, height, origin_x, origin_y}
-          - tf_odom_to_map: (x, y, yaw) odom→map 变换（真实值，用于验证）
-          - saved_scans_raw: list of dict 原始帧数据
-        """
         export_path = os.path.join(self.output_dir, 'debug_match_data.npz')
 
-        # 1. 扫描点云 (odom系)
         scan_pts = self._merge_all_scan_points()
 
-        # 2. 地图信息
         mi = self.map_info
         map_info_dict = {
             'resolution': mi.resolution,
@@ -1147,19 +1025,16 @@ class ScanCollector(Node):
             'origin_y': mi.origin.position.y,
         }
 
-        # 3. odom→map TF（真实值）
         tf_info = self._get_odom_to_map_transform()
         tf_arr = np.array(tf_info) if tf_info else np.array([0, 0, 0])
 
-        # 4. 保存每帧的TF和scan参数
         n_frames = len(self.saved_scans)
-        frame_tfs = np.zeros((n_frames, 3))  # x, y, yaw
+        frame_tfs = np.zeros((n_frames, 3))
         frame_ranges_list = []
         for i, s in enumerate(self.saved_scans):
             frame_tfs[i] = [s['tf_x'], s['tf_y'], s['tf_yaw']]
             frame_ranges_list.append(s['ranges'])
 
-        # 保存为 npz（支持 numpy 数组和 python 对象混存）
         np.savez_compressed(
             export_path,
             scan_points_odom=scan_pts,
@@ -1171,7 +1046,6 @@ class ScanCollector(Node):
             map_origin_y=np.float64(map_info_dict['origin_y']),
             tf_odom_to_map=tf_arr,
             frame_tfs=frame_tfs,
-            # 用 pickle 保存非数组数据
             frame_angle_min=self.saved_scans[0]['angle_min'],
             frame_angle_increment=self.saved_scans[0]['angle_increment'],
             **{f'frame_ranges_{i}': np.array(r, dtype=np.float32)
@@ -1186,7 +1060,15 @@ class ScanCollector(Node):
             f'{n_frames}帧)')
 
     def _finish(self):
-        self.cmd_vel_pub.publish(Twist())
+        if self._finished:  # 防重入（Ctrl+C 可能导致 _finish() 被 main() 多次调用）
+            return
+        self._finished = True
+        # 停止机器人运动（上下文可能已关闭，容错处理）
+        try:
+            if rclpy.ok():
+                self.cmd_vel_pub.publish(Twist())
+        except Exception:
+            pass
         self.phase = 'done'
         self.get_logger().info(f'[完成] 共采集 {len(self.saved_scans)} 帧')
 
@@ -1205,7 +1087,7 @@ class ScanCollector(Node):
                     self.get_logger().info(
                         f'[TF定位] 机器人在地图中的位姿: '
                         f'x={bx:.2f}m, y={by:.2f}m, yaw={math.degrees(byaw):.1f}°')
-            except Exception as e:
+            except (Exception, KeyboardInterrupt) as e:
                 self.get_logger().warn(f'[可视化] scan_on_map 生成失败: {e}')
         else:
             if len(self.saved_scans) < 3:
@@ -1215,12 +1097,15 @@ class ScanCollector(Node):
 
         self.get_logger().info(f'[完成] 结果图片已保存到 {self.output_dir}/scan_on_map.png')
         self.get_logger().info('[完成] 节点即将退出')
-        # 延迟退出确保日志输出
-        self.create_timer(0.5, lambda: rclpy.shutdown())
+        # 延迟退出确保日志输出（上下文可能已关闭，容错）
+        try:
+            if rclpy.ok():
+                self.create_timer(0.5, lambda: rclpy.shutdown())
+        except Exception:
+            pass
 
     # ────── 图片生成 ──────
     def _reconstruct_scan(self, saved):
-        """从保存的数据重建 FakeScan 对象"""
         class FakeScan:
             pass
         s = FakeScan()
@@ -1232,17 +1117,11 @@ class ScanCollector(Node):
         return s
 
     def _scan_to_world_xy(self, saved):
-        """将一帧 scan 的点变换到目标坐标系下（使用 TF 变换矩阵）
-
-        通过 TF 查询得到的 scan_frame → target_frame 刚体变换，
-        自动处理任意坐标系关系（本地/全局），无需手动判断。
-        """
         scan = self._reconstruct_scan(saved)
-        points = self._scan_to_xy(scan)  # scan frame 下的点（原点=frame原点）
+        points = self._scan_to_xy(scan)
         if len(points) == 0:
             return np.empty((0, 2))
 
-        # 使用保存的 TF 变换做刚体变换: R * p + t
         yaw = saved['tf_yaw']
         cos_y, sin_y = math.cos(yaw), math.sin(yaw)
         rot = np.array([[cos_y, -sin_y], [sin_y, cos_y]])
@@ -1254,13 +1133,10 @@ class ScanCollector(Node):
     def _generate_all_images(self):
         for i, saved in enumerate(self.saved_scans):
             scan = self._reconstruct_scan(saved)
-            # 单帧图保持不变（只画当前帧）
             self._plot_single_scan(scan, i)
             if self.map_data is not None and self.map_info is not None:
-                # scan_with_map: 右侧叠加 0~i 所有帧的历史数据
                 self._plot_scan_with_map(i)
 
-        # 生成多帧叠加总览
         if len(self.saved_scans) > 1:
             self._plot_overlay()
 
@@ -1273,7 +1149,6 @@ class ScanCollector(Node):
             ax.scatter(points[:, 0], points[:, 1], s=1, c='blue', alpha=0.6, edgecolors='none')
         ax.plot(0, 0, 'r+', markersize=15, markeredgewidth=3)
 
-        # 方向线
         for deg in range(-180, 181, 30):
             rad = math.radians(deg)
             ax.plot([0, 8 * math.cos(rad)], [0, 8 * math.sin(rad)], 'gray', linewidth=0.3, alpha=0.3)
@@ -1294,11 +1169,9 @@ class ScanCollector(Node):
         self.get_logger().info(f'[图片] {filepath}')
 
     def _plot_scan_with_map(self, index):
-        """生成 scan vs map 对比图，右侧子图在 odom 世界坐标系下叠加 0~index 所有帧"""
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 8))
         ax1.set_aspect('equal')
 
-        # ── 左侧：地图（不变）──
         map_display = np.zeros((self.map_info.height, self.map_info.width, 3), dtype=np.float32)
         map_display[self.map_data == 0] = [1.0, 1.0, 1.0]
         map_display[self.map_data == 100] = [0.0, 0.0, 0.0]
@@ -1314,13 +1187,9 @@ class ScanCollector(Node):
         ax1.set_xlabel('X (m)')
         ax1.set_ylabel('Y (m)')
 
-        # ── 右侧：累积叠加 0~index 所有帧（odom 世界坐标）──
         ax2.set_aspect('equal')
-
         n_frames = index + 1
         colors = plt.cm.cool(np.linspace(0.15, 1.0, max(n_frames, 1)))
-
-        # 收集所有帧的世界坐标点，用于自动计算范围
         all_world_pts = []
 
         for i in range(n_frames):
@@ -1333,7 +1202,6 @@ class ScanCollector(Node):
                 ax2.scatter(pts[:, 0], pts[:, 1], s=sz,
                             color=colors[i], alpha=alpha, edgecolors='none')
 
-            # 绘制每帧的机器人朝向箭头
             arrow_len = 0.3
             ax2.arrow(saved['odom_x'], saved['odom_y'],
                       arrow_len * math.cos(saved['odom_yaw']),
@@ -1341,19 +1209,16 @@ class ScanCollector(Node):
                       color=colors[i], width=0.02, alpha=0.4,
                       head_width=0.06, head_length=0.06)
 
-        # 当前帧用红色醒目标记
         current_pts = self._scan_to_world_xy(self.saved_scans[index])
         if len(current_pts) > 0:
             ax2.scatter(current_pts[:, 0], current_pts[:, 1], s=1.5,
                         c='red', alpha=0.8, edgecolors='none',
                         label=f'Frame #{index:03d} (current)')
 
-        # 机器人位置（第一帧的位置作为参考原点标记）
         first_pose = self.saved_scans[0]
         ax2.plot(first_pose['odom_x'], first_pose['odom_y'], 'g+',
                  markersize=15, markeredgewidth=3)
 
-        # 自动调整坐标范围以包含所有点
         if all_world_pts:
             combined = np.vstack(all_world_pts)
             cx, cy = combined[:, 0].mean(), combined[:, 1].mean()
@@ -1387,7 +1252,6 @@ class ScanCollector(Node):
                 ax.scatter(pts[:, 0], pts[:, 1], s=0.5, color=colors[i],
                            alpha=0.4, edgecolors='none')
 
-            # 绘制每帧的机器人朝向箭头（所有帧都有 odom 位姿）
             arrow_len = 0.3
             ax.arrow(saved['odom_x'], saved['odom_y'],
                      arrow_len * math.cos(saved['odom_yaw']),
@@ -1395,12 +1259,10 @@ class ScanCollector(Node):
                      color=colors[i], width=0.02, alpha=0.5,
                      head_width=0.08, head_length=0.08)
 
-        # 起始位置
         first_pose = self.saved_scans[0]
         ax.plot(first_pose['odom_x'], first_pose['odom_y'], 'r+', markersize=20,
                 markeredgewidth=4, label='Start')
 
-        # 自动范围
         all_pts = [self._scan_to_world_xy(s) for s in self.saved_scans]
         all_pts = [p for p in all_pts if len(p) > 0]
         if all_pts:
@@ -1423,7 +1285,6 @@ class ScanCollector(Node):
         plt.close()
         self.get_logger().info(f'[图片] 叠加图: {filepath}')
 
-        # 也生成地图叠加版
         if self.map_data is not None and self.map_info is not None:
             self._plot_overlay_with_map()
 
@@ -1431,7 +1292,6 @@ class ScanCollector(Node):
         fig, ax = plt.subplots(figsize=(14, 14))
         ax.set_aspect('equal')
 
-        # 地图背景
         map_display = np.zeros((self.map_info.height, self.map_info.width, 3), dtype=np.float32)
         map_display[self.map_data == 0] = [1.0, 1.0, 1.0]
         map_display[self.map_data == 100] = [0.0, 0.0, 0.0]
@@ -1450,7 +1310,6 @@ class ScanCollector(Node):
             if len(pts) > 0:
                 ax.scatter(pts[:, 0], pts[:, 1], s=0.5, color=colors[i],
                            alpha=0.4, edgecolors='none')
-            # 朝向箭头
             arrow_len = 0.3
             ax.arrow(saved['odom_x'], saved['odom_y'],
                      arrow_len * math.cos(saved['odom_yaw']),

@@ -21,7 +21,21 @@ from .icp import icp_match
 from .scoring import (
     score_points, score_pose_raycast, score_pose_wallhit,
     compute_wall_coverage, compute_confidence, local_search_two_stage,
+    build_distance_field, score_distance_field,
+    build_dual_template_maps, dual_template_global_match,
 )
+
+# IndoorPhase 枚举定义在主节点文件中, 这里需要导入才能使用
+try:
+    from auto_initial_pose_calibrator import IndoorPhase
+except ImportError:
+    # 如果作为脚本运行 (不在 ROS 环境中), 定义一份简化的 fallback
+    from enum import Enum
+    class IndoorPhase(Enum):
+        IDLE = 0; BOOT_DELAY = 1; ROTATING_360 = 2; COLLECTING_SUBMAP1 = 3
+        ROUGH_MATCHING = 4; SELECTING_ACTIVE_MOTION = 5; MOVING = 6
+        COLLECTING_SUBMAP2 = 7; FILTERING = 8; DONE = 9
+        PASSIVE_COLLECTING = 10; PASSIVE_MATCHING = 11; ACTIVE_MULTISTEP = 12
 
 
 class ScanMatcher:
@@ -41,7 +55,7 @@ class ScanMatcher:
         """
         if node.likelihood_field is None or node.map_data is None:
             self._logger.error('地图似然场尚未加载，重新等待...')
-            node.indoor_phase = node.IndoorPhase.BOOT_DELAY
+            node.indoor_phase = IndoorPhase.BOOT_DELAY
             return
 
         t0 = time.time()
@@ -54,7 +68,7 @@ class ScanMatcher:
         submap_pts = node._scan_to_points(node.submap1)
         if len(submap_pts) < 10:
             self._logger.error('Submap1 点云为空')
-            node.indoor_phase = node.IndoorPhase.BOOT_DELAY
+            node.indoor_phase = IndoorPhase.BOOT_DELAY
             return
 
         ds = max(1, len(submap_pts) // 800)
@@ -158,7 +172,359 @@ class ScanMatcher:
         if node.quick_mode:
             node._handle_quick_mode_result(submap_pts)
         else:
-            node.indoor_phase = node.IndoorPhase.SELECTING_ACTIVE_MOTION
+            node.indoor_phase = IndoorPhase.SELECTING_ACTIVE_MOTION
+
+    def do_distance_field_global(self, node):
+        """距离场全局匹配（来自 global_match.py 的暴力搜索算法）。
+
+        核心思路:
+          1. 对地图构建原始距离场 (cv2.distanceTransform, 不裁剪)
+          2. 在自由空间中随机采样平移候选位置
+          3. 对所有 (位置 × 角度) 暴力评分
+          4. 对 Top-N 候选做两级局部精修
+          5. 归一化概率 → 写入 node.candidates
+
+        与 do_hierarchical 的区别:
+          - 使用原始距离场评分 (平均像素距离) 而非 Gaussian kernel 似然场
+          - 平移候选来自自由空间随机采样 (而非固定网格)
+          - 角度步长更细 (5° vs 10°)
+        """
+        if node.map_data is None or node._map_ctx is None:
+            self._logger.error('[距离场匹配] 地图数据未加载')
+            node.indoor_phase = IndoorPhase.BOOT_DELAY
+            return
+
+        map_ctx = node._map_ctx
+
+        # 按需构建距离场
+        if map_ctx.dist_field is None:
+            self._logger.info('[距离场匹配] 首次构建原始距离场...')
+            build_distance_field(map_ctx, self._logger)
+
+        if map_ctx.dist_field is None:
+            self._logger.error('[距离场匹配] 距离场构建失败')
+            node.indoor_phase = IndoorPhase.BOOT_DELAY
+            return
+
+        t0 = time.time()
+        res = map_ctx.map_info.resolution
+        ox = map_ctx.map_info.origin.position.x
+        oy = map_ctx.map_info.origin.position.y
+        W = map_ctx.map_info.width
+        H = map_ctx.map_info.height
+
+        # 获取扫描点云
+        submap_pts = node._scan_to_points(node.submap1)
+        if len(submap_pts) < 10:
+            self._logger.error('[距离场匹配] Submap1 点云为空')
+            node.indoor_phase = IndoorPhase.BOOT_DELAY
+            return
+
+        # 降采样扫描点 (最多 500 个点)
+        df_scan_max = getattr(node, 'df_scan_max_points', 500)
+        if len(submap_pts) > df_scan_max:
+            indices = np.random.choice(len(submap_pts), df_scan_max, replace=False)
+            scan_pts = submap_pts[indices]
+        else:
+            scan_pts = submap_pts
+
+        # 获取自由空间像素坐标
+        free_mask = node.map_data == 0
+        y_coords, x_coords = np.where(free_mask)
+
+        n_free = len(x_coords)
+        df_positions = getattr(node, 'df_n_positions', 1000)
+        n_samples = min(df_positions, n_free)
+
+        if n_samples < 10:
+            self._logger.error('[距离场匹配] 自由空间不足')
+            node.indoor_phase = IndoorPhase.BOOT_DELAY
+            return
+
+        # 随机采样自由空间候选位置
+        sample_indices = np.random.choice(n_free, n_samples, replace=False)
+
+        # 角度搜索参数
+        df_angle_step_deg = getattr(node, 'df_angle_step_deg', 5.0)
+        angle_step = np.deg2rad(df_angle_step_deg)
+        angles_to_search = np.arange(-np.pi, np.pi, angle_step)
+
+        self._logger.info(
+            f'[距离场全局匹配] {n_samples} 个位置 × {len(angles_to_search)} 个角度 = '
+            f'{n_samples * len(angles_to_search)} 次评估...')
+
+        # ────── 暴力搜索 ──────
+        all_candidates = []
+        for idx in sample_indices:
+            cx_world = x_coords[idx] * res + ox
+            cy_world = y_coords[idx] * res + oy
+
+            for theta in angles_to_search:
+                score, n_valid = score_distance_field(
+                    scan_pts, cx_world, cy_world, theta, map_ctx)
+                if n_valid > len(scan_pts) * 0.5 and score < float('inf'):
+                    all_candidates.append((score, cx_world, cy_world, theta))
+
+        if not all_candidates:
+            self._logger.error('[距离场匹配] 无有效候选位姿')
+            node.indoor_phase = IndoorPhase.BOOT_DELAY
+            return
+
+        # 排序: 距离越小越好
+        all_candidates.sort(key=lambda x: x[0])
+        self._logger.info(
+            f'[距离场匹配] 粗搜: {len(all_candidates)} 有效, '
+            f'Best dist_score={all_candidates[0][0]:.2f}px')
+
+        # ────── NMS 去冗余 ──────
+        nms_candidates = []
+        nms_dist_thresh = max(res * 3, 0.5)  # 至少 3 像素或 0.5m
+        for sc, cx, cy, theta in all_candidates:
+            dup = any(
+                math.sqrt((cx - nx)**2 + (cy - ny)**2) < nms_dist_thresh
+                and abs(norm_angle(theta - nyaw)) < math.radians(15)
+                for _, nx, ny, nyaw in nms_candidates)
+            if not dup:
+                nms_candidates.append((sc, cx, cy, theta))
+                if len(nms_candidates) >= node.top_n * 3:
+                    break
+
+        # ────── 两级局部精修 (用似然场做精修, 距离场粗搜 + 似然场精修) ──────
+        self._logger.info(
+            f'[距离场匹配] NMS 保留 {len(nms_candidates)} 个候选, '
+            f'开始似然场精修 Top-{min(3, len(nms_candidates))}...')
+
+        map_ctx_dup = node._map_ctx  # 复用现有似然场
+        fine_results = []
+        for _, hx, hy, htheta in nms_candidates[:3]:
+            pose, lf_sc = local_search_two_stage(
+                scan_pts, hx, hy, htheta, map_ctx_dup,
+                radius=2.0, pos_step=0.3, angle_range=12, angle_step=2)
+            fine_results.append((lf_sc, pose[0], pose[1], pose[2]))
+
+        fine_results.sort(key=lambda x: x[0], reverse=True)
+
+        # 去冗余
+        unique_candidates = []
+        for sc, x, y, yaw in fine_results:
+            dup = any(
+                math.sqrt((x - u[1])**2 + (y - u[2])**2) < 0.3
+                and abs(norm_angle(yaw - u[3])) < math.radians(20)
+                for u in unique_candidates)
+            if not dup:
+                unique_candidates.append((sc, x, y, yaw))
+                if len(unique_candidates) >= node.top_n:
+                    break
+
+        # 概率归一化
+        scores_arr = np.array([u[0] for u in unique_candidates])
+        max_sc = np.max(scores_arr)
+        exp_scores = np.exp(scores_arr - max_sc)
+        normalized_probs = exp_scores / np.sum(exp_scores)
+
+        node.candidates = [(float(normalized_probs[i]), u[1], u[2], u[3])
+                          for i, u in enumerate(unique_candidates)]
+
+        elapsed = time.time() - t0
+        self._logger.info(
+            f'[距离场匹配] 完成 ({elapsed:.1f}s)。Top-N:')
+        for i, (prob, x, y, yaw) in enumerate(node.candidates):
+            wall_cov, cov, _ = node._compute_wall_coverage(
+                submap_pts, x, y, yaw)
+            self._logger.info(
+                f'  #{i}: prob={prob:.3f}, ({x:.2f},{y:.2f},{math.degrees(yaw):.1f}deg) '
+                f'wall={100*wall_cov:.0f}% cov={100*cov:.0f}%')
+
+        node._publish_candidates()
+
+        if node.quick_mode:
+            self.handle_quick_mode_result(node, submap_pts)
+        else:
+            node.indoor_phase = IndoorPhase.SELECTING_ACTIVE_MOTION
+
+    def distance_field_first_frame(self, node, frame_pts):
+        """距离场首帧全局搜索 (用于 multistep/passive 的首帧)。
+
+        返回: (best_pose, best_score) 或 (None, float('inf')) 表示失败。
+        best_pose: (x, y, yaw) in map frame, best_score 为似然场评分(越大越好)。
+
+        流程: 距离场粗搜 → NMS → 似然场两级精修。
+        """
+        map_ctx = node._map_ctx
+        if map_ctx.dist_field is None:
+            build_distance_field(map_ctx, self._logger)
+        if map_ctx.dist_field is None:
+            return None, float('inf')
+
+        res = map_ctx.map_info.resolution
+        ox = map_ctx.map_info.origin.position.x
+        oy = map_ctx.map_info.origin.position.y
+
+        # 降采样
+        df_scan_max = getattr(node, 'df_scan_max_points', 500)
+        if len(frame_pts) > df_scan_max:
+            indices = np.random.choice(len(frame_pts), df_scan_max, replace=False)
+            pts_ds = frame_pts[indices]
+        else:
+            pts_ds = frame_pts
+
+        # 自由空间采样
+        free_mask = node.map_data == 0
+        y_coords, x_coords = np.where(free_mask)
+        n_free = len(x_coords)
+        df_positions = getattr(node, 'df_n_positions', 1000)
+        n_samples = min(df_positions, n_free)
+        if n_samples < 10:
+            return None, float('inf')
+        sample_indices = np.random.choice(n_free, n_samples, replace=False)
+
+        df_angle_step_deg = getattr(node, 'df_angle_step_deg', 5.0)
+        angle_step = np.deg2rad(df_angle_step_deg)
+        angles = np.arange(-np.pi, np.pi, angle_step)
+
+        # 距离场粗搜
+        raw_candidates = []
+        for idx in sample_indices:
+            cx_w = x_coords[idx] * res + ox
+            cy_w = y_coords[idx] * res + oy
+            for theta in angles:
+                sc, nv = score_distance_field(pts_ds, cx_w, cy_w, theta, map_ctx)
+                if nv > len(pts_ds) * 0.5 and sc < float('inf'):
+                    raw_candidates.append((sc, cx_w, cy_w, theta))
+
+        if not raw_candidates:
+            return None, float('inf')
+
+        raw_candidates.sort(key=lambda x: x[0])
+        self._logger.info(
+            f'  [DF首帧] 粗搜: {len(raw_candidates)} 有效, '
+            f'best dist={raw_candidates[0][0]:.2f}px')
+
+        # NMS
+        nms_dist = max(res * 3, 0.5)
+        nms_cands = []
+        for sc, cx, cy, theta in raw_candidates:
+            dup = any(
+                math.sqrt((cx - nx)**2 + (cy - ny)**2) < nms_dist
+                and abs(norm_angle(theta - nyaw)) < math.radians(15)
+                for _, nx, ny, nyaw in nms_cands)
+            if not dup:
+                nms_cands.append((sc, cx, cy, theta))
+                if len(nms_cands) >= 16:
+                    break
+
+        # 似然场两级精修 Top-3
+        best_sc = -1e9
+        best_pose = None
+        for _, hx, hy, htheta in nms_cands[:3]:
+            pose, lf_sc = local_search_two_stage(
+                pts_ds, hx, hy, htheta, map_ctx,
+                radius=2.0, pos_step=0.3, angle_range=12, angle_step=2)
+            if lf_sc > best_sc:
+                best_sc = lf_sc
+                best_pose = pose
+
+        return best_pose, best_sc
+
+    # ──────────────────────────────────────────────────────────
+    #  双模板光线投射全局匹配 (来自 global_match2.py)
+    # ──────────────────────────────────────────────────────────
+    def dual_template_first_frame(self, node, frame_pts):
+        """双模板首帧全局搜索 (用于 multistep/passive 的首帧)。
+
+        返回: (best_pose, best_score) 或 (None, float('-inf')) 表示失败。
+        best_pose: (x, y, yaw) in map frame.
+        """
+        map_ctx = node._map_ctx
+        if map_ctx.dt_likelihood_map is None:
+            build_dual_template_maps(map_ctx, self._logger)
+        if map_ctx.dt_likelihood_map is None:
+            self._logger.error('[双模板] 地图构建失败')
+            return None, -float('inf')
+
+        scan_max = getattr(node, 'dt_scan_max_points', 500)
+        coarse_step = getattr(node, 'dt_angle_step_deg', 2.0)
+        fine_step = getattr(node, 'dt_fine_angle_step_deg', 0.5)
+        pw = getattr(node, 'dt_penalty_weight', 3.0)
+
+        return dual_template_global_match(
+            frame_pts, map_ctx,
+            coarse_angle_step_deg=coarse_step,
+            fine_angle_step_deg=fine_step,
+            penalty_weight=pw,
+            scan_max_points=scan_max,
+            logger=self._logger)
+
+    def do_dual_template_global(self, node):
+        """双模板全局匹配 — 主动模式入口点。
+
+        用于替代 do_hierarchical / do_distance_field_global 作为 ROUGH_MATCHING 步骤。
+        核心:
+          1. 构建双模板地图 (似然图 + 射线惩罚图)
+          2. 双模板光线投射全局搜索 (cv2.matchTemplate 全图卷积)
+          3. 写入 node.candidates 并发布可视化
+        """
+        if node.map_data is None or node._map_ctx is None:
+            self._logger.error('[双模板匹配] 地图数据未加载')
+            node.indoor_phase = IndoorPhase.BOOT_DELAY
+            return
+
+        map_ctx = node._map_ctx
+
+        # 按需构建双模板地图
+        if map_ctx.dt_likelihood_map is None:
+            self._logger.info('[双模板匹配] 首次构建双模板地图...')
+            build_dual_template_maps(map_ctx, self._logger)
+
+        if map_ctx.dt_likelihood_map is None:
+            self._logger.error('[双模板匹配] 地图构建失败')
+            node.indoor_phase = IndoorPhase.BOOT_DELAY
+            return
+
+        # 获取扫描点云
+        submap_pts = node._scan_to_points(node.submap1)
+        if len(submap_pts) < 10:
+            self._logger.error('[双模板匹配] Submap1 点云为空')
+            node.indoor_phase = IndoorPhase.BOOT_DELAY
+            return
+
+        scan_max = getattr(node, 'dt_scan_max_points', 500)
+        coarse_step = getattr(node, 'dt_angle_step_deg', 2.0)
+        fine_step = getattr(node, 'dt_fine_angle_step_deg', 0.5)
+        pw = getattr(node, 'dt_penalty_weight', 3.0)
+
+        best_pose, best_score = dual_template_global_match(
+            submap_pts, map_ctx,
+            coarse_angle_step_deg=coarse_step,
+            fine_angle_step_deg=fine_step,
+            penalty_weight=pw,
+            scan_max_points=scan_max,
+            logger=self._logger)
+
+        if best_pose is None:
+            self._logger.error('[双模板匹配] 全局匹配失败')
+            node.indoor_phase = IndoorPhase.BOOT_DELAY
+            return
+
+        # 写入候选 (单结果时占位概率 1.0)
+        node.candidates = [(1.0, best_pose[0], best_pose[1], best_pose[2])]
+
+        wall_cov, cov, _ = node._compute_wall_coverage(
+            submap_pts, best_pose[0], best_pose[1], best_pose[2])
+        self._logger.info(
+            f'[双模板匹配] 唯一结果: ({best_pose[0]:.3f},{best_pose[1]:.3f},'
+            f'{math.degrees(best_pose[2]):.2f}deg) '
+            f'score={best_score:.1f} wall={100*wall_cov:.0f}% cov={100*cov:.0f}%')
+
+        node._last_match_quality = {
+            'wall_cov': wall_cov, 'coverage': cov, 'score': best_score}
+
+        node._publish_candidates()
+
+        if node.quick_mode:
+            self.handle_quick_mode_result(node, submap_pts)
+        else:
+            node.indoor_phase = IndoorPhase.SELECTING_ACTIVE_MOTION
 
     def handle_quick_mode_result(self, node, scan_pts):
         """快速模式: 评估匹配质量后发布。
@@ -227,14 +593,14 @@ class ScanMatcher:
         与原 _do_multistep_matching 行为完全一致。
         """
         if node.likelihood_field is None or node.map_data is None:
-            node.indoor_phase = node.IndoorPhase.BOOT_DELAY
+            node.indoor_phase = IndoorPhase.BOOT_DELAY
             return
 
         scans = [item[0] for item in node.scan_buffer]
         n_frames = len(scans)
         if n_frames < 3:
             self._logger.warn('[多步递推] 帧数不足, 回退到合并匹配')
-            node.indoor_phase = node.IndoorPhase.ROUGH_MATCHING
+            node.indoor_phase = IndoorPhase.ROUGH_MATCHING
             return
 
         t0 = time.time()
@@ -253,6 +619,7 @@ class ScanMatcher:
         min_sigma = 0.5
         decay = 0.75
         step = max(1, n_frames // 20)
+        first_dt_yaw = None  # 首帧 DT 匹配的 yaw，用于检测 ICP 累积角度漂移
 
         self._logger.info(f'[多步递推 v2] 开始, {n_frames}帧, 步长={step}, FRF+RayCast+WallHit')
 
@@ -263,16 +630,54 @@ class ScanMatcher:
 
             if mu is None:
                 # ══════ 首帧: 增强全局搜索 ══════
-                mu, sigma, sigma_angle, total_valid = self._multistep_first_frame(
-                    node, frame_pts, ox, oy, mw, mh, res, W, H, i
-                )
-                if mu is None:
-                    return
-                wall_cov, cov, _ = node._compute_wall_coverage(frame_pts, mu[0], mu[1], mu[2])
-                self._logger.info(
-                    f'  帧{i:02d}(首): 全局搜索 → '
-                    f'({mu[0]:.2f},{mu[1]:.2f},{math.degrees(mu[2]):.0f}deg) '
-                    f'wall={100*wall_cov:.0f}% σ={sigma:.1f}m')
+                if getattr(node, 'dt_multistep_enabled', False):
+                    # 双模板首帧搜索 (优先级最高, 速度最快)
+                    best_pose, best_sc = self.dual_template_first_frame(node, frame_pts)
+                    if best_pose is not None:
+                        mu = best_pose
+                        first_dt_yaw = mu[2]  # 记录首帧 DT 匹配 yaw，用于检测 ICP 累积漂移
+                        sigma = 5.0
+                        sigma_angle = 20.0
+                        total_valid = 1
+                        wall_cov, cov, _ = node._compute_wall_coverage(
+                            frame_pts, mu[0], mu[1], mu[2])
+                        self._logger.info(
+                            f'  [DT多步] 帧{i:02d}(首): 双模板搜索 → '
+                            f'({mu[0]:.2f},{mu[1]:.2f},{math.degrees(mu[2]):.0f}deg) '
+                            f'score={best_sc:.1f} wall={100*wall_cov:.0f}%')
+                    else:
+                        self._logger.error('[DT多步] 首帧双模板搜索失败')
+                        node.indoor_phase = IndoorPhase.ROUGH_MATCHING
+                        return
+                elif getattr(node, 'df_multistep_enabled', False):
+                    # 距离场首帧搜索 (回退方案)
+                    best_pose, best_sc = self.distance_field_first_frame(node, frame_pts)
+                    if best_pose is not None:
+                        mu = best_pose
+                        sigma = 5.0
+                        sigma_angle = 20.0
+                        total_valid = 1
+                        wall_cov, cov, _ = node._compute_wall_coverage(
+                            frame_pts, mu[0], mu[1], mu[2])
+                        self._logger.info(
+                            f'  [DF多步] 帧{i:02d}(首): 距离场搜索 → '
+                            f'({mu[0]:.2f},{mu[1]:.2f},{math.degrees(mu[2]):.0f}deg) '
+                            f'wall={100*wall_cov:.0f}%')
+                    else:
+                        self._logger.error('[DF多步] 首帧距离场搜索失败')
+                        node.indoor_phase = IndoorPhase.ROUGH_MATCHING
+                        return
+                else:
+                    mu, sigma, sigma_angle, total_valid = self._multistep_first_frame(
+                        node, frame_pts, ox, oy, mw, mh, res, W, H, i
+                    )
+                    if mu is None:
+                        return
+                    wall_cov, cov, _ = node._compute_wall_coverage(frame_pts, mu[0], mu[1], mu[2])
+                    self._logger.info(
+                        f'  帧{i:02d}(首): 全局搜索 → '
+                        f'({mu[0]:.2f},{mu[1]:.2f},{math.degrees(mu[2]):.0f}deg) '
+                        f'wall={100*wall_cov:.0f}% σ={sigma:.1f}m')
             else:
                 # ══════ 后续帧: ICP + 两级局部搜索 ══════
                 mu, sigma, sigma_angle = self._multistep_subsequent_frame(
@@ -290,17 +695,36 @@ class ScanMatcher:
             f'({mu[0]:.2f},{mu[1]:.2f},{math.degrees(mu[2]):.1f}deg) '
             f'avg_wall={100*avg_wall:.0f}% final_σ={sigma:.2f}m')
 
+        # ── Yaw 一致性检查：ICP 累积角度漂移保护 ──
+        if first_dt_yaw is not None and mu is not None:
+            yaw_diff = abs(((mu[2] - first_dt_yaw + math.pi) % (2 * math.pi)) - math.pi)
+            if yaw_diff > math.radians(45):
+                self._logger.warn(
+                    f'[Yaw漂移保护] ICP 累积 yaw={math.degrees(mu[2]):.1f}° '
+                    f'与首帧 DT yaw={math.degrees(first_dt_yaw):.1f}° 偏差 {math.degrees(yaw_diff):.0f}°>45°, '
+                    f'回退到 DT yaw')
+                mu = (mu[0], mu[1], first_dt_yaw)
+            elif yaw_diff > math.radians(20):
+                self._logger.info(
+                    f'[Yaw漂移监控] ICP 累积 yaw={math.degrees(mu[2]):.1f}° '
+                    f'与首帧 DT yaw={math.degrees(first_dt_yaw):.1f}° 偏差 {math.degrees(yaw_diff):.0f}°, '
+                    f'在可接受范围内')
+
         node.candidates = [(1.0, mu[0], mu[1], mu[2])]
         node._last_match_quality = {'wall_cov': avg_wall, 'coverage': 0.5, 'score': 1.0}
 
-        if node.quick_mode:
+        if node.quick_mode or getattr(node, 'publish_after_rotation', False):
+            self._logger.info(
+                f'[多步递推] 直接发布初始位姿 → '
+                f'({mu[0]:.2f},{mu[1]:.2f},{math.degrees(mu[2]):.1f}deg) '
+                f'σ_pos={sigma:.2f}m σ_ang={sigma_angle:.1f}deg')
             node._publish_and_finish(mu[0], mu[1], mu[2],
                                      sigma_pos=sigma, sigma_yaw_deg=sigma_angle,
                                      buf_frames=total_valid,
                                      best_prob=1.0, second_prob=0.0)
         else:
             node._publish_candidates()
-            node.indoor_phase = node.IndoorPhase.SELECTING_ACTIVE_MOTION
+            node.indoor_phase = IndoorPhase.SELECTING_ACTIVE_MOTION
 
     def _multistep_first_frame(self, node, frame_pts, ox, oy, mw, mh, res, W, H, i):
         """首帧全局搜索（从 _do_multistep_matching 提取的子方法）。
@@ -347,7 +771,7 @@ class ScanMatcher:
 
         if not candidates_raw:
             self._logger.error('[多步递推] 首帧全局搜索无有效候选')
-            node.indoor_phase = node.IndoorPhase.ROUGH_MATCHING
+            node.indoor_phase = IndoorPhase.ROUGH_MATCHING
             return None, sigma, sigma_angle, 0
 
         # NMS
@@ -418,7 +842,7 @@ class ScanMatcher:
 
         if best_pose is None:
             self._logger.error('[多步递推] 首帧两级精修失败')
-            node.indoor_phase = node.IndoorPhase.ROUGH_MATCHING
+            node.indoor_phase = IndoorPhase.ROUGH_MATCHING
             return None, sigma, sigma_angle, 0
 
         return best_pose, sigma, sigma_angle, 1
@@ -485,15 +909,26 @@ class ScanMatcher:
 
         与原 _do_passive_matching 行为完全一致。
         """
+        # 互斥防护: 避免 _indoor_loop 0.1s 频率重入（完整搜索耗时 50s+）
+        if getattr(node, '_do_passive_busy', False):
+            return
+        node._do_passive_busy = True
+        try:
+            self._do_passive_impl(node)
+        finally:
+            node._do_passive_busy = False
+
+    def _do_passive_impl(self, node):
+        """do_passive 的实际实现（被互斥锁保护）"""
         if node.likelihood_field is None or not node.passive_scan_buffer:
-            node.indoor_phase = node.IndoorPhase.PASSIVE_COLLECTING
+            node.indoor_phase = IndoorPhase.PASSIVE_COLLECTING
             return
 
         t0 = time.time()
         recent = node.passive_scan_buffer[-node.passive_frame_count:]
         scans = [item[0] for item in recent]
         if len(scans) < 5:
-            node.indoor_phase = node.IndoorPhase.PASSIVE_COLLECTING
+            node.indoor_phase = IndoorPhase.PASSIVE_COLLECTING
             return
 
         mu = node.passive_best_pose
@@ -504,6 +939,7 @@ class ScanMatcher:
         total_wall = 0
         total_n = 0
         method = '推算'
+        passive_first_dt_yaw = None  # 被动模式首帧 DT yaw，用于检测 ICP 累积漂移
         res = node.map_info.resolution
         ox = node.map_info.origin.position.x
         oy = node.map_info.origin.position.y
@@ -516,21 +952,85 @@ class ScanMatcher:
                 continue
 
             if mu is None:
-                ds0 = max(1, len(pts) // 800)
-                pts_ds = pts[::ds0]
-                best_sc = -1e9
-                best_pose = None
-                for ax in np.arange(ox + 2, ox + mw - 2, 2.0):
-                    for ay in np.arange(oy + 2, oy + mh - 2, 2.0):
-                        for adeg in range(0, 360, 15):
-                            sc, _, _ = node._score_points(pts_ds, ax, ay, math.radians(adeg))
-                            if sc > best_sc:
-                                best_sc = sc
-                                best_pose = (ax, ay, math.radians(adeg))
-                if best_pose is None:
-                    continue
-                mu = best_pose
-                method = "全局"
+                if getattr(node, 'dt_passive_enabled', False):
+                    # 双模板首帧搜索 (优先级最高)
+                    best_pose, best_sc = self.dual_template_first_frame(node, pts)
+                    if best_pose is not None:
+                        mu = best_pose
+                        passive_first_dt_yaw = mu[2]  # 记录首帧 DT yaw，用于检测 ICP 累积漂移
+                        method = "DT全局"
+                        self._logger.info(
+                            f'  [DT被动] 首帧双模板搜索 → '
+                            f'({mu[0]:.2f},{mu[1]:.2f},{math.degrees(mu[2]):.0f}deg)'
+                            f' score={best_sc:.1f}')
+                    else:
+                        self._logger.warn('[DT被动] 双模板搜索失败, 回退到距离场搜索')
+                        best_pose, best_sc = self.distance_field_first_frame(node, pts)
+                        if best_pose is not None:
+                            mu = best_pose
+                            method = "DF全局"
+                            self._logger.info(
+                                f'  [DF被动] 首帧距离场搜索 → '
+                                f'({mu[0]:.2f},{mu[1]:.2f},{math.degrees(mu[2]):.0f}deg)')
+                        else:
+                            self._logger.warn('[DF被动] 距离场搜索失败, 回退到网格搜索')
+                            ds0 = max(1, len(pts) // 800)
+                            pts_ds = pts[::ds0]
+                            best_sc = -1e9
+                            best_pose = None
+                            for ax in np.arange(ox + 2, ox + mw - 2, 2.0):
+                                for ay in np.arange(oy + 2, oy + mh - 2, 2.0):
+                                    for adeg in range(0, 360, 15):
+                                        sc, _, _ = node._score_points(pts_ds, ax, ay, math.radians(adeg))
+                                        if sc > best_sc:
+                                            best_sc = sc
+                                            best_pose = (ax, ay, math.radians(adeg))
+                            if best_pose is None:
+                                continue
+                            mu = best_pose
+                            method = "全局"
+                elif getattr(node, 'df_passive_enabled', False):
+                    best_pose, best_sc = self.distance_field_first_frame(node, pts)
+                    if best_pose is not None:
+                        mu = best_pose
+                        method = "DF全局"
+                        self._logger.info(
+                            f'  [DF被动] 首帧距离场搜索 → '
+                            f'({mu[0]:.2f},{mu[1]:.2f},{math.degrees(mu[2]):.0f}deg)')
+                    else:
+                        # 回退到原全局搜索
+                        self._logger.warn('[DF被动] 距离场搜索失败, 回退到网格搜索')
+                        ds0 = max(1, len(pts) // 800)
+                        pts_ds = pts[::ds0]
+                        best_sc = -1e9
+                        best_pose = None
+                        for ax in np.arange(ox + 2, ox + mw - 2, 2.0):
+                            for ay in np.arange(oy + 2, oy + mh - 2, 2.0):
+                                for adeg in range(0, 360, 15):
+                                    sc, _, _ = node._score_points(pts_ds, ax, ay, math.radians(adeg))
+                                    if sc > best_sc:
+                                        best_sc = sc
+                                        best_pose = (ax, ay, math.radians(adeg))
+                        if best_pose is None:
+                            continue
+                        mu = best_pose
+                        method = "全局"
+                else:
+                    ds0 = max(1, len(pts) // 800)
+                    pts_ds = pts[::ds0]
+                    best_sc = -1e9
+                    best_pose = None
+                    for ax in np.arange(ox + 2, ox + mw - 2, 2.0):
+                        for ay in np.arange(oy + 2, oy + mh - 2, 2.0):
+                            for adeg in range(0, 360, 15):
+                                sc, _, _ = node._score_points(pts_ds, ax, ay, math.radians(adeg))
+                                if sc > best_sc:
+                                    best_sc = sc
+                                    best_pose = (ax, ay, math.radians(adeg))
+                    if best_pose is None:
+                        continue
+                    mu = best_pose
+                    method = "全局"
             else:
                 prev_pts = node._scan_to_points(scans[max(0, i - 1)])
                 dx_i = dy_i = dyaw_i = 0.0
@@ -569,6 +1069,22 @@ class ScanMatcher:
             total_n += 1
 
         avg_wall = total_wall / max(total_n, 1)
+
+        # ── Yaw 一致性检查（被动模式）：ICP 累积角度漂移保护 ──
+        if passive_first_dt_yaw is not None and mu is not None:
+            yaw_diff = abs(((mu[2] - passive_first_dt_yaw + math.pi) % (2 * math.pi)) - math.pi)
+            if yaw_diff > math.radians(45):
+                self._logger.warn(
+                    f'[Yaw漂移保护-被动] ICP 累积 yaw={math.degrees(mu[2]):.1f}° '
+                    f'与首帧 DT yaw={math.degrees(passive_first_dt_yaw):.1f}° 偏差 {math.degrees(yaw_diff):.0f}°>45°, '
+                    f'回退到 DT yaw')
+                mu = (mu[0], mu[1], passive_first_dt_yaw)
+            elif yaw_diff > math.radians(20):
+                self._logger.info(
+                    f'[Yaw漂移监控-被动] ICP 累积 yaw={math.degrees(mu[2]):.1f}° '
+                    f'与首帧 DT yaw={math.degrees(passive_first_dt_yaw):.1f}° 偏差 {math.degrees(yaw_diff):.0f}°, '
+                    f'在可接受范围内')
+
         node.passive_best_pose = mu
         elapsed = time.time() - t0
         ts = node.get_clock().now().nanoseconds / 1e9
@@ -680,7 +1196,7 @@ class ScanMatcher:
                 node._debug_compare_all_references(
                     pose_to_publish[0], pose_to_publish[1], pose_to_publish[2],
                     source=f'被动{method}(拒绝)')
-            node.indoor_phase = node.IndoorPhase.PASSIVE_COLLECTING
+            node.indoor_phase = IndoorPhase.PASSIVE_COLLECTING
             return
 
         gate_level = '✓高' if confidence >= th_up else '○中'
@@ -705,15 +1221,25 @@ class ScanMatcher:
             node._publish_cooldown_until = (node.get_clock().now().nanoseconds * 1e-9
                                             + node.passive_publish_cooldown)
             node.passive_bootstrap_failures = 0
-            set_reference = (confidence >= th_up) or (
-                node.last_calibrated_pose is None and confidence >= th_pub)
-            if set_reference:
+            # 高置信度: 完全更新参考; 中置信度: 只更新 map 位姿 (用于 odom 融合)
+            # 避免使用主动校准的旧参考位姿，导致后续 odom fusion 永远无法通过 wall coverage 检查
+            high_conf = (confidence >= th_up)
+            published_from_scratch = (node.last_calibrated_pose is None and confidence >= th_pub)
+            if high_conf or published_from_scratch:
                 node.last_calibrated_pose = (pose_to_publish[0], pose_to_publish[1], pose_to_publish[2])
                 if node.current_odom is not None:
                     curr_pos = node.current_odom.pose.pose.position
                     curr_yaw = quat_to_yaw(node.current_odom.pose.pose.orientation)
                     node.passive_last_odom = (curr_pos.x, curr_pos.y, curr_yaw)
                     node.passive_odom_accum_dist = 0.0
+                set_reference = True
+            elif confidence >= th_pub:
+                # 中置信度: 更新 map 位姿但不更新 odom 基准 (保留主动校准的 odom 基准)
+                # 这样后续 odom fusion 可以用被动匹配的最新冠位姿做 wall coverage 验证
+                node.last_calibrated_pose = (pose_to_publish[0], pose_to_publish[1], pose_to_publish[2])
+                set_reference = False
+            else:
+                set_reference = False
             status = '发布→/initialpose ' + gate_level + ('[二次验证]' if recheck_passed else '')
         else:
             if hasattr(node, 'debug_auto_pose_pub'):
@@ -733,7 +1259,7 @@ class ScanMatcher:
             node._debug_compare_all_references(
                 pose_to_publish[0], pose_to_publish[1], pose_to_publish[2],
                 source=f'被动{method}')
-        node.indoor_phase = node.IndoorPhase.PASSIVE_COLLECTING
+        node.indoor_phase = IndoorPhase.PASSIVE_COLLECTING
 
     def do_passive_reverify(self, node):
         """二次验证: 使用更多帧 + 更精细搜索重新匹配。
@@ -769,6 +1295,11 @@ class ScanMatcher:
                 continue
 
             if mu is None:
+                if getattr(node, 'df_passive_enabled', False):
+                    best_pose, _ = self.distance_field_first_frame(node, pts)
+                    if best_pose is not None:
+                        mu = best_pose
+                        continue
                 ds0 = max(1, len(pts) // 800)
                 pts_ds = pts[::ds0]
                 best_sc = -1e9

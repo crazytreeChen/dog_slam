@@ -168,6 +168,7 @@ class AutoInitialPoseCalibrator(Node):
         self.declare_parameter('auto_start', True)           # 开机收到地图+scan后自动触发校准
         self.declare_parameter('auto_start_delay', 3.0)      # 自动启动前的等待延迟 (秒)
         self.declare_parameter('quick_mode', False)           # 快速模式：跳过旋转+运动探索，仅做一次全局匹配
+        self.declare_parameter('publish_after_rotation', True) # 旋转采集+多步匹配完成后直接发布初始位姿 (跳过运动探索)
 
         # ────── 被动模式参数 ──────
         self.declare_parameter('passive_mode_enabled', True)    # 是否启用被动持续定位
@@ -191,6 +192,23 @@ class AutoInitialPoseCalibrator(Node):
         self.declare_parameter('confidence_threshold_update', 0.65)       # 允许更新原点/校准位姿的置信度阈值
         self.declare_parameter('confidence_threshold_publish', 0.50)      # 允许发布 /initialpose 的置信度阈值
         self.declare_parameter('confidence_threshold_amcl', 0.35)         # 低置信度仍可辅助 AMCL 的阈值（仅监控）
+
+        # ────── 距离场全局匹配参数 (来自 global_match.py) ──────
+        self.declare_parameter('use_distance_field_matching', False)     # 是否启用距离场全局匹配替代网格搜索
+        self.declare_parameter('df_angle_step_deg', 5.0)                 # 距离场匹配角度步长 (度)
+        self.declare_parameter('df_n_positions', 1000)                   # 距离场匹配随机采样自由空间位置数
+        self.declare_parameter('df_scan_max_points', 500)                # 距离场匹配最大扫描点数
+        self.declare_parameter('df_multistep_enabled', True)             # 距离场匹配用于多步递推首帧
+        self.declare_parameter('df_passive_enabled', True)               # 距离场匹配用于被动匹配首帧
+
+        # ────── 双模板光线投射全局匹配参数 (来自 global_match2.py) ──────
+        self.declare_parameter('use_dual_template_matching', True)       # 是否启用双模板光线投射全局匹配
+        self.declare_parameter('dt_angle_step_deg', 2.0)                 # 双模板粗搜角度步长 (度)
+        self.declare_parameter('dt_fine_angle_step_deg', 0.5)            # 双模板精修角度步长 (度)
+        self.declare_parameter('dt_penalty_weight', 3.0)                 # 双模板射线穿透惩罚权重
+        self.declare_parameter('dt_scan_max_points', 500)                # 双模板匹配最大扫描点数
+        self.declare_parameter('dt_multistep_enabled', True)             # 双模板匹配用于多步递推首帧
+        self.declare_parameter('dt_passive_enabled', True)               # 双模板匹配用于被动匹配首帧
 
         # ────── 日志持久化参数 ──────
         self.declare_parameter('log_dir', '')                 # 日志持久化目录（为空则不写文件）
@@ -224,6 +242,16 @@ class AutoInitialPoseCalibrator(Node):
                 self.odom_topic = f"/{ns}/{self.odom_topic}"
             if not self.amcl_pose_topic.startswith('/'):
                 self.amcl_pose_topic = f"/{ns}/{self.amcl_pose_topic}"
+        else:
+            # 节点无 namespace 但 map_topic 可能带前缀 (如 rkbot 模式: /rkbot/map)
+            # 此时需从 map_topic 推导出 map_frame, 否则 initialpose 的 frame_id 不对
+            # /rkbot/map → rkbot/map, /map → map
+            map_topic_stripped = self.map_topic.lstrip('/')
+            if '/' in map_topic_stripped:
+                # 例如 map_topic="/rkbot/map" → 提取 namespace "rkbot"
+                topic_ns = map_topic_stripped.split('/')[0]
+                if not self.map_frame.startswith(topic_ns + '/'):
+                    self.map_frame = f"{topic_ns}/{self.map_frame}"
         self.outdoor_mode = self.get_parameter('outdoor_mode').value
         self.indoor_mode = self.get_parameter('indoor_mode').value
         self.use_sim_time = self.get_parameter('use_sim_time').value
@@ -296,6 +324,7 @@ class AutoInitialPoseCalibrator(Node):
         self.auto_start = self.get_parameter('auto_start').value
         self.auto_start_delay = self.get_parameter('auto_start_delay').value
         self.quick_mode = self.get_parameter('quick_mode').value
+        self.publish_after_rotation = self.get_parameter('publish_after_rotation').value
 
         # ── 被动模式参数 ──
         self.passive_mode_enabled = self.get_parameter('passive_mode_enabled').value
@@ -318,6 +347,23 @@ class AutoInitialPoseCalibrator(Node):
         self.confidence_threshold_update = self.get_parameter('confidence_threshold_update').value
         self.confidence_threshold_publish = self.get_parameter('confidence_threshold_publish').value
         self.confidence_threshold_amcl = self.get_parameter('confidence_threshold_amcl').value
+
+        # ─── 距离场全局匹配 ───
+        self.use_distance_field_matching = self.get_parameter('use_distance_field_matching').value
+        self.df_angle_step_deg = self.get_parameter('df_angle_step_deg').value
+        self.df_n_positions = self.get_parameter('df_n_positions').value
+        self.df_scan_max_points = self.get_parameter('df_scan_max_points').value
+        self.df_multistep_enabled = self.get_parameter('df_multistep_enabled').value
+        self.df_passive_enabled = self.get_parameter('df_passive_enabled').value
+
+        # ────── 双模板匹配参数加载 ──────
+        self.use_dual_template_matching = self.get_parameter('use_dual_template_matching').value
+        self.dt_angle_step_deg = self.get_parameter('dt_angle_step_deg').value
+        self.dt_fine_angle_step_deg = self.get_parameter('dt_fine_angle_step_deg').value
+        self.dt_penalty_weight = self.get_parameter('dt_penalty_weight').value
+        self.dt_scan_max_points = self.get_parameter('dt_scan_max_points').value
+        self.dt_multistep_enabled = self.get_parameter('dt_multistep_enabled').value
+        self.dt_passive_enabled = self.get_parameter('dt_passive_enabled').value
 
         # ────── 日志持久化初始化 ──────
         self._setup_file_logging()
@@ -1159,7 +1205,14 @@ class AutoInitialPoseCalibrator(Node):
                 self.indoor_phase = IndoorPhase.ROUGH_MATCHING
                 
         elif self.indoor_phase == IndoorPhase.ROUGH_MATCHING:
-            self._do_hierarchical_matching()
+            if self.use_dual_template_matching:
+                self._logger.info('[状态机] 使用双模板光线投射全局匹配算法 (global_match2)...')
+                self.matcher.do_dual_template_global(self)
+            elif self.use_distance_field_matching:
+                self._logger.info('[状态机] 使用距离场全局匹配算法...')
+                self.matcher.do_distance_field_global(self)
+            else:
+                self._do_hierarchical_matching()
             
         elif self.indoor_phase == IndoorPhase.SELECTING_ACTIVE_MOTION:
             self._do_active_motion_selection()
@@ -1204,10 +1257,10 @@ class AutoInitialPoseCalibrator(Node):
             pass  # 扫描帧由 _scan_cb 自动缓存到 passive_scan_buffer
 
         elif self.indoor_phase == IndoorPhase.PASSIVE_MATCHING:
-            self._do_passive_matching()
+            self.matcher.do_passive(self)
 
         elif self.indoor_phase == IndoorPhase.ACTIVE_MULTISTEP:
-            self._do_multistep_matching()
+            self.matcher.do_multistep(self)
 
     # ================================================================
     #  核心步骤 3：改进的网格全局搜索 + 精细局部搜索
@@ -1641,93 +1694,100 @@ class AutoInitialPoseCalibrator(Node):
         if self.indoor_phase not in (IndoorPhase.PASSIVE_COLLECTING, IndoorPhase.PASSIVE_MATCHING,
                                        IndoorPhase.IDLE, IndoorPhase.DONE):
             return
+        # 互斥防护: 避免 _indoor_loop 的 PASSIVE_MATCHING 分支重复触发 do_passive
+        if getattr(self, '_passive_busy', False):
+            return
+        self._passive_busy = True
+        try:
+            # ── 尝试里程计融合轻量验证 ──
+            ok, pred_pose, reason = self._try_odom_fusion_verify()
+            if ok and pred_pose is not None:
+                # 验证通过 → 置信度门控，跳过扫描匹配
+                px, py, pyaw = pred_pose
 
-        # ── 尝试里程计融合轻量验证 ──
-        ok, pred_pose, reason = self._try_odom_fusion_verify()
-        if ok and pred_pose is not None:
-            # 验证通过 → 置信度门控，跳过扫描匹配
-            px, py, pyaw = pred_pose
+                # 提取融合验证中已计算的 lf_score 和 wall_ratio
+                # reason 格式: "ok wall=0.45 lf=0.320" 或类似
+                fusion_wall = self.passive_fusion_wall_threshold
+                fusion_lf = self.passive_likelihood_threshold
+                try:
+                    parts = reason.split()
+                    for p in parts:
+                        if p.startswith('wall='):
+                            fusion_wall = float(p.split('=')[1])
+                        elif p.startswith('lf='):
+                            fusion_lf = float(p.split('=')[1])
+                except (ValueError, IndexError):
+                    pass
 
-            # 提取融合验证中已计算的 lf_score 和 wall_ratio
-            # reason 格式: "ok wall=0.45 lf=0.320" 或类似
-            fusion_wall = self.passive_fusion_wall_threshold
-            fusion_lf = self.passive_likelihood_threshold
-            try:
-                parts = reason.split()
-                for p in parts:
-                    if p.startswith('wall='):
-                        fusion_wall = float(p.split('=')[1])
-                    elif p.startswith('lf='):
-                        fusion_lf = float(p.split('=')[1])
-            except (ValueError, IndexError):
-                pass
+                pos_sigma = min(0.8 / max(fusion_wall, 0.1), 2.0)
+                yaw_sigma_deg = min(20.0 / max(fusion_wall, 0.1), 30.0)
+                buf_frames = len(self.passive_scan_buffer) if hasattr(self, 'passive_scan_buffer') else 10
 
-            pos_sigma = min(0.8 / max(fusion_wall, 0.1), 2.0)
-            yaw_sigma_deg = min(20.0 / max(fusion_wall, 0.1), 30.0)
-            buf_frames = len(self.passive_scan_buffer) if hasattr(self, 'passive_scan_buffer') else 10
+                # 置信度计算
+                confidence = self._compute_confidence(
+                    wall_ratio=fusion_wall, lf_score=fusion_lf, coverage=0.5,
+                    sigma_pos=pos_sigma, sigma_yaw_deg=yaw_sigma_deg,
+                    buf_frames=buf_frames, best_prob=1.0, second_prob=0.0)
 
-            # 置信度计算
-            confidence = self._compute_confidence(
-                wall_ratio=fusion_wall, lf_score=fusion_lf, coverage=0.5,
-                sigma_pos=pos_sigma, sigma_yaw_deg=yaw_sigma_deg,
-                buf_frames=buf_frames, best_prob=1.0, second_prob=0.0)
+                conf_pct = 100 * confidence
+                th_up = self.confidence_threshold_update
+                th_pub = self.confidence_threshold_publish
 
-            conf_pct = 100 * confidence
-            th_up = self.confidence_threshold_update
-            th_pub = self.confidence_threshold_publish
+                # 门控：低于发布阈值则拒绝
+                if confidence < th_pub:
+                    self._logger.warn(
+                        f'[融合门控✗] 拒绝发布: conf={conf_pct:.0f}% < {100*th_pub:.0f}% '
+                        f'(wall={100*fusion_wall:.0f}% lf={fusion_lf:.3f} '
+                        f'σ=({pos_sigma:.2f}m,{yaw_sigma_deg:.1f}deg))')
+                    # 调试模式：即使拒绝也输出对比日志
+                    if self.debug_comparison_mode:
+                        self._debug_compare_all_references(px, py, pyaw, source='被动融合(拒绝)')
+                    # 门控拒绝时重置 odom 累加距离, 避免下次融合验证因 odom accum 超限而直接失败
+                    self.passive_odom_accum_dist = 0.0
+                    self.indoor_phase = IndoorPhase.PASSIVE_COLLECTING
+                    return
 
-            # 门控：低于发布阈值则拒绝
-            if confidence < th_pub:
-                self._logger.warn(
-                    f'[融合门控✗] 拒绝发布: conf={conf_pct:.0f}% < {100*th_pub:.0f}% '
-                    f'(wall={100*fusion_wall:.0f}% lf={fusion_lf:.3f} '
-                    f'σ=({pos_sigma:.2f}m,{yaw_sigma_deg:.1f}deg))')
-                # 调试模式：即使拒绝也输出对比日志
-                if self.debug_comparison_mode:
-                    self._debug_compare_all_references(px, py, pyaw, source='被动融合(拒绝)')
-                self.indoor_phase = IndoorPhase.PASSIVE_COLLECTING
-                return
+                gate_level = '✓高' if confidence >= th_up else '○中'
 
-            gate_level = '✓高' if confidence >= th_up else '○中'
+                cov = [0.0] * 36
+                cov[0] = pos_sigma ** 2; cov[7] = pos_sigma ** 2
+                cov[35] = math.radians(yaw_sigma_deg) ** 2
 
-            cov = [0.0] * 36
-            cov[0] = pos_sigma ** 2; cov[7] = pos_sigma ** 2
-            cov[35] = math.radians(yaw_sigma_deg) ** 2
+                msg = PoseWithCovarianceStamped()
+                msg.header.stamp = self.get_clock().now().to_msg()
+                msg.header.frame_id = self.map_frame
+                msg.pose.pose.position = Point(x=px, y=py, z=0.0)
+                qz = math.sin(pyaw/2.0); qw = math.cos(pyaw/2.0)
+                msg.pose.pose.orientation = Quaternion(x=0.0, y=0.0, z=qz, w=qw)
+                msg.pose.covariance = cov
 
-            msg = PoseWithCovarianceStamped()
-            msg.header.stamp = self.get_clock().now().to_msg()
-            msg.header.frame_id = self.map_frame
-            msg.pose.pose.position = Point(x=px, y=py, z=0.0)
-            qz = math.sin(pyaw/2.0); qw = math.cos(pyaw/2.0)
-            msg.pose.pose.orientation = Quaternion(x=0.0, y=0.0, z=qz, w=qw)
-            msg.pose.covariance = cov
-
-            if self.auto_publish_initial_pose:
-                self.initialpose_pub.publish(msg)
-                # 设置冷却期: 给 AMCL 时间收敛, 避免立即再次触发完整扫描匹配
-                self._publish_cooldown_until = self.get_clock().now().nanoseconds * 1e-9 + self.passive_publish_cooldown
-                # 仅高置信度更新原点 + 重置 odom 推算基准
-                if confidence >= th_up:
+                if self.auto_publish_initial_pose:
+                    self.initialpose_pub.publish(msg)
+                    # 设置冷却期: 给 AMCL 时间收敛, 避免立即再次触发完整扫描匹配
+                    self._publish_cooldown_until = self.get_clock().now().nanoseconds * 1e-9 + self.passive_publish_cooldown
+                    # 保存位姿 + 重置 odom 推算基准（中等置信度也保存，避免反复触发完整扫描匹配）
                     self.last_calibrated_pose = (px, py, pyaw)
                     curr_pos = self.current_odom.pose.pose.position
                     curr_yaw = self._quat_to_yaw(self.current_odom.pose.pose.orientation)
                     self.passive_last_odom = (curr_pos.x, curr_pos.y, curr_yaw)
                     self.passive_odom_accum_dist = 0.0
-                self._logger.info(
-                    f'[被动融合{gate_level}] 发布推算位姿: ({px:.2f},{py:.2f},{math.degrees(pyaw):.1f}deg) '
-                    f'conf={conf_pct:.0f}% odom_delta={self.passive_odom_accum_dist:.2f}m [{reason}]')
-            else:
-                if hasattr(self, 'debug_auto_pose_pub'):
-                    self.debug_auto_pose_pub.publish(msg)
-                self._logger.info(f'[被动融合{gate_level}] conf={conf_pct:.0f}% [{reason}]')
-                if self.debug_comparison_mode:
-                    self._debug_compare_all_references(px, py, pyaw, source='被动融合')
-            return
+                    self._logger.info(
+                        f'[被动融合{gate_level}] 发布推算位姿: ({px:.2f},{py:.2f},{math.degrees(pyaw):.1f}deg) '
+                        f'conf={conf_pct:.0f}% odom_delta={self.passive_odom_accum_dist:.2f}m [{reason}]')
+                else:
+                    if hasattr(self, 'debug_auto_pose_pub'):
+                        self.debug_auto_pose_pub.publish(msg)
+                    self._logger.info(f'[被动融合{gate_level}] conf={conf_pct:.0f}% [{reason}]')
+                    if self.debug_comparison_mode:
+                        self._debug_compare_all_references(px, py, pyaw, source='被动融合')
+                return
 
-        # 验证失败：记录原因，走完整扫描匹配
-        if 'fusion disabled' not in reason and 'first run' not in reason:
-            self._logger.info(f'[被动融合验证] ✗ {reason}，执行完整扫描匹配')
-        self.indoor_phase = IndoorPhase.PASSIVE_MATCHING
+            # 验证失败：记录原因，走完整扫描匹配
+            if 'fusion disabled' not in reason and 'first run' not in reason:
+                self._logger.info(f'[被动融合验证] ✗ {reason}，执行完整扫描匹配')
+            self.indoor_phase = IndoorPhase.PASSIVE_MATCHING
+        finally:
+            self._passive_busy = False
 
     def _do_passive_matching(self):
         """被动匹配 (v2 增强版): 取缓冲区最近N帧 → 多步递推 (FRF + ICP + 两级局部搜索 + ICP保护)"""
@@ -1909,7 +1969,7 @@ class AutoInitialPoseCalibrator(Node):
             self.passive_bootstrap_failures = 0
 
         # ── 置信度门控 ──
-        if confidence < th_pub:
+        if confidence <= th_pub:
             self._logger.warn(
                 f'[被动门控✗] 拒绝发布: conf={conf_pct:.0f}% < {100*th_pub:.0f}% '
                 f'(wall={100*publish_wall:.0f}% lf={est_lf:.2f} '
@@ -1942,17 +2002,26 @@ class AutoInitialPoseCalibrator(Node):
             # 设置冷却期: 给 AMCL 时间收敛, 避免立即再次触发完整扫描匹配
             self._publish_cooldown_until = self.get_clock().now().nanoseconds * 1e-9 + self.passive_publish_cooldown
             self.passive_bootstrap_failures = 0  # 成功发布后重置引导计数器
-            # 高置信度或 bootstrap 模式: 设置校准位姿与 odom 基准
-            # bootstrap 模式下即使 conf 低于 th_up 也必须设置, 否则引导永远无法打破死锁
-            set_reference = (confidence >= th_up) or (
-                self.last_calibrated_pose is None and confidence >= th_pub)
-            if set_reference:
+            # 高置信度: 完全更新参考; 中置信度: 只更新 map 位姿 (用于 odom 融合)
+            # 避免使用主动校准的旧参考位姿，导致后续 odom fusion 永远无法通过 wall coverage 检查
+            # bootstrap 模式下即使 conf 低于 th_up 也必须设置 map 位姿, 否则引导永远无法打破死锁
+            high_conf = (confidence >= th_up)
+            published_from_scratch = (self.last_calibrated_pose is None and confidence >= th_pub)
+            if high_conf or published_from_scratch:
                 self.last_calibrated_pose = (pose_to_publish[0], pose_to_publish[1], pose_to_publish[2])
                 if self.current_odom is not None:
                     curr_pos = self.current_odom.pose.pose.position
                     curr_yaw = self._quat_to_yaw(self.current_odom.pose.pose.orientation)
                     self.passive_last_odom = (curr_pos.x, curr_pos.y, curr_yaw)
                     self.passive_odom_accum_dist = 0.0  # 重置累计位移
+                set_reference = True
+            elif confidence >= th_pub:
+                # 中置信度: 更新 map 位姿但不更新 odom 基准 (保留主动校准的 odom 基准)
+                # 这样后续 odom fusion 可以用被动匹配的最新冠位姿做 wall coverage 验证
+                self.last_calibrated_pose = (pose_to_publish[0], pose_to_publish[1], pose_to_publish[2])
+                set_reference = False
+            else:
+                set_reference = False
             status = '发布→/initialpose ' + gate_level + ('[二次验证]' if recheck_passed else '')
         else:
             if hasattr(self, 'debug_auto_pose_pub'):
@@ -2721,12 +2790,17 @@ class AutoInitialPoseCalibrator(Node):
             if self.debug_comparison_mode:
                 self._debug_compare_all_references(x, y, yaw, source='主动定位')
 
-        # 只有高置信度才更新原点
-        if confidence >= th_up:
-            self.last_calibrated_pose = (x, y, yaw)
-        else:
+        # 保存位姿用于后续 odom 融合验证（避免因无历史位姿而反复触发完整扫描匹配）
+        self.last_calibrated_pose = (x, y, yaw)
+        # 重置 odom 推算基准，使后续被动周期可走融合快速路径
+        if self.current_odom is not None:
+            curr_pos = self.current_odom.pose.pose.position
+            curr_yaw = self._quat_to_yaw(self.current_odom.pose.pose.orientation)
+            self.passive_last_odom = (curr_pos.x, curr_pos.y, curr_yaw)
+            self.passive_odom_accum_dist = 0.0
+        if confidence < th_up:
             self._logger.info(
-                f'[置信度门控] conf={conf_pct:.0f}% < {100*th_up:.0f}%, 仅发布位姿，不更新原点')
+                f'[置信度门控] conf={conf_pct:.0f}% < {100*th_up:.0f}%, 位姿已保存但不启动偏差监控')
 
         self.indoor_phase = IndoorPhase.DONE
         self.cmd_vel_pub.publish(Twist())
