@@ -777,14 +777,6 @@ class AutoInitialPoseCalibrator(Node):
         """delegated to calib_lib.icp.icp_align_scans"""
         return icp_align_scans(scan_list, self._outlier_cfg, self._logger)
 
-    def _icp_match(self, points1, points2, max_iter=15, tol_trans=0.01, tol_rot_deg=0.1):
-        """delegated to calib_lib.icp.icp_match"""
-        return icp_match(points1, points2, max_iter, tol_trans, tol_rot_deg)
-
-    def _icp_align_scans(self, scan_list):
-        """delegated to calib_lib.icp.icp_align_scans"""
-        return icp_align_scans(scan_list, self._outlier_cfg, self._logger)
-
     # ================================================================
     #  回调与基本数据读取
     # ================================================================

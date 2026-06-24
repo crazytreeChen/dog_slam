@@ -38,6 +38,20 @@ lidar_3d_relocalizer_node:
     publish_initial_pose: true    # 发布 /initialpose 给 AMCL
     max_retry: 3                  # 最大重试次数，超过后停止
 
+    # ─── 原地旋转采集（扩展 MID360 窄视场角）───
+    # 静止机器人的 70° FOV FPFH 特征不足以全局匹配 60 万点地图。
+    # 旋转一圈可覆盖 360° 环境，累积 120+ 帧不同视角点云，极大提高匹配成功率。
+    rotate_enable: false           # 是否启用旋转采集（默认关闭）
+    rotate_angular_speed: 0.30     # 旋转角速度 (rad/s)，0.3≈每圈 21 秒
+    rotate_total_angle_deg: 360.0  # 总旋转角度（度）
+    rotate_cmd_vel_topic: "/cmd_vel"  # 速度指令话题
+
+    # ─── 旋转避障参数 ───
+    # 基于实时点云检测旋转方向是否有障碍物，确保旋转安全
+    rotate_obstacle_check: true    # 是否启用旋转避障
+    rotate_obstacle_min_dist: 0.50 # 障碍物最小安全距离（米）
+    rotate_obstacle_check_range_deg: 45.0  # 检测扇形角度范围（度）
+
     # ─── PCD → 2D 地图坐标偏移 ───
     # PCD 地图原点在 2D 地图坐标系中的位置
     # 计算方法: 2D坐标 - PCD坐标 = 偏移量
@@ -52,6 +66,32 @@ lidar_3d_relocalizer_node:
     alignment_mode: "landmarks"
     # Keep false for ROS/Nav2 metric maps. Enable only when map scale is known to differ.
     alignment_allow_scale: false
+    # 0=不检查点数，直接走 KISS-Matcher 单帧匹配（累积云回退到单帧也能用）
+    # MID360 单帧约 20k+ 原始点，FPFH 特征在稠密场景下可工作
+    min_relocalize_points: 0
+    min_kiss_translation_inliers: 6
+    allow_kiss_fallback: false
+
+    # ─── KISS-Matcher 降级容错 ───
+    # 当 KISS trans inliers < min_kiss_translation_inliers 但 rot inliers >= 此值时，
+    # 触发 rotation-only fallback + 多方向旋转搜索（无论 KISS 是否报告 valid=true）。
+    # 这避免了退化环境中 KISS 几乎随机的平移结果被喂给 GICP。
+    # centroid alignment: t = src_centroid - R * tgt_centroid
+    # 在 KISS rotation 附近采样多个 yaw 候选做 GICP，选 fitness 最好的。
+    min_rotation_inliers: 5
+
+    # ─── 多方向旋转搜索（rotation-only fallback 时启用）───
+    # 原理：KISS rotation 在退化环境中可能偏 10-30°，
+    # 单一 centroid alignment 初值可能不足以让 GICP 收敛。
+    # 在 KISS rotation ±range 内均匀采样 N 个候选角度，
+    # 每个做 centroid alignment → GICP，选 fitness 最小的。
+    enable_multi_yaw_search: true       # 是否启用多方向搜索
+    multi_yaw_search_samples: 7         # 候选角度数（含 0°），奇数可保证包含原始 KISS 角度
+    multi_yaw_search_range_deg: 30.0    # 搜索范围 ±30°
+    # 当 KISS 完全失败时，是否启用 GICP 兜底（identity 初值 + 缩小搜索半径）
+    enable_gicp_fallback: true
+    # GICP 兜底时的搜索窗口半径（米），比正常搜索窗口小
+    gicp_fallback_search_radius: 5.0
     # Flattened point pairs: [pcd_x, pcd_y, map_x, map_y, ...]
     # One point gives translation only; 2+ points estimate yaw/scale/translation.
     # 3+ manually marked correspondences are recommended for production.

@@ -25,6 +25,7 @@
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <std_msgs/msg/string.hpp>
+#include <geometry_msgs/msg/twist.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
@@ -73,7 +74,12 @@ public:
     // ─── 初始化配准核心 ───
     core_ = std::make_unique<RelocalizerCore>();
     core_->configure(kiss_voxel_size_, gicp_voxel_size_,
-                     gicp_max_iter_, gicp_trans_eps_, gicp_rot_eps_);
+                     gicp_max_iter_, gicp_trans_eps_, gicp_rot_eps_,
+                     min_kiss_translation_inliers_, allow_kiss_fallback_,
+                     min_rotation_inliers_, enable_gicp_fallback_,
+                     gicp_fallback_search_radius_,
+                     enable_multi_yaw_search_, multi_yaw_search_samples_,
+                     multi_yaw_search_range_deg_);
 
     // ─── 初始化累积器 ───
     accumulator_ = std::make_unique<CloudAccumulator>();
@@ -105,6 +111,12 @@ public:
     status_pub_ = this->create_publisher<std_msgs::msg::String>(
             status_topic_, 10);
 
+    // ─── CmdVel 发布器（用于原地旋转采集）───
+    if (rotate_enable_) {
+      cmd_vel_pub_ = this->create_publisher<geometry_msgs::msg::Twist>(
+          rotate_cmd_vel_topic_, 10);
+    }
+
     // ─── TF 广播器（仅在 publish_tf=true 时使用）───
     if (publish_tf_) {
       tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
@@ -115,6 +127,13 @@ public:
     relocalize_timer_ = this->create_wall_timer(
         std::chrono::milliseconds(static_cast<int>(1000.0 / rate_hz)),
         std::bind(&Lidar3dRelocalizerNode::relocalizeTimerCallback, this));
+
+    // ─── 旋转控制定时器（25Hz，仅在旋转期间工作）───
+    if (rotate_enable_) {
+      rotation_timer_ = this->create_wall_timer(
+          std::chrono::milliseconds(40),
+          std::bind(&Lidar3dRelocalizerNode::rotationControlCallback, this));
+    }
 
     // ─── 等待 TF 可用（短超时轮询，避免 tf2 内部刷警告）───
     // PCD 地图保持在原始 map 系不变，KISS-Matcher 做 odom→map 全局匹配
@@ -181,13 +200,31 @@ private:
   int    gicp_max_iter_;
   double gicp_trans_eps_;
   double gicp_rot_eps_;
+  int    min_kiss_translation_inliers_;
   int    accum_frame_count_;
+  int    min_relocalize_points_;
   double accum_max_time_s_;
   float  accum_voxel_size_;
   double fitness_thresh_;
   bool   publish_tf_;
   bool   publish_initial_pose_;
+  bool   allow_kiss_fallback_;
+  int    min_rotation_inliers_;
+  bool   enable_gicp_fallback_;
+  float  gicp_fallback_search_radius_;
+  bool   enable_multi_yaw_search_;
+  int    multi_yaw_search_samples_;
+  double multi_yaw_search_range_deg_;
   int    max_retry_;
+
+  // ─── 原地旋转采集参数 ───
+  bool   rotate_enable_{false};
+  double rotate_angular_speed_{0.3};
+  double rotate_total_angle_deg_{360.0};
+  bool   rotate_obstacle_check_{true};
+  double rotate_obstacle_min_dist_{0.5};
+  double rotate_obstacle_check_range_deg_{45.0};
+  std::string rotate_cmd_vel_topic_{"/cmd_vel"};
 
   // ─── 组件 ───
   std::unique_ptr<PcdMapLoader>    map_loader_;
@@ -200,10 +237,12 @@ private:
   rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr
       initial_pose_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
   rclcpp::TimerBase::SharedPtr relocalize_timer_;
+  rclcpp::TimerBase::SharedPtr rotation_timer_;
 
   // ─── 状态 ───
   geometry_msgs::msg::Pose latest_odom_pose_;
@@ -211,6 +250,15 @@ private:
   bool has_tf_{false};
   bool is_localized_{false};
   int retry_count_{0};
+
+  // ─── 旋转采集状态 ───
+  enum class RotationPhase { IDLE, ROTATING, STOPPING, DONE };
+  RotationPhase rot_phase_{RotationPhase::IDLE};
+  double rotation_start_yaw_{0.0};
+  double total_rotated_angle_{0.0};
+  double last_rotation_yaw_{0.0};
+  bool rotation_yaw_init_{false};
+  rclcpp::Time rotation_stop_time_;
   Eigen::Isometry3f T_map_odom_;
   pcl::PointCloud<pcl::PointXYZI>::Ptr latest_cloud_{nullptr};
   geometry_msgs::msg::Pose first_odom_pose_;
@@ -259,9 +307,13 @@ private:
     gicp_max_iter_   = this->declare_parameter<int>("gicp_max_iterations", 50);
     gicp_trans_eps_  = this->declare_parameter<double>("gicp_trans_eps", 1e-8);
     gicp_rot_eps_    = this->declare_parameter<double>("gicp_rot_eps", 1e-8);
+    min_kiss_translation_inliers_ =
+        this->declare_parameter<int>("min_kiss_translation_inliers", 6);
 
     // 累积参数
     accum_frame_count_ = this->declare_parameter<int>("accum_frame_count", 20);
+    min_relocalize_points_ =
+        this->declare_parameter<int>("min_relocalize_points", 0);  // 0=不检查点数，允许单帧匹配
     accum_max_time_s_  = this->declare_parameter<double>("accum_max_time_sec", 2.0);
     accum_voxel_size_  = static_cast<float>(
         this->declare_parameter<double>("accum_voxel_size", 0.05));
@@ -273,7 +325,35 @@ private:
     double rate_hz_tmp    = this->declare_parameter<double>("relocalize_rate_hz", 0.5);
     publish_tf_           = this->declare_parameter<bool>("publish_tf", false);
     publish_initial_pose_ = this->declare_parameter<bool>("publish_initial_pose", true);
+    allow_kiss_fallback_  = this->declare_parameter<bool>("allow_kiss_fallback", false);
+
+    // KISS-Matcher 降级容错
+    min_rotation_inliers_ =
+        this->declare_parameter<int>("min_rotation_inliers", 10);
+    enable_gicp_fallback_ =
+        this->declare_parameter<bool>("enable_gicp_fallback", true);
+    gicp_fallback_search_radius_ = static_cast<float>(
+        this->declare_parameter<double>("gicp_fallback_search_radius", 5.0));
+    // 多方向旋转搜索
+    enable_multi_yaw_search_ =
+        this->declare_parameter<bool>("enable_multi_yaw_search", true);
+    multi_yaw_search_samples_ =
+        this->declare_parameter<int>("multi_yaw_search_samples", 7);
+    multi_yaw_search_range_deg_ =
+        this->declare_parameter<double>("multi_yaw_search_range_deg", 30.0);
+
     max_retry_            = this->declare_parameter<int>("max_retry", 3);
+
+    // ─── 原地旋转采集参数 ───
+    rotate_enable_ = this->declare_parameter<bool>("rotate_enable", false);
+    rotate_angular_speed_ = this->declare_parameter<double>("rotate_angular_speed", 0.3);
+    rotate_total_angle_deg_ = this->declare_parameter<double>("rotate_total_angle_deg", 360.0);
+    rotate_obstacle_check_ = this->declare_parameter<bool>("rotate_obstacle_check", true);
+    rotate_obstacle_min_dist_ = this->declare_parameter<double>("rotate_obstacle_min_dist", 0.5);
+    rotate_obstacle_check_range_deg_ =
+        this->declare_parameter<double>("rotate_obstacle_check_range_deg", 45.0);
+    rotate_cmd_vel_topic_ =
+        this->declare_parameter<std::string>("rotate_cmd_vel_topic", "/cmd_vel");
 
     // PCD → 2D 地图坐标偏移（PCD原点在2D地图中的坐标）
     map_offset_x_ = this->declare_parameter<double>("map_offset_x", 0.0);
@@ -434,15 +514,22 @@ private:
   {
     if (is_localized_) {
       if (publish_tf_) {
-        // 持续发布 map→odom TF（仅在明确启用时）
         publishTF();
       }
-      // 已定位且不需要持续发布 TF → 停止定时器
       if (!publish_tf_) {
         relocalize_timer_->cancel();
         RCLCPP_INFO(this->get_logger(),
                      "Relocalization complete, timer stopped.");
       }
+      return;
+    }
+
+    // ─── 旋转采集阶段：等待旋转完成 ───
+    if (rotate_enable_ && rot_phase_ != RotationPhase::DONE) {
+      if (rot_phase_ == RotationPhase::IDLE) {
+        startRotation();
+      }
+      // 旋转过程中不执行重定位（由 rotation_timer_ 驱动）
       return;
     }
 
@@ -476,6 +563,14 @@ private:
       }
     } else {
       RCLCPP_INFO(this->get_logger(), "Using accumulated cloud (%zu pts)", current_cloud->size());
+    }
+
+    if (current_cloud->size() < static_cast<size_t>(min_relocalize_points_)) {
+      RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                           "Accumulated cloud has %zu pts, waiting for at least %d pts",
+                           current_cloud->size(), min_relocalize_points_);
+      publishStatus("WAITING_FOR_DENSE_CLOUD");
+      return;
     }
 
     auto map_cloud = map_loader_->getDownsampledMap();
@@ -553,8 +648,11 @@ private:
     RCLCPP_INFO(this->get_logger(),
                  "Relocalization SUCCEEDED! fitness=%.4f "
                  "translation=%.3fm rotation=%.1fdeg "
+                 "kiss_inliers(rot=%d, trans=%d) used_gicp=%s "
                  "(src=%d pts, tgt=%d pts)",
                  fitness, result->translation_m, result->rotation_deg,
+                 result->kiss_rotation_inliers, result->kiss_translation_inliers,
+                 result->used_gicp ? "true" : "false",
                  result->src_points, result->tgt_points);
     publishStatus("LOCALIZED");
 
@@ -567,6 +665,165 @@ private:
     if (publish_tf_) {
       publishTF();
     }
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // ─── 原地旋转采集（含点云避障）───
+  // ═══════════════════════════════════════════════════════════════
+
+  /// 启动旋转采集：清空累积器并开始旋转
+  void startRotation()
+  {
+    if (!has_odom_) {
+      RCLCPP_WARN(this->get_logger(),
+                   "[旋转采集] 无 odom 数据，跳过旋转");
+      rot_phase_ = RotationPhase::DONE;
+      return;
+    }
+
+    accumulator_->clear();
+    rotation_yaw_init_ = false;
+    total_rotated_angle_ = 0.0;
+    last_rotation_yaw_ = getYawFromOdom();
+    rotation_start_yaw_ = last_rotation_yaw_;
+
+    rot_phase_ = RotationPhase::ROTATING;
+
+    RCLCPP_INFO(this->get_logger(),
+                 "[旋转采集] 开始原地旋转 %.0f° (%.2f rad/s)，"
+                 "避障=%s (检测范围±%.0f°, 最小距离%.2fm)",
+                 rotate_total_angle_deg_,
+                 std::abs(rotate_angular_speed_),
+                 rotate_obstacle_check_ ? "ON" : "OFF",
+                 rotate_obstacle_check_range_deg_,
+                 rotate_obstacle_min_dist_);
+    publishStatus("ROTATING");
+  }
+
+  /// 旋转控制回调（25Hz）
+  void rotationControlCallback()
+  {
+    if (rot_phase_ == RotationPhase::IDLE ||
+        rot_phase_ == RotationPhase::DONE) {
+      return;
+    }
+
+    if (!has_odom_) return;
+
+    if (rot_phase_ == RotationPhase::ROTATING) {
+      // ── 步骤1：避障检查 ──
+      if (rotate_obstacle_check_ &&
+          latest_cloud_ && !latest_cloud_->empty()) {
+        if (checkObstacleInRotationDirection()) {
+          RCLCPP_WARN(this->get_logger(),
+                       "[旋转避障] 旋转方向±%.0f° 内检测到障碍物 (距离<%.2fm)，"
+                       "停止旋转",
+                       rotate_obstacle_check_range_deg_,
+                       rotate_obstacle_min_dist_);
+          publishCmdVel(0.0);
+          rot_phase_ = RotationPhase::STOPPING;
+          rotation_stop_time_ = this->now();
+          publishStatus("ROTATION_OBSTACLE_STOP");
+          return;
+        }
+      }
+
+      // ── 步骤2：累计旋转角度 ──
+      double current_yaw = getYawFromOdom();
+      if (!std::isnan(last_rotation_yaw_) && !std::isnan(current_yaw)) {
+        double delta = current_yaw - last_rotation_yaw_;
+        // 角度归一化到 [-π, π]
+        while (delta > M_PI)  delta -= 2.0 * M_PI;
+        while (delta < -M_PI) delta += 2.0 * M_PI;
+        total_rotated_angle_ += std::abs(delta);
+      }
+      last_rotation_yaw_ = current_yaw;
+
+      // ── 步骤3：检查是否完成 ──
+      double target_rad = rotate_total_angle_deg_ * M_PI / 180.0;
+      if (total_rotated_angle_ >= target_rad) {
+        RCLCPP_INFO(this->get_logger(),
+                     "[旋转采集] 完成 %.0f° 旋转，累积 %zu 帧点云",
+                     total_rotated_angle_ * 180.0 / M_PI,
+                     accumulator_->bufferSize());
+        publishCmdVel(0.0);
+        rot_phase_ = RotationPhase::STOPPING;
+        rotation_stop_time_ = this->now();
+        publishStatus("ROTATION_COMPLETE");
+        return;
+      }
+
+      // ── 步骤4：继续旋转 ──
+      publishCmdVel(rotate_angular_speed_);
+    }
+    else if (rot_phase_ == RotationPhase::STOPPING) {
+      // 等待机器人完全停止（1.5 秒缓冲）
+      double elapsed = (this->now() - rotation_stop_time_).seconds();
+      if (elapsed > 1.5) {
+        rot_phase_ = RotationPhase::DONE;
+        RCLCPP_INFO(this->get_logger(),
+                     "[旋转采集] 已停止，进入重定位阶段 "
+                     "(累积云 %zu 帧)",
+                     accumulator_->bufferSize());
+        publishStatus("ROTATION_DONE");
+      }
+    }
+  }
+
+  /// 从 odom 四元数提取 yaw 角
+  double getYawFromOdom()
+  {
+    const auto& q = latest_odom_pose_.orientation;
+    return std::atan2(2.0 * (q.w * q.z + q.x * q.y),
+                       1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+  }
+
+  /// 发布角速度到 /cmd_vel
+  void publishCmdVel(double angular_z)
+  {
+    if (!cmd_vel_pub_) return;
+    auto msg = std::make_unique<geometry_msgs::msg::Twist>();
+    msg->angular.z = angular_z;
+    // linear 全为 0（纯原地旋转）
+    cmd_vel_pub_->publish(std::move(msg));
+  }
+
+  /// 基于最新点云检测旋转方向是否有障碍物
+  /// @return true=有障碍物，应立即停止旋转
+  bool checkObstacleInRotationDirection()
+  {
+    if (!latest_cloud_ || latest_cloud_->empty()) return false;
+
+    // 旋转方向符号（正=CCW/左转，负=CW/右转）
+    double dir_sign = (rotate_angular_speed_ > 0.0) ? 1.0 : -1.0;
+
+    // 检测扇形角度范围（相对于机器人正前方 X 轴）
+    double half_angle = rotate_obstacle_check_range_deg_ * M_PI / 180.0 / 2.0;
+    double min_dist2 = rotate_obstacle_min_dist_ * rotate_obstacle_min_dist_;
+
+    // 危险区域：机器人前方旋转方向侧的扇形
+    // CCW 旋转 → 检查 [0, half_angle]（右侧/正前）
+    // CW  旋转 → 检查 [-half_angle, 0]（左侧/正前）
+    double angle_lo = std::min(0.0, dir_sign * half_angle);
+    double angle_hi = std::max(0.0, dir_sign * half_angle);
+
+    for (const auto& pt : *latest_cloud_) {
+      // 过滤非有限值
+      if (!std::isfinite(pt.x) || !std::isfinite(pt.y)) continue;
+
+      double d2 = pt.x * pt.x + pt.y * pt.y;
+      if (d2 > min_dist2 || d2 < 0.005) continue;  // 太远或太近（噪声）
+
+      double angle = std::atan2(pt.y, pt.x);
+      if (angle >= angle_lo && angle <= angle_hi) {
+        RCLCPP_DEBUG(this->get_logger(),
+                      "[旋转避障] 障碍点: (%.2f, %.2f) dist=%.2fm angle=%.1f°",
+                      pt.x, pt.y, std::sqrt(d2), angle * 180.0 / M_PI);
+        return true;
+      }
+    }
+
+    return false;
   }
 
   // ─── 发布 map→odom TF ───
