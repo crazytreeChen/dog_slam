@@ -44,7 +44,7 @@
     log_level: "INFO"                    # 文件日志级别: DEBUG/INFO/WARN/ERROR
 
     # ────── 开机自动启动 ──────
-    auto_start: false              # 开机收到地图+scan+odom后自动触发校准
+    auto_start: true              # 开机收到地图+scan+odom后自动触发校准
     auto_start_delay: 3.0         # 数据就绪后等待延迟 (秒)
     quick_mode: false             # 快速模式：跳过旋转 (false=保留旋转检查)
     publish_after_rotation: true  # 旋转采集+多步匹配完成后直接发布初始位姿 (跳过运动探索)
@@ -71,7 +71,7 @@
 
     # ────── 置信度门控 ──────
     confidence_threshold_update: 0.50   # 允许更新原点/校准位姿的置信度阈值 (0.0~1.0)
-    confidence_threshold_publish: 0.30  # 允许发布 /initialpose 的置信度阈值 (0.0~1.0)
+    confidence_threshold_publish: 0.40  # 允许发布 /initialpose 的置信度阈值 (0.0~1.0)
     confidence_threshold_amcl: 0.35     # 低置信度仍可辅助 AMCL 的阈值 (0.0~1.0, 当前仅监控)
 
     # ────── 旋转采集 ──────
@@ -105,7 +105,7 @@
     ig_sample_dist_2: 2.0         # 似然场特征提取的外圈采样半径 (m)
 
     # ────── 局部子图 ──────
-    submap_scan_count: 160         # 构建单次子图所需的雷达帧数（多帧增加密度+时序过滤效果）
+    submap_scan_count: 30         # 构建单次子图所需的雷达帧数（多帧增加密度+时序过滤效果）
     submap_angle_resolution: 0.5  # 子集合成 Scan 的角分辨率 (度)
 
     # ────── 多帧时序一致性过滤 ──────
@@ -174,6 +174,7 @@
     dt_scan_max_points: 500              # 匹配用最大扫描点数
     dt_multistep_enabled: true            # 多步递推首帧使用双模板搜索
     dt_passive_enabled: true              # 被动匹配首帧使用双模板搜索
+    dt_free_space_penalty_weight: 0.3   # 自由空间惩罚权重 (越大越排斥扫描点落在空地, 防止小房间误匹配到大房间单面墙)
 
     # ────── 偏差监控 ──────
     deviation_monitor_enabled: true  # 是否启用偏差监控

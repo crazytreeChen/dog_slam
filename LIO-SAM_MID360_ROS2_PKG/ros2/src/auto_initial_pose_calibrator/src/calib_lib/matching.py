@@ -24,18 +24,7 @@ from .scoring import (
     build_distance_field, score_distance_field,
     build_dual_template_maps, dual_template_global_match,
 )
-
-# IndoorPhase 枚举定义在主节点文件中, 这里需要导入才能使用
-try:
-    from auto_initial_pose_calibrator import IndoorPhase
-except ImportError:
-    # 如果作为脚本运行 (不在 ROS 环境中), 定义一份简化的 fallback
-    from enum import Enum
-    class IndoorPhase(Enum):
-        IDLE = 0; BOOT_DELAY = 1; ROTATING_360 = 2; COLLECTING_SUBMAP1 = 3
-        ROUGH_MATCHING = 4; SELECTING_ACTIVE_MOTION = 5; MOVING = 6
-        COLLECTING_SUBMAP2 = 7; FILTERING = 8; DONE = 9
-        PASSIVE_COLLECTING = 10; PASSIVE_MATCHING = 11; ACTIVE_MULTISTEP = 12
+from . import IndoorPhase
 
 
 class ScanMatcher:
@@ -1090,7 +1079,25 @@ class ScanMatcher:
         ts = node.get_clock().now().nanoseconds / 1e9
         node.passive_pose_history.append((ts, mu[0], mu[1], mu[2], avg_wall))
 
-        # 低覆盖率 debug 输出
+        # 低覆盖率处理: wall 过低时不更新 passive_best_pose，避免错误先验污染后续匹配
+        MIN_WALL_FOR_BEST_POSE = 0.20
+        if avg_wall < MIN_WALL_FOR_BEST_POSE:
+            self._logger.warn(
+                f'[被动低覆盖] {elapsed:.1f}s wall={100*avg_wall:.0f}% < {100*MIN_WALL_FOR_BEST_POSE:.0f}% '
+                f'({mu[0]:.2f},{mu[1]:.2f},{math.degrees(mu[2]):.1f}deg) '
+                f'buf={len(node.passive_scan_buffer)}帧 -- 不更新先验，仅输出debug')
+            # 发布 debug 位姿供可视化
+            if hasattr(node, 'debug_auto_pose_pub'):
+                msg = PoseWithCovarianceStamped()
+                msg.header.stamp = node.get_clock().now().to_msg()
+                msg.header.frame_id = node.map_frame
+                msg.pose.pose.position = Point(x=mu[0], y=mu[1], z=0.0)
+                qz_d = math.sin(mu[2] / 2.0)
+                qw_d = math.cos(mu[2] / 2.0)
+                msg.pose.pose.orientation = Quaternion(x=0.0, y=0.0, z=qz_d, w=qw_d)
+                node.debug_auto_pose_pub.publish(msg)
+            node.indoor_phase = IndoorPhase.PASSIVE_COLLECTING
+            return
         if avg_wall < 0.25:
             self._logger.info(
                 f'[被动低覆盖] {elapsed:.1f}s wall={100*avg_wall:.0f}% '

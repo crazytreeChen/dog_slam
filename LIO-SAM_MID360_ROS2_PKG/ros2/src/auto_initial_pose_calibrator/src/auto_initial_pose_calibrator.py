@@ -44,6 +44,7 @@ except ImportError:
     NAV2_DEFAULT_MAP_FILE = "/home/ztl/slam_data/grid_map/map.yaml"
 
 # ────── calib_lib 子包导入（模块化拆分后算法层） ──────
+from calib_lib import IndoorPhase
 from calib_lib.scan_utils import (
     norm_angle, quat_to_yaw, scan_to_points, filter_scan_outliers,
     frf_filter_frame, ScanFilterConfig,
@@ -60,24 +61,6 @@ from calib_lib.submap import SubmapBuilder
 from calib_lib.matching import ScanMatcher
 from calib_lib.control import MotionController
 from calib_lib.rtk import rtk_to_map_coords, build_pose_covariance
-
-
-class IndoorPhase(Enum):
-    IDLE = 0
-    BOOT_DELAY = 1
-    ROTATING_360 = 2
-    COLLECTING_SUBMAP1 = 3
-    ROUGH_MATCHING = 4
-    SELECTING_ACTIVE_MOTION = 5
-    MOVING = 6
-    COLLECTING_SUBMAP2 = 7
-    FILTERING = 8
-    DONE = 9
-    # ── 被动模式 ──
-    PASSIVE_COLLECTING = 10
-    PASSIVE_MATCHING = 11
-    # ── 主动多步递推 ──
-    ACTIVE_MULTISTEP = 12      # 逐帧ICP + 局部搜索, sigma衰减
 
 
 class AutoInitialPoseCalibrator(Node):
@@ -1684,6 +1667,12 @@ class AutoInitialPoseCalibrator(Node):
             self.indoor_phase = IndoorPhase.SELECTING_ACTIVE_MOTION
     def _passive_timer_cb(self):
         """被动模式定时器: 每隔 passive_interval 秒检查 AMCL 偏差并决定是否重新匹配"""
+        try:
+            self._passive_timer_cb_inner()
+        except Exception as e:
+            self._logger.error(f'[被动定时] 异常: {e}')
+
+    def _passive_timer_cb_inner(self):
         if not self.passive_mode_enabled:
             return
         if self.map_data is None or self.current_scan is None:
@@ -1693,24 +1682,66 @@ class AutoInitialPoseCalibrator(Node):
             return
         if self.indoor_phase not in (IndoorPhase.PASSIVE_COLLECTING, IndoorPhase.PASSIVE_MATCHING,
                                        IndoorPhase.IDLE, IndoorPhase.DONE):
+            self._logger.info(
+                f'[被动定时] 跳过: phase={self.indoor_phase.name} 不在允许列表')
             return
+        # 运动中跳过: 里程计显示机器人正在移动时不做被动匹配
+        if self.current_odom is not None:
+            tw = self.current_odom.twist.twist
+            speed = math.sqrt(tw.linear.x**2 + tw.linear.y**2)
+            if speed > 0.05 or abs(tw.angular.z) > 0.05:
+                self._logger.debug(
+                    f'[被动定时] 跳过: 运动中 v={speed:.2f}m/s w={math.degrees(tw.angular.z):.1f}°/s')
+                return
         # 互斥防护: 避免 _indoor_loop 的 PASSIVE_MATCHING 分支重复触发 do_passive
         if getattr(self, '_passive_busy', False):
+            self._logger.info('[被动定时] 跳过: _passive_busy=True')
             return
         self._passive_busy = True
         try:
+            # ── 冷却期检查: 刚发布过 /initialpose 后等待 AMCL 收敛 ──
+            now_sec = self.get_clock().now().nanoseconds * 1e-9
+            pub_cooldown = getattr(self, '_publish_cooldown_until', 0.0)
+            last_trigger = getattr(self, '_passive_last_trigger_time', 0.0)
+            cooldown_until = max(pub_cooldown, last_trigger + self.passive_publish_cooldown)
+            cooldown_remaining = cooldown_until - now_sec
+            if cooldown_remaining > 0:
+                self._logger.debug(
+                    f'[被动定时] 冷却中 {cooldown_remaining:.0f}s，跳过')
+                return
+
             # ── 核心逻辑: 检查 AMCL 偏差，超阈值则触发完整扫描匹配 ──
-            if self.last_calibrated_pose is not None and hasattr(self, '_last_amcl_x'):
-                ref_x, ref_y, _ = self.last_calibrated_pose
-                amcl_dev = math.sqrt(
-                    (self._last_amcl_x - ref_x)**2 +
-                    (self._last_amcl_y - ref_y)**2)
-                if amcl_dev > self.passive_deviation_threshold:
+            # 同时检查 last_calibrated_pose 和 _deviation_ref 两个基准，
+            # 因为低置信度被动匹配只更新 _deviation_ref 不更新 last_calibrated_pose
+            if hasattr(self, '_last_amcl_x'):
+                amcl_dev = None
+                ref_source = None
+                if self.last_calibrated_pose is not None:
+                    ref_x, ref_y, _ = self.last_calibrated_pose
+                    amcl_dev = math.sqrt(
+                        (self._last_amcl_x - ref_x)**2 +
+                        (self._last_amcl_y - ref_y)**2)
+                    ref_source = 'last_calibrated_pose'
+                dev_ref = getattr(self, '_deviation_ref', None)
+                if dev_ref is not None:
+                    dr_x, dr_y, _ = dev_ref
+                    dev_ref_dist = math.sqrt(
+                        (self._last_amcl_x - dr_x)**2 +
+                        (self._last_amcl_y - dr_y)**2)
+                    if amcl_dev is None or dev_ref_dist > amcl_dev:
+                        amcl_dev = dev_ref_dist
+                        ref_source = '_deviation_ref'
+                if amcl_dev is not None and amcl_dev > self.passive_deviation_threshold:
+                    self._passive_last_trigger_time = now_sec
                     self._logger.warn(
-                        f'[被动定时] AMCL偏差 {amcl_dev:.2f}m > {self.passive_deviation_threshold:.1f}m，'
-                        f'触发完整扫描匹配更新位姿')
+                        f'[被动定时] AMCL偏差 {amcl_dev:.2f}m > {self.passive_deviation_threshold:.1f}m '
+                        f'(基准={ref_source})，触发完整扫描匹配更新位姿')
                     self.indoor_phase = IndoorPhase.PASSIVE_MATCHING
                     return
+                elif amcl_dev is not None:
+                    self._logger.info(
+                        f'[被动定时] AMCL偏差 {amcl_dev:.2f}m <= {self.passive_deviation_threshold:.1f}m '
+                        f'(基准={ref_source})，偏差正常')
 
             # ── 偏差正常: 尝试里程计融合轻量验证 ──
             ok, pred_pose, reason = self._try_odom_fusion_verify()

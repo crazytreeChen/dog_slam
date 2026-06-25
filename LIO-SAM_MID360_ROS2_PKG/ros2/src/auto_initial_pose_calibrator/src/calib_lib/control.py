@@ -16,6 +16,7 @@ import numpy as np
 from geometry_msgs.msg import Twist
 
 from .scan_utils import norm_angle, quat_to_yaw
+from . import IndoorPhase
 
 
 class MotionController:
@@ -109,7 +110,7 @@ class MotionController:
                 node.target_odom_pose = (target_x, target_y, target_yaw)
                 node.motion_start_odom = node.current_odom
                 node.motion_start_time = node.get_clock().now()
-                node.indoor_phase = node.IndoorPhase.MOVING
+                node.indoor_phase = IndoorPhase.MOVING
             else:
                 self._logger.warn('里程计信号中断，无法启动移动。')
         else:
@@ -120,7 +121,7 @@ class MotionController:
                 node.target_odom_pose = (curr_pos.x, curr_pos.y, norm_angle(curr_yaw + math.radians(45.0)))
                 node.motion_start_odom = node.current_odom
                 node.motion_start_time = node.get_clock().now()
-                node.indoor_phase = node.IndoorPhase.MOVING
+                node.indoor_phase = IndoorPhase.MOVING
             else:
                 node._reset_indoor()
 
@@ -187,14 +188,14 @@ class MotionController:
         与原 _do_control_loop_and_avoidance 行为完全一致。
         """
         if node.target_odom_pose is None or node.current_odom is None:
-            node.indoor_phase = node.IndoorPhase.COLLECTING_SUBMAP2
+            node.indoor_phase = IndoorPhase.COLLECTING_SUBMAP2
             return
 
         # 1. 超时限制（防卡死，12秒）
         time_elapsed = (node.get_clock().now() - node.motion_start_time).nanoseconds / 1e9
         if time_elapsed > 12.0:
             self._logger.warn('[主动控制] 移动超时限制，停止并开始下一步匹配。')
-            node.indoor_phase = node.IndoorPhase.COLLECTING_SUBMAP2
+            node.indoor_phase = IndoorPhase.COLLECTING_SUBMAP2
             node.scan_buffer.clear()
             node.submap_ready = False
             return
@@ -216,7 +217,7 @@ class MotionController:
         # 3. 终点判定
         if dist_err < 0.05 and abs(dyaw) < math.radians(5.0):
             self._logger.info('[主动控制] 已精准抵达目标运动位姿。')
-            node.indoor_phase = node.IndoorPhase.COLLECTING_SUBMAP2
+            node.indoor_phase = IndoorPhase.COLLECTING_SUBMAP2
             node.scan_buffer.clear()
             node.submap_ready = False
             return
@@ -239,7 +240,7 @@ class MotionController:
                     if r < node.min_safe_distance:
                         self._logger.warn(f'[避障停机] 前方检测到障碍物距离过近 ({r:.2f}m)！紧急触发主动停止并进行子图构建。')
                         node.cmd_vel_pub.publish(Twist())
-                        node.indoor_phase = node.IndoorPhase.COLLECTING_SUBMAP2
+                        node.indoor_phase = IndoorPhase.COLLECTING_SUBMAP2
                         node.scan_buffer.clear()
                         node.submap_ready = False
                         return
