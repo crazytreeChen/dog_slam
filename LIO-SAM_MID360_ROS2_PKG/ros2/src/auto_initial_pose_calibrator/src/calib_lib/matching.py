@@ -1240,10 +1240,12 @@ class ScanMatcher:
                 set_reference = False
             else:
                 set_reference = False
+            node._update_deviation_ref(pose_to_publish[0], pose_to_publish[1], pose_to_publish[2])
             status = '发布→/initialpose ' + gate_level + ('[二次验证]' if recheck_passed else '')
         else:
             if hasattr(node, 'debug_auto_pose_pub'):
                 node.debug_auto_pose_pub.publish(msg)
+            node._update_deviation_ref(pose_to_publish[0], pose_to_publish[1], pose_to_publish[2])
             status = 'debug模式' + ('[二次验证]' if recheck_passed else '')
             node.passive_bootstrap_failures = 0
 

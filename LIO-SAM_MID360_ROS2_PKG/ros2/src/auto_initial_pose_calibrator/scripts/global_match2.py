@@ -241,7 +241,7 @@ def visualize_result(map_data, origin_x, origin_y, resolution, scan_points, best
     plt.show()
 
 if __name__ == "__main__":
-    file_path = "../scan_viz/debug_match_data_8.npz"
+    file_path = "../scan_viz/debug_match_data_9.npz"
     best_pose, map_data, origin_x, origin_y, resolution, scan_points = load_and_match_robust(file_path)
     visualize_result(map_data, origin_x, origin_y, resolution, scan_points, best_pose)
 

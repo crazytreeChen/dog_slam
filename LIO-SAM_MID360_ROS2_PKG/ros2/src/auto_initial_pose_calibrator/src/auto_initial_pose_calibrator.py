@@ -172,7 +172,7 @@ class AutoInitialPoseCalibrator(Node):
 
         # ────── 被动模式参数 ──────
         self.declare_parameter('passive_mode_enabled', True)    # 是否启用被动持续定位
-        self.declare_parameter('passive_interval', 60.0)        # 被动匹配间隔 (秒)
+        self.declare_parameter('passive_interval', 30.0)        # 被动匹配间隔 (秒)
         self.declare_parameter('passive_frame_count', 30)       # 每次被动匹配累积帧数
         self.declare_parameter('passive_buffer_max', 300)       # 循环缓冲区最大帧数
         self.declare_parameter('passive_quality_threshold', 0.25)         # 墙壁覆盖率最低阈值
@@ -1683,7 +1683,7 @@ class AutoInitialPoseCalibrator(Node):
             self._publish_candidates()
             self.indoor_phase = IndoorPhase.SELECTING_ACTIVE_MOTION
     def _passive_timer_cb(self):
-        """被动模式定时器: 每隔 passive_interval 秒触发一次匹配"""
+        """被动模式定时器: 每隔 passive_interval 秒检查 AMCL 偏差并决定是否重新匹配"""
         if not self.passive_mode_enabled:
             return
         if self.map_data is None or self.current_scan is None:
@@ -1699,7 +1699,20 @@ class AutoInitialPoseCalibrator(Node):
             return
         self._passive_busy = True
         try:
-            # ── 尝试里程计融合轻量验证 ──
+            # ── 核心逻辑: 检查 AMCL 偏差，超阈值则触发完整扫描匹配 ──
+            if self.last_calibrated_pose is not None and hasattr(self, '_last_amcl_x'):
+                ref_x, ref_y, _ = self.last_calibrated_pose
+                amcl_dev = math.sqrt(
+                    (self._last_amcl_x - ref_x)**2 +
+                    (self._last_amcl_y - ref_y)**2)
+                if amcl_dev > self.passive_deviation_threshold:
+                    self._logger.warn(
+                        f'[被动定时] AMCL偏差 {amcl_dev:.2f}m > {self.passive_deviation_threshold:.1f}m，'
+                        f'触发完整扫描匹配更新位姿')
+                    self.indoor_phase = IndoorPhase.PASSIVE_MATCHING
+                    return
+
+            # ── 偏差正常: 尝试里程计融合轻量验证 ──
             ok, pred_pose, reason = self._try_odom_fusion_verify()
             if ok and pred_pose is not None:
                 # 验证通过 → 置信度门控，跳过扫描匹配
@@ -1771,6 +1784,7 @@ class AutoInitialPoseCalibrator(Node):
                     curr_yaw = self._quat_to_yaw(self.current_odom.pose.pose.orientation)
                     self.passive_last_odom = (curr_pos.x, curr_pos.y, curr_yaw)
                     self.passive_odom_accum_dist = 0.0
+                    self._update_deviation_ref(px, py, pyaw)
                     self._logger.info(
                         f'[被动融合{gate_level}] 发布推算位姿: ({px:.2f},{py:.2f},{math.degrees(pyaw):.1f}deg) '
                         f'conf={conf_pct:.0f}% odom_delta={self.passive_odom_accum_dist:.2f}m [{reason}]')
@@ -2022,10 +2036,12 @@ class AutoInitialPoseCalibrator(Node):
                 set_reference = False
             else:
                 set_reference = False
+            self._update_deviation_ref(pose_to_publish[0], pose_to_publish[1], pose_to_publish[2])
             status = '发布→/initialpose ' + gate_level + ('[二次验证]' if recheck_passed else '')
         else:
             if hasattr(self, 'debug_auto_pose_pub'):
                 self.debug_auto_pose_pub.publish(msg)
+            self._update_deviation_ref(pose_to_publish[0], pose_to_publish[1], pose_to_publish[2])
             status = 'debug模式' + ('[二次验证]' if recheck_passed else '')
             # debug模式也重置计数器, 防止无限累积累积触发阈值异常放宽
             self.passive_bootstrap_failures = 0
@@ -2816,7 +2832,7 @@ class AutoInitialPoseCalibrator(Node):
         self._logger.info(f'[偏差监控] 启动, 基准: ({cal_x:.2f},{cal_y:.2f})')
 
     def _check_deviation(self):
-        """每2秒检查AMCL vs 校准偏差"""
+        """每2秒检查AMCL vs 校准偏差 (纯监控日志，触发逻辑在 _passive_timer_cb)"""
         if getattr(self, '_deviation_ref', None) is None or self.current_odom is None:
             return
         cal_x, cal_y, cal_yaw = self._deviation_ref
@@ -2831,6 +2847,18 @@ class AutoInitialPoseCalibrator(Node):
         if self._deviation_count % 15 == 0:
             self._logger.info(f'[偏差监控] {elapsed:.0f}s, 偏差={dev_dist:.3f}m, ' +
                              f'AMCL=({amcl_x:.2f},{self._last_amcl_y:.2f})')
+
+    def _update_deviation_ref(self, x, y, yaw):
+        """被动发布成功后更新偏差监控基准，避免基准过时导致虚假大偏差"""
+        if hasattr(self, '_deviation_ref') and self._deviation_ref is not None:
+            old_x, old_y, _ = self._deviation_ref
+            dist = math.sqrt((x - old_x)**2 + (y - old_y)**2)
+            if dist > 1.0:
+                self._logger.info(
+                    f'[偏差基准更新] ({old_x:.2f},{old_y:.2f}) → ({x:.2f},{y:.2f}) Δ={dist:.2f}m')
+        self._deviation_ref = (x, y, yaw)
+        self._deviation_start_time = self.get_clock().now()
+        self._deviation_exceeded = False
 
     def _publish_candidates(self):
         pose_array = PoseArray()
