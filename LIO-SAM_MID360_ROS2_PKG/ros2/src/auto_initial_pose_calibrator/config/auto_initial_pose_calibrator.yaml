@@ -168,7 +168,7 @@
     # 核心: 命中模板(奖励) + 射线惩罚模板(惩罚穿墙) + cv2.matchTemplate全图卷积
     # 优点: 速度极快(全图卷积), 天然防穿墙, 角度精修达0.5°
     use_dual_template_matching: true      # 启用双模板匹配替代网格/距离场 (优先级最高)
-    dt_angle_step_deg: 5.0               # 双模板粗搜角度步长 (度, 默认2°)
+    dt_angle_step_deg: 3.0               # 双模板粗搜角度步长 (度, 默认2°)
     dt_fine_angle_step_deg: 0.5          # 双模板精修角度步长 (度, 默认0.5°)
     dt_penalty_weight: 3.0               # 射线穿透惩罚权重 (越大越排斥穿墙, 默认3.0)
     dt_scan_max_points: 500              # 匹配用最大扫描点数
@@ -183,10 +183,11 @@
     deviation_alert_threshold: 0.5   # 偏差告警阈值 (m)
     deviation_alert_window: 180.0    # 开机告警窗口 (秒, 前3分钟严格)
 
-    # ────── 运动状态跟踪 (运动停止触发 & 静止漂移检测) ──────
+    # ────── 运动状态跟踪 (运动停止触发 & odom→map 偏差检测) ──────
     motion_tracking_enabled: true        # 启用运动状态跟踪
     motion_speed_threshold: 0.05         # 线速度阈值 (m/s)，超过判定为运动
     motion_angular_threshold: 0.05       # 角速度阈值 (rad/s)，超过判定为运动
     motion_settle_time: 1.0              # 停止后等待稳定时间 (秒)
-    motion_drift_threshold: 0.15         # 静止时 odom 漂移触发阈值 (m)
     motion_stop_cooldown: 10.0           # 停止事件触发后冷却时间 (秒)
+    passive_odom_deviation_threshold: 0.3   # odom→map 推算偏差触发阈值 (m)，超过触发重匹配
+    passive_amcl_deviation_trigger: 1.0     # AMCL 交叉验证阈值 (m)，计算结果与 AMCL 偏差超过此值才更新位姿

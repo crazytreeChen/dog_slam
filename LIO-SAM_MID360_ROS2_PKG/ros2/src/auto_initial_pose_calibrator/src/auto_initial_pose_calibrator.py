@@ -183,8 +183,11 @@ class AutoInitialPoseCalibrator(Node):
         self.declare_parameter('motion_speed_threshold', 0.05)           # 线速度阈值 (m/s)
         self.declare_parameter('motion_angular_threshold', 0.05)         # 角速度阈值 (rad/s)
         self.declare_parameter('motion_settle_time', 1.0)                # 停止后等待稳定时间 (秒)
-        self.declare_parameter('motion_drift_threshold', 0.15)           # 静止时 odom 漂移触发阈值 (m)
         self.declare_parameter('motion_stop_cooldown', 10.0)             # 停止事件触发后冷却时间 (秒)
+        # odom→map 推算偏差触发阈值 (静止中 odom 累积漂移超过此值触发重匹配)
+        self.declare_parameter('passive_odom_deviation_threshold', 0.3)  # (m)
+        # AMCL 交叉验证偏差阈值 (计算结果与 AMCL 偏差 > 此值才更新位姿)
+        self.declare_parameter('passive_amcl_deviation_trigger', 1.0)    # (m)
 
         # ────── 距离场全局匹配参数 (来自 global_match.py) ──────
         self.declare_parameter('use_distance_field_matching', False)     # 是否启用距离场全局匹配替代网格搜索
@@ -349,8 +352,9 @@ class AutoInitialPoseCalibrator(Node):
         self._motion_speed_threshold = self.get_parameter('motion_speed_threshold').value
         self._motion_angular_threshold = self.get_parameter('motion_angular_threshold').value
         self._motion_settle_time = self.get_parameter('motion_settle_time').value
-        self._motion_drift_threshold = self.get_parameter('motion_drift_threshold').value
         self._motion_stop_cooldown = self.get_parameter('motion_stop_cooldown').value
+        self.passive_odom_deviation_threshold = self.get_parameter('passive_odom_deviation_threshold').value
+        self.passive_amcl_deviation_trigger = self.get_parameter('passive_amcl_deviation_trigger').value
 
         # ─── 距离场全局匹配 ───
         self.use_distance_field_matching = self.get_parameter('use_distance_field_matching').value
@@ -523,7 +527,6 @@ class AutoInitialPoseCalibrator(Node):
             speed_threshold=self._motion_speed_threshold,
             angular_threshold=self._motion_angular_threshold,
             settle_time=self._motion_settle_time,
-            drift_threshold=self._motion_drift_threshold,
             stop_cooldown=self._motion_stop_cooldown,
         ) if self.motion_tracking_enabled else None
 
@@ -1766,9 +1769,8 @@ class AutoInitialPoseCalibrator(Node):
                     f'[被动定时] 跳过: 运动中 v={speed:.2f}m/s w={math.degrees(tw.angular.z):.1f}°/s')
                 return
 
-        # ── 运动状态跟踪: 停止事件 & 漂移检测 ──
+        # ── 运动状态跟踪: 停止事件 ──
         if self._motion_tracker is not None:
-            # 场景1: 运动刚停止 → 清空缓冲区，等待新静止帧累积
             if self._motion_tracker.just_stopped:
                 self._logger.info(
                     '[被动定时] 检测到运动停止，清空扫描缓冲区等待静止帧累积...')
@@ -1776,16 +1778,32 @@ class AutoInitialPoseCalibrator(Node):
                 self._motion_tracker.clear_just_stopped()
                 return
 
-            # 场景2: 静止但检测到 odom 漂移 → 强制触发重新匹配
-            if self._motion_tracker.is_drifting:
-                drift = self._motion_tracker.drift_distance
+        # ── odom→map 推算偏差检测（独立于运动状态）──
+        # 只要有 last_calibrated_pose 和 odom 就检查，不依赖运动/静止状态
+        if self.last_calibrated_pose is not None and self.current_odom is not None \
+                and self.passive_last_odom is not None:
+            last_ox, last_oy, last_oyaw = self.passive_last_odom
+            curr_pos = self.current_odom.pose.pose.position
+            dx_o = curr_pos.x - last_ox
+            dy_o = curr_pos.y - last_oy
+            odom_displacement = math.sqrt(dx_o**2 + dy_o**2)
+            if odom_displacement > self.passive_odom_deviation_threshold:
                 self._logger.warn(
-                    f'[被动定时] ⚠ 检测到静止漂移 {drift:.3f}m，强制触发重新匹配')
+                    f'[被动定时] ⚠ odom累计位移 {odom_displacement:.2f}m '
+                    f'> {self.passive_odom_deviation_threshold:.2f}m，触发重匹配')
                 self.indoor_phase = IndoorPhase.PASSIVE_MATCHING
                 return
+            else:
+                self._logger.debug(
+                    f'[被动定时] odom位移 {odom_displacement:.3f}m '
+                    f'<= {self.passive_odom_deviation_threshold:.2f}m')
+        else:
+            self._logger.debug(
+                f'[被动定时] drift检查跳过: calibrated={self.last_calibrated_pose is not None} '
+                f'odom={self.current_odom is not None} last_odom={self.passive_last_odom is not None}')
         # 互斥防护: 避免 _indoor_loop 的 PASSIVE_MATCHING 分支重复触发 do_passive
         if getattr(self, '_passive_busy', False):
-            self._logger.info('[被动定时] 跳过: _passive_busy=True')
+            self._logger.debug('[被动定时] 跳过: _passive_busy=True')
             return
         self._passive_busy = True
         try:
@@ -1800,44 +1818,58 @@ class AutoInitialPoseCalibrator(Node):
                     f'[被动定时] 冷却中 {cooldown_remaining:.0f}s，跳过')
                 return
 
-            # ── 核心逻辑: 检查 AMCL 偏差，超阈值则触发完整扫描匹配 ──
-            # 同时检查 last_calibrated_pose 和 _deviation_ref 两个基准，
-            # 因为低置信度被动匹配只更新 _deviation_ref 不更新 last_calibrated_pose
-            if hasattr(self, '_last_amcl_x'):
-                amcl_dev = None
-                ref_source = None
-                if self.last_calibrated_pose is not None:
-                    ref_x, ref_y, _ = self.last_calibrated_pose
-                    amcl_dev = math.sqrt(
-                        (self._last_amcl_x - ref_x)**2 +
-                        (self._last_amcl_y - ref_y)**2)
-                    ref_source = 'last_calibrated_pose'
-                dev_ref = getattr(self, '_deviation_ref', None)
-                if dev_ref is not None:
-                    dr_x, dr_y, _ = dev_ref
-                    dev_ref_dist = math.sqrt(
-                        (self._last_amcl_x - dr_x)**2 +
-                        (self._last_amcl_y - dr_y)**2)
-                    if amcl_dev is None or dev_ref_dist > amcl_dev:
-                        amcl_dev = dev_ref_dist
-                        ref_source = '_deviation_ref'
-                if amcl_dev is not None and amcl_dev > self.passive_deviation_threshold:
-                    self._passive_last_trigger_time = now_sec
-                    self._logger.warn(
-                        f'[被动定时] AMCL偏差 {amcl_dev:.2f}m > {self.passive_deviation_threshold:.1f}m '
-                        f'(基准={ref_source})，触发完整扫描匹配更新位姿')
-                    self.indoor_phase = IndoorPhase.PASSIVE_MATCHING
-                    return
-                elif amcl_dev is not None:
-                    self._logger.info(
-                        f'[被动定时] AMCL偏差 {amcl_dev:.2f}m <= {self.passive_deviation_threshold:.1f}m '
-                        f'(基准={ref_source})，偏差正常')
+            # ── 核心逻辑: odom→map 推算偏差检测 ──
+            # 用 last_calibrated_pose + LIO odom 位移推算当前位置，
+            # 与 last_calibrated_pose 比较偏差，超阈值触发重匹配
+            odom_drift = None
+            if self.last_calibrated_pose is not None and self.current_odom is not None:
+                if self.passive_last_odom is not None:
+                    last_ox, last_oy, last_oyaw = self.passive_last_odom
+                    curr_pos = self.current_odom.pose.pose.position
+                    curr_yaw = self._quat_to_yaw(self.current_odom.pose.pose.orientation)
+                    # odom 坐标系下的位移
+                    dx_o = curr_pos.x - last_ox
+                    dy_o = curr_pos.y - last_oy
+                    # 推算 map 坐标
+                    px, py, pyaw = self.last_calibrated_pose
+                    c_y, s_y = math.cos(pyaw), math.sin(pyaw)
+                    pred_x = px + dx_o * c_y - dy_o * s_y
+                    pred_y = py + dx_o * s_y + dy_o * c_y
+                    # 偏差 = 推算位置与上次校准位置的距离
+                    odom_drift = math.sqrt((pred_x - px)**2 + (pred_y - py)**2)
+
+                    if odom_drift > self.passive_odom_deviation_threshold:
+                        self._passive_last_trigger_time = now_sec
+                        self._logger.warn(
+                            f'[被动定时] ⚠ odom→map 推算偏差 {odom_drift:.2f}m '
+                            f'> {self.passive_odom_deviation_threshold:.2f}m，触发重匹配')
+                        self.indoor_phase = IndoorPhase.PASSIVE_MATCHING
+                        return
+                    else:
+                        self._logger.debug(
+                            f'[被动定时] odom→map 推算偏差 {odom_drift:.3f}m '
+                            f'<= {self.passive_odom_deviation_threshold:.2f}m，正常')
 
             # ── 偏差正常: 尝试里程计融合轻量验证 ──
             ok, pred_pose, reason = self._try_odom_fusion_verify()
             if ok and pred_pose is not None:
-                # 验证通过 → 置信度门控，跳过扫描匹配
+                # 验证通过 → AMCL 交叉验证: 偏差超过阈值才更新
                 px, py, pyaw = pred_pose
+                if self.latest_amcl_pose is not None:
+                    amcl_x, amcl_y, _ = self.latest_amcl_pose
+                    amcl_dev = math.sqrt((px - amcl_x)**2 + (py - amcl_y)**2)
+                    if amcl_dev < self.passive_amcl_deviation_trigger:
+                        self._logger.debug(
+                            f'[被动定时] AMCL交叉验证: 偏差 {amcl_dev:.2f}m '
+                            f'< {self.passive_amcl_deviation_trigger:.2f}m，无需更新')
+                        self.indoor_phase = IndoorPhase.PASSIVE_COLLECTING
+                        return
+                    else:
+                        self._logger.info(
+                            f'[被动定时] AMCL交叉验证: 偏差 {amcl_dev:.2f}m '
+                            f'>= {self.passive_amcl_deviation_trigger:.2f}m，'
+                            f'需要更新位姿')
+                # 置信度门控，跳过扫描匹配
 
                 # 提取融合验证中已计算的 lf_score 和 wall_ratio
                 # reason 格式: "ok wall=0.45 lf=0.320" 或类似
@@ -2355,6 +2387,12 @@ class AutoInitialPoseCalibrator(Node):
         self.passive_best_pose = None
         self.passive_last_match_time = None
         self.passive_bootstrap_failures = 0  # 新被动会话重置引导计数器
+        # 初始化 odom 基准点，使 drift check 从启动时就有参考
+        if self.current_odom is not None:
+            cp = self.current_odom.pose.pose.position
+            cy = self._quat_to_yaw(self.current_odom.pose.pose.orientation)
+            self.passive_last_odom = (cp.x, cp.y, cy)
+            self.passive_odom_accum_dist = 0.0
         self.indoor_phase = IndoorPhase.PASSIVE_COLLECTING
         self._logger.info(
             f'[被动模式] 已启动, 间隔={self.passive_interval}s, '
