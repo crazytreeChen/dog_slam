@@ -60,6 +60,7 @@ from calib_lib.scoring import (
 from calib_lib.submap import SubmapBuilder
 from calib_lib.matching import ScanMatcher
 from calib_lib.control import MotionController
+from calib_lib.motion_tracker import MotionTracker
 from calib_lib.rtk import rtk_to_map_coords, build_pose_covariance
 
 
@@ -176,6 +177,14 @@ class AutoInitialPoseCalibrator(Node):
         self.declare_parameter('confidence_threshold_publish', 0.50)      # 允许发布 /initialpose 的置信度阈值
         self.declare_parameter('confidence_threshold_amcl', 0.35)         # 低置信度仍可辅助 AMCL 的阈值（仅监控）
         self.declare_parameter('deviation_monitor_enabled', True)         # 是否启用偏差监控
+
+        # ────── 运动状态跟踪参数 ──────
+        self.declare_parameter('motion_tracking_enabled', True)          # 启用运动状态跟踪
+        self.declare_parameter('motion_speed_threshold', 0.05)           # 线速度阈值 (m/s)
+        self.declare_parameter('motion_angular_threshold', 0.05)         # 角速度阈值 (rad/s)
+        self.declare_parameter('motion_settle_time', 1.0)                # 停止后等待稳定时间 (秒)
+        self.declare_parameter('motion_drift_threshold', 0.15)           # 静止时 odom 漂移触发阈值 (m)
+        self.declare_parameter('motion_stop_cooldown', 10.0)             # 停止事件触发后冷却时间 (秒)
 
         # ────── 距离场全局匹配参数 (来自 global_match.py) ──────
         self.declare_parameter('use_distance_field_matching', False)     # 是否启用距离场全局匹配替代网格搜索
@@ -334,6 +343,14 @@ class AutoInitialPoseCalibrator(Node):
         self.confidence_threshold_publish = self.get_parameter('confidence_threshold_publish').value
         self.confidence_threshold_amcl = self.get_parameter('confidence_threshold_amcl').value
         self.deviation_monitor_enabled = self.get_parameter('deviation_monitor_enabled').value
+
+        # ── 运动状态跟踪参数 ──
+        self.motion_tracking_enabled = self.get_parameter('motion_tracking_enabled').value
+        self._motion_speed_threshold = self.get_parameter('motion_speed_threshold').value
+        self._motion_angular_threshold = self.get_parameter('motion_angular_threshold').value
+        self._motion_settle_time = self.get_parameter('motion_settle_time').value
+        self._motion_drift_threshold = self.get_parameter('motion_drift_threshold').value
+        self._motion_stop_cooldown = self.get_parameter('motion_stop_cooldown').value
 
         # ─── 距离场全局匹配 ───
         self.use_distance_field_matching = self.get_parameter('use_distance_field_matching').value
@@ -501,6 +518,14 @@ class AutoInitialPoseCalibrator(Node):
         self.submap_builder = SubmapBuilder(self._logger, self._outlier_cfg)
         self.matcher = ScanMatcher(self._logger)
         self.controller = MotionController(self._logger)
+        self._motion_tracker = MotionTracker(
+            self._logger,
+            speed_threshold=self._motion_speed_threshold,
+            angular_threshold=self._motion_angular_threshold,
+            settle_time=self._motion_settle_time,
+            drift_threshold=self._motion_drift_threshold,
+            stop_cooldown=self._motion_stop_cooldown,
+        ) if self.motion_tracking_enabled else None
 
     def _setup_file_logging(self):
         """设置日志文件持久化：创建独立的 Python logging FileHandler，
@@ -955,15 +980,20 @@ class AutoInitialPoseCalibrator(Node):
     def _odom_cb(self, msg):
         curr_pos = msg.pose.pose.position
         curr_yaw = self._quat_to_yaw(msg.pose.pose.orientation)
-        
+
         # 丢弃 NaN 数据
         if math.isnan(curr_pos.x) or math.isnan(curr_pos.y) or math.isnan(curr_yaw):
             return
-        
+
         self.last_odom_pose = (curr_pos.x, curr_pos.y, curr_yaw)
         self.current_odom = msg
         self._auto_start_odom_received = True
         self._check_auto_start_conditions()
+
+        # ── 运动状态跟踪 ──
+        if self._motion_tracker is not None:
+            now_sec = self.get_clock().now().nanoseconds / 1e9
+            self._motion_tracker.update(msg, now_sec)
         # 实时计算并发布纯里程计推算的预计 map 坐标
         if self.gt_received and self.gt_pose is not None and self.gt_ref_odom is not None:
             curr_pos = msg.pose.pose.position
@@ -1734,6 +1764,24 @@ class AutoInitialPoseCalibrator(Node):
             if speed > 0.05 or abs(tw.angular.z) > 0.05:
                 self._logger.debug(
                     f'[被动定时] 跳过: 运动中 v={speed:.2f}m/s w={math.degrees(tw.angular.z):.1f}°/s')
+                return
+
+        # ── 运动状态跟踪: 停止事件 & 漂移检测 ──
+        if self._motion_tracker is not None:
+            # 场景1: 运动刚停止 → 清空缓冲区，等待新静止帧累积
+            if self._motion_tracker.just_stopped:
+                self._logger.info(
+                    '[被动定时] 检测到运动停止，清空扫描缓冲区等待静止帧累积...')
+                self.passive_scan_buffer.clear()
+                self._motion_tracker.clear_just_stopped()
+                return
+
+            # 场景2: 静止但检测到 odom 漂移 → 强制触发重新匹配
+            if self._motion_tracker.is_drifting:
+                drift = self._motion_tracker.drift_distance
+                self._logger.warn(
+                    f'[被动定时] ⚠ 检测到静止漂移 {drift:.3f}m，强制触发重新匹配')
+                self.indoor_phase = IndoorPhase.PASSIVE_MATCHING
                 return
         # 互斥防护: 避免 _indoor_loop 的 PASSIVE_MATCHING 分支重复触发 do_passive
         if getattr(self, '_passive_busy', False):

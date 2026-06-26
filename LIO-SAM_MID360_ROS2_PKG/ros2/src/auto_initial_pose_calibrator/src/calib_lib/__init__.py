@@ -8,6 +8,7 @@
   - submap: 子图构建（SubmapBuilder）
   - matching: 扫描匹配编排（ScanMatcher，含 hierarchical/multistep/passive 三路径）
   - control: 主动运动选择与避障（MotionController）
+  - motion_tracker: 运动状态跟踪与漂移检测（MotionTracker）
   - rtk: RTK/GPS → map 变换
 
 注意：子模块对 ROS 无硬依赖（scipy/cv2 为可选 import），
