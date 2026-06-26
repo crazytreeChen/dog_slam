@@ -117,6 +117,10 @@ def score_distance_field(points_odom, cx, cy, yaw, map_ctx):
     oy = map_ctx.map_info.origin.position.y
     H, W = map_ctx.map_info.height, map_ctx.map_info.width
 
+    # 防御: dist_field 尺寸必须与 map_info 一致 (地图热重载后旧场可能未清除)
+    if map_ctx.dist_field.shape[0] != H or map_ctx.dist_field.shape[1] != W:
+        return float('inf'), 0
+
     # 变换到地图坐标系
     c_y, s_y = math.cos(yaw), math.sin(yaw)
     if points_odom.ndim == 2:
@@ -468,6 +472,10 @@ def build_dual_template_maps(map_ctx, logger=None):
         # 合法机器狗中心区域 (已知空地)
         map_ctx.dt_valid_center_mask = (map_data >= 0) & (map_data < 50)
 
+        # 自由空间积分图 (用于面积比惩罚, O(1) 区域查询)
+        free_space = (map_data >= 0) & (map_data <= 50)
+        map_ctx.dt_free_space_integral = cv2.integral(free_space.astype(np.uint8))
+
         if logger is not None:
             logger.info(
                 f'[双模板] 地图构建完成: 似然图 {likelihood_map.shape}, '
@@ -484,6 +492,7 @@ def dual_template_global_match(scan_pts, map_ctx,
                                fine_angle_step_deg=0.5,
                                penalty_weight=3.0,
                                scan_max_points=500,
+                               free_space_penalty_weight=0.0,
                                logger=None):
     """双模板光线投射全局匹配 — 核心算法。
 
@@ -500,6 +509,7 @@ def dual_template_global_match(scan_pts, map_ctx,
       fine_angle_step_deg:   精修角度步长 (度)
       penalty_weight:        射线穿透惩罚权重 (越大越排斥穿墙)
       scan_max_points:       扫描点最大采样数 (提高速度)
+      free_space_penalty_weight: 面积比惩罚权重 (越大越排斥面积不匹配, 0=禁用, 防对称走廊误匹配)
       logger:                日志器
 
     返回: (best_pose, best_score)
@@ -617,6 +627,13 @@ def dual_template_global_match(scan_pts, map_ctx,
         match_x, match_y = max_loc
         rx = match_x * res + ox - tpl_ox
         ry = match_y * res + oy - tpl_oy
+
+        # ── 面积比惩罚: 扫描点围合区域 vs 地图对应位置自由空间面积 ──
+        if free_space_penalty_weight > 0 and map_ctx.dt_free_space_integral is not None:
+            area_penalty = _compute_area_ratio_penalty(
+                rotated, rx, ry, map_ctx, free_space_penalty_weight, res, ox, oy, H, W)
+            max_val -= area_penalty
+
         return (rx, ry, max_val)
 
     # ── Phase 1: 粗搜索 ──
@@ -655,6 +672,60 @@ def dual_template_global_match(scan_pts, map_ctx,
             f'score={best_score:.1f}')
 
     return best_pose, best_score
+
+
+def _compute_area_ratio_penalty(rotated_pts, rx, ry, map_ctx, penalty_weight, res, ox, oy, H, W):
+    """计算候选位姿处扫描包围盒面积与地图自由空间面积的比例惩罚。
+
+    原理: 将旋转后的扫描点投影到候选位置 (rx, ry)，取包围盒，
+    用积分图 O(1) 查询该区域内的自由空间面积，与扫描包围盒面积比较。
+    面积比越接近 1.0 → 惩罚越轻；差距越大 → 惩罚越重。
+
+    返回: float, 惩罚值 (非负, 0 表示无惩罚)
+    """
+    if map_ctx.dt_free_space_integral is None:
+        return 0.0
+
+    # 扫描点投影到地图坐标系
+    proj = rotated_pts + np.array([rx, ry])
+
+    # 包围盒 (地图像素坐标)
+    min_px = int((proj[:, 0].min() - ox) / res)
+    max_px = int((proj[:, 0].max() - ox) / res) + 1
+    min_py = int((proj[:, 1].min() - oy) / res)
+    max_py = int((proj[:, 1].max() - oy) / res) + 1
+
+    # 裁剪到地图边界
+    min_px = max(0, min(min_px, W - 2))
+    max_px = max(min_px + 1, min(max_px, W - 1))
+    min_py = max(0, min(min_py, H - 2))
+    max_py = max(min_py + 1, min(max_py, H - 1))
+
+    bbox_pixels = float((max_px - min_px) * (max_py - min_py))
+    if bbox_pixels <= 0:
+        return penalty_weight * len(rotated_pts)
+
+    # 积分图查询包围盒内自由空间像素数
+    integral = map_ctx.dt_free_space_integral
+    A = float(integral[min_py, min_px])
+    B = float(integral[min_py, max_px])
+    C = float(integral[max_py, min_px])
+    D = float(integral[max_py, max_px])
+    free_pixels = D - B - C + A
+
+    if free_pixels <= 0:
+        return penalty_weight * len(rotated_pts)  # 无自由空间 → 最大惩罚
+
+    # 面积比: 地图自由空间 vs 扫描包围盒面积
+    scan_bbox_area = (proj[:, 0].max() - proj[:, 0].min()) * (proj[:, 1].max() - proj[:, 1].min())
+    map_free_area = free_pixels * res * res
+
+    if scan_bbox_area <= 0:
+        return 0.0
+
+    area_ratio = min(scan_bbox_area, map_free_area) / max(scan_bbox_area, map_free_area, 0.1)
+    # 惩罚 = (1 - area_ratio) * weight * N, 与 hit_score(~N) 同一量级
+    return (1.0 - area_ratio) * penalty_weight * len(rotated_pts)
 
 
 def score_scan(scan, x, y, yaw, map_ctx, scan_to_points_fn, max_beams):

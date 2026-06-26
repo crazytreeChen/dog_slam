@@ -435,6 +435,7 @@ class ScanMatcher:
         coarse_step = getattr(node, 'dt_angle_step_deg', 2.0)
         fine_step = getattr(node, 'dt_fine_angle_step_deg', 0.5)
         pw = getattr(node, 'dt_penalty_weight', 3.0)
+        fspw = getattr(node, 'dt_free_space_penalty_weight', 0.0)
 
         return dual_template_global_match(
             frame_pts, map_ctx,
@@ -442,6 +443,7 @@ class ScanMatcher:
             fine_angle_step_deg=fine_step,
             penalty_weight=pw,
             scan_max_points=scan_max,
+            free_space_penalty_weight=fspw,
             logger=self._logger)
 
     def do_dual_template_global(self, node):
@@ -481,6 +483,7 @@ class ScanMatcher:
         coarse_step = getattr(node, 'dt_angle_step_deg', 2.0)
         fine_step = getattr(node, 'dt_fine_angle_step_deg', 0.5)
         pw = getattr(node, 'dt_penalty_weight', 3.0)
+        fspw = getattr(node, 'dt_free_space_penalty_weight', 0.0)
 
         best_pose, best_score = dual_template_global_match(
             submap_pts, map_ctx,
@@ -488,6 +491,7 @@ class ScanMatcher:
             fine_angle_step_deg=fine_step,
             penalty_weight=pw,
             scan_max_points=scan_max,
+            free_space_penalty_weight=fspw,
             logger=self._logger)
 
         if best_pose is None:
@@ -622,22 +626,47 @@ class ScanMatcher:
                 if getattr(node, 'dt_multistep_enabled', False):
                     # 双模板首帧搜索 (优先级最高, 速度最快)
                     best_pose, best_sc = self.dual_template_first_frame(node, frame_pts)
+                    dt_accepted = False
                     if best_pose is not None:
-                        mu = best_pose
-                        first_dt_yaw = mu[2]  # 记录首帧 DT 匹配 yaw，用于检测 ICP 累积漂移
-                        sigma = 5.0
-                        sigma_angle = 20.0
-                        total_valid = 1
+                        # ── 墙覆盖率快速质检 ──
+                        dt_min_wall = getattr(node, 'dt_min_wall_coverage_ratio', 0.20)
                         wall_cov, cov, _ = node._compute_wall_coverage(
-                            frame_pts, mu[0], mu[1], mu[2])
-                        self._logger.info(
-                            f'  [DT多步] 帧{i:02d}(首): 双模板搜索 → '
-                            f'({mu[0]:.2f},{mu[1]:.2f},{math.degrees(mu[2]):.0f}deg) '
-                            f'score={best_sc:.1f} wall={100*wall_cov:.0f}%')
-                    else:
-                        self._logger.error('[DT多步] 首帧双模板搜索失败')
-                        node.indoor_phase = IndoorPhase.ROUGH_MATCHING
-                        return
+                            frame_pts, best_pose[0], best_pose[1], best_pose[2])
+                        if wall_cov < dt_min_wall:
+                            self._logger.warn(
+                                f'[DT多步] DT结果墙覆盖率过低 wall={100*wall_cov:.0f}% < {100*dt_min_wall:.0f}%, '
+                                f'({best_pose[0]:.2f},{best_pose[1]:.2f},{math.degrees(best_pose[2]):.0f}deg) '
+                                f'score={best_sc:.1f}')
+                        else:
+                            mu = best_pose
+                            first_dt_yaw = mu[2]
+                            sigma = 5.0
+                            sigma_angle = 20.0
+                            total_valid = 1
+                            dt_accepted = True
+                            self._logger.info(
+                                f'  [DT多步] 帧{i:02d}(首): 双模板搜索 → '
+                                f'({mu[0]:.2f},{mu[1]:.2f},{math.degrees(mu[2]):.0f}deg) '
+                                f'score={best_sc:.1f} wall={100*wall_cov:.0f}%')
+                    if not dt_accepted:
+                        # DT 失败或被质检拒绝 → 回退到距离场搜索
+                        self._logger.warn('[DT多步] DT首帧被拒绝, 回退到距离场搜索')
+                        best_pose, best_sc = self.distance_field_first_frame(node, frame_pts)
+                        if best_pose is not None:
+                            mu = best_pose
+                            sigma = 5.0
+                            sigma_angle = 20.0
+                            total_valid = 1
+                            wall_cov, cov, _ = node._compute_wall_coverage(
+                                frame_pts, mu[0], mu[1], mu[2])
+                            self._logger.info(
+                                f'  [DF多步] 帧{i:02d}(首): 距离场搜索 → '
+                                f'({mu[0]:.2f},{mu[1]:.2f},{math.degrees(mu[2]):.0f}deg) '
+                                f'wall={100*wall_cov:.0f}%')
+                        else:
+                            self._logger.error('[DT多步] 首帧搜索失败（DT+DF均失败）')
+                            node.indoor_phase = IndoorPhase.ROUGH_MATCHING
+                            return
                 elif getattr(node, 'df_multistep_enabled', False):
                     # 距离场首帧搜索 (回退方案)
                     best_pose, best_sc = self.distance_field_first_frame(node, frame_pts)
@@ -944,16 +973,32 @@ class ScanMatcher:
                 if getattr(node, 'dt_passive_enabled', False):
                     # 双模板首帧搜索 (优先级最高)
                     best_pose, best_sc = self.dual_template_first_frame(node, pts)
+                    dt_accepted = False
                     if best_pose is not None:
-                        mu = best_pose
-                        passive_first_dt_yaw = mu[2]  # 记录首帧 DT yaw，用于检测 ICP 累积漂移
-                        method = "DT全局"
-                        self._logger.info(
-                            f'  [DT被动] 首帧双模板搜索 → '
-                            f'({mu[0]:.2f},{mu[1]:.2f},{math.degrees(mu[2]):.0f}deg)'
-                            f' score={best_sc:.1f}')
-                    else:
-                        self._logger.warn('[DT被动] 双模板搜索失败, 回退到距离场搜索')
+                        # ── 墙覆盖率快速质检: DT结果必须满足最低覆盖率 ──
+                        dt_min_wall = getattr(node, 'dt_min_wall_coverage_ratio', 0.20)
+                        wc_dt, _, _ = node._compute_wall_coverage(pts, best_pose[0], best_pose[1], best_pose[2])
+                        if wc_dt < dt_min_wall:
+                            self._logger.warn(
+                                f'[DT被动] DT结果墙覆盖率过低 wall={100*wc_dt:.0f}% < {100*dt_min_wall:.0f}%, '
+                                f'({best_pose[0]:.2f},{best_pose[1]:.2f},{math.degrees(best_pose[2]):.0f}deg) '
+                                f'score={best_sc:.1f}, 拒绝并回退到距离场搜索')
+                            # 不设置 mu, 让后续的 df_passive_enabled 分支接管
+                        else:
+                            mu = best_pose
+                            passive_first_dt_yaw = mu[2]
+                            dt_accepted = True
+                            method = "DT全局"
+                            self._logger.info(
+                                f'  [DT被动] 首帧双模板搜索 → '
+                                f'({mu[0]:.2f},{mu[1]:.2f},{math.degrees(mu[2]):.0f}deg)'
+                                f' score={best_sc:.1f} wall={100*wc_dt:.0f}%')
+                    if not dt_accepted:
+                        # DT 失败或被质检拒绝 → 回退到距离场搜索
+                        if best_pose is not None:
+                            self._logger.warn('[DT被动] 双模板搜索被质检拒绝, 回退到距离场搜索')
+                        else:
+                            self._logger.warn('[DT被动] 双模板搜索失败, 回退到距离场搜索')
                         best_pose, best_sc = self.distance_field_first_frame(node, pts)
                         if best_pose is not None:
                             mu = best_pose

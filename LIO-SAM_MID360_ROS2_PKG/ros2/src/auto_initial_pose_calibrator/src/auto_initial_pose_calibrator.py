@@ -175,6 +175,7 @@ class AutoInitialPoseCalibrator(Node):
         self.declare_parameter('confidence_threshold_update', 0.65)       # 允许更新原点/校准位姿的置信度阈值
         self.declare_parameter('confidence_threshold_publish', 0.50)      # 允许发布 /initialpose 的置信度阈值
         self.declare_parameter('confidence_threshold_amcl', 0.35)         # 低置信度仍可辅助 AMCL 的阈值（仅监控）
+        self.declare_parameter('deviation_monitor_enabled', True)         # 是否启用偏差监控
 
         # ────── 距离场全局匹配参数 (来自 global_match.py) ──────
         self.declare_parameter('use_distance_field_matching', False)     # 是否启用距离场全局匹配替代网格搜索
@@ -192,6 +193,8 @@ class AutoInitialPoseCalibrator(Node):
         self.declare_parameter('dt_scan_max_points', 500)                # 双模板匹配最大扫描点数
         self.declare_parameter('dt_multistep_enabled', True)             # 双模板匹配用于多步递推首帧
         self.declare_parameter('dt_passive_enabled', True)               # 双模板匹配用于被动匹配首帧
+        self.declare_parameter('dt_min_wall_coverage_ratio', 0.30)      # 双模板匹配最低墙覆盖率 (低于此值则回退到距离场匹配)
+        self.declare_parameter('dt_free_space_penalty_weight', 0.0)     # 自由空间惩罚权重 (越大越排斥扫描点落在空地, 0=禁用)
 
         # ────── 日志持久化参数 ──────
         self.declare_parameter('log_dir', '')                 # 日志持久化目录（为空则不写文件）
@@ -330,6 +333,7 @@ class AutoInitialPoseCalibrator(Node):
         self.confidence_threshold_update = self.get_parameter('confidence_threshold_update').value
         self.confidence_threshold_publish = self.get_parameter('confidence_threshold_publish').value
         self.confidence_threshold_amcl = self.get_parameter('confidence_threshold_amcl').value
+        self.deviation_monitor_enabled = self.get_parameter('deviation_monitor_enabled').value
 
         # ─── 距离场全局匹配 ───
         self.use_distance_field_matching = self.get_parameter('use_distance_field_matching').value
@@ -347,6 +351,8 @@ class AutoInitialPoseCalibrator(Node):
         self.dt_scan_max_points = self.get_parameter('dt_scan_max_points').value
         self.dt_multistep_enabled = self.get_parameter('dt_multistep_enabled').value
         self.dt_passive_enabled = self.get_parameter('dt_passive_enabled').value
+        self.dt_min_wall_coverage_ratio = self.get_parameter('dt_min_wall_coverage_ratio').value
+        self.dt_free_space_penalty_weight = self.get_parameter('dt_free_space_penalty_weight').value
 
         # ────── 日志持久化初始化 ──────
         self._setup_file_logging()
@@ -651,7 +657,10 @@ class AutoInitialPoseCalibrator(Node):
         if self.map_data is None:
             self._logger.info('启动后 1.5 秒内未接收到 ROS 话题地图数据，正在尝试从本地配置文件加载地图作为回退...')
             if self.map_file and os.path.exists(self.map_file):
-                self._load_map_from_file(self.map_file)
+                if self._load_map_from_file(self.map_file):
+                    # 文件加载成功等同于收到地图，触发自动启动条件检查
+                    self._auto_start_map_received = True
+                    self._check_auto_start_conditions()
             else:
                 self._logger.warn(f'未找到本地地图文件: {self.map_file}，将继续等待 ROS 网格地图话题订阅发布...')
 
@@ -659,7 +668,8 @@ class AutoInitialPoseCalibrator(Node):
     #  开机自动启动逻辑
     # ================================================================
     def _check_auto_start_conditions(self):
-        """每次收到传感器数据时检查是否所有数据就绪"""
+        """每次收到传感器数据时检查是否所有数据就绪。
+        被动模式: 仅需 map + scan；主动模式: 需 map + scan + odom。"""
         if self._auto_start_triggered:
             return
         if not self.auto_start:
@@ -667,24 +677,50 @@ class AutoInitialPoseCalibrator(Node):
         # 只检查室内模式（室外由 _check_auto_mode 独立处理）
         if self.detected_mode == "OUTDOOR":
             return
-        if self._auto_start_map_received and self._auto_start_scan_received and self._auto_start_odom_received:
+
+        if self.passive_mode_enabled:
+            all_ready = self._auto_start_map_received and self._auto_start_scan_received
+        else:
+            all_ready = (self._auto_start_map_received
+                         and self._auto_start_scan_received
+                         and self._auto_start_odom_received)
+
+        if all_ready:
             if self._auto_start_ready_time is None:
+                mode_desc = '被动模式' if self.passive_mode_enabled else '主动模式'
                 self._auto_start_ready_time = self.get_clock().now()
                 self._logger.info(
-                    '[自动启动] 地图、激光扫描、里程计均已就绪，'
-                    f'等待 {self.auto_start_delay:.1f}s 后自动触发初始位姿校准...'
+                    f'[自动启动] 数据就绪（{mode_desc}），'
+                    f'等待 {self.auto_start_delay:.1f}s 后自动触发校准...'
                 )
 
     def _try_auto_start_indoor(self):
-        """在 indoor_loop 的 IDLE 状态中检查是否应该自动启动"""
+        """在 indoor_loop 的 IDLE 状态中检查是否应该自动启动。
+        逻辑与 _srv_start 对齐：被动模式不需要 odom，主动模式需要。"""
         if not self.auto_start or self._auto_start_triggered:
             return
         if self._auto_start_ready_time is None:
             return
-        if self.map_data is None or self.current_scan is None or self.current_odom is None:
+        if self.map_data is None or self.current_scan is None:
             return
 
-        # 等待延迟
+        # 被动模式: 不需要 odom，地图+scan 就绪即可启动
+        if self.passive_mode_enabled:
+            elapsed = (self.get_clock().now() - self._auto_start_ready_time).nanoseconds / 1e9
+            if elapsed < self.auto_start_delay:
+                return
+            self._auto_start_triggered = True
+            self._logger.info(
+                f'[自动启动] 数据就绪 {elapsed:.1f}s，被动模式已启用，'
+                '自动触发被动持续定位模式...'
+            )
+            self._start_passive_mode()
+            return
+
+        # 主动模式: 需要 odom
+        if self.current_odom is None:
+            return
+
         elapsed = (self.get_clock().now() - self._auto_start_ready_time).nanoseconds / 1e9
         if elapsed < self.auto_start_delay:
             return
@@ -822,6 +858,12 @@ class AutoInitialPoseCalibrator(Node):
         """delegated to calib_lib.scoring.build_likelihood (同步更新 _map_ctx)"""
         self._map_ctx.map_data = self.map_data
         self._map_ctx.map_info = self.map_info
+        # 地图重载 → 清除所有派生场 (尺寸可能已变, 下次使用时懒重建)
+        self._map_ctx.dist_field = None
+        self._map_ctx.dt_likelihood_map = None
+        self._map_ctx.dt_ray_penalty_map = None
+        self._map_ctx.dt_free_space_integral = None
+        self._map_ctx.dt_valid_center_mask = None
         build_likelihood(self._map_ctx, self._logger)
         # 同步回写 likelihood_field（保持原 self.likelihood_field 可用性）
         self.likelihood_field = self._map_ctx.likelihood_field
@@ -2828,7 +2870,7 @@ class AutoInitialPoseCalibrator(Node):
                 f'[主动定位{gate_level}] 发布: ({x:.3f},{y:.3f},{math.degrees(yaw):.1f}deg) '
                 f'conf={conf_pct:.0f}% sigma=({pos_sigma:.2f}m,{yaw_sigma:.1f}deg) '
                 f'wall={100*wall_cov:.0f}% cov={100*coverage:.0f}%')
-            if confidence >= th_up:
+            if confidence >= th_up and self.deviation_monitor_enabled:
                 self._start_deviation_monitor(x, y, yaw)
         else:
             if hasattr(self, 'debug_auto_pose_pub'):
@@ -3106,6 +3148,19 @@ class AutoInitialPoseCalibrator(Node):
         self._last_amcl_x = x; self._last_amcl_y = y; self._last_amcl_yaw = yaw
 
     def _check_auto_mode(self):
+        # ── 自动启动就绪状态诊断 (每5秒打印一次) ──
+        if self.auto_start and not self._auto_start_triggered:
+            if not hasattr(self, '_auto_diag_counter'):
+                self._auto_diag_counter = 0
+            self._auto_diag_counter += 1
+            if self._auto_diag_counter % 5 == 0:
+                self._logger.info(
+                    f'[自动启动诊断] map={self._auto_start_map_received} '
+                    f'scan={self._auto_start_scan_received} '
+                    f'odom={self._auto_start_odom_received} '
+                    f'mode={self.detected_mode} '
+                    f'odom_topic={self.odom_topic} scan_topic={self.scan_topic}')
+
         # 仅在启用自动识别（即配置里 outdoor_mode=True 且 indoor_mode=True）时进行判断
         # 如果配置里只开启了一个，则强制为该模式
         if not self.outdoor_mode and self.indoor_mode:

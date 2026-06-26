@@ -51,7 +51,7 @@
     auto_publish_initial_pose: true   # 自动发布 /initialpose (true=发布到话题)
 
     # ────── 被动持续定位模式 ──────
-    passive_mode_enabled: true     # 启用被动持续定位 (服务启动即进入)
+    passive_mode_enabled: false     # 启用被动持续定位 (服务启动即进入)
     passive_interval: 30.0         # 被动匹配间隔 (秒)
     passive_frame_count: 30        # 每次匹配使用最近N帧 (通过ICP拼接)
     passive_buffer_max: 60        # 循环缓冲区最大帧数
@@ -174,10 +174,11 @@
     dt_scan_max_points: 500              # 匹配用最大扫描点数
     dt_multistep_enabled: true            # 多步递推首帧使用双模板搜索
     dt_passive_enabled: true              # 被动匹配首帧使用双模板搜索
-    dt_free_space_penalty_weight: 0.3   # 自由空间惩罚权重 (越大越排斥扫描点落在空地, 防止小房间误匹配到大房间单面墙)
+    dt_min_wall_coverage_ratio: 0.30    # DT匹配最低墙覆盖率 (低于此值回退到距离场匹配, 0.30=30%)
+    dt_free_space_penalty_weight: 0.2   # 自由空间惩罚权重 (越大越排斥扫描点落在空地, 0=禁用, 防止对称走廊误匹配)
 
     # ────── 偏差监控 ──────
-    deviation_monitor_enabled: true  # 是否启用偏差监控
+    deviation_monitor_enabled: false  # 是否启用偏差监控 (移动时偏差增大是正常的，关掉无意义日志)
     deviation_check_interval: 2.0    # 偏差检查间隔 (秒)
     deviation_alert_threshold: 0.5   # 偏差告警阈值 (m)
     deviation_alert_window: 180.0    # 开机告警窗口 (秒, 前3分钟严格)

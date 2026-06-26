@@ -351,3 +351,6 @@ ros2 topic echo /debug/candidates
 
 # ── 查看日志 ──
 sudo journalctl -u lio_sam_nav2.service -f | grep -E "被动|主动|偏差|校准|匹配"
+
+
+ros2 launch auto_initial_pose_calibrator auto_initial_pose_calibration.launch.py ns:=rkbot

@@ -1,0 +1,22 @@
+[Unit]
+Description=Auto Initial Pose Calibrator (ZG - Passive Localization)
+After=network.target
+
+[Service]
+Type=simple
+User=ztl
+Group=ztl
+WorkingDirectory=/home/ztl/cql
+Environment="ROS_DOMAIN_ID=24"
+Environment="RMW_IMPLEMENTATION=rmw_zenoh_cpp"
+ExecStart=/home/ztl/cql/auto_initial_pose_calibrator/scripts/run_auto_calibrator_zg.sh
+Restart=always
+RestartSec=10
+TimeoutStopSec=10
+KillMode=control-group
+SendSIGKILL=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
