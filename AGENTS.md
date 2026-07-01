@@ -112,6 +112,42 @@ Super-LIO writes incremental PCDs to `<save_map_dir>/PCD/` and merges into `<sav
 - `freqcmd.txt` at the repo root is the developer's running notes/scratchpad — read it for context but treat it as informational, not a spec.
 - Don't edit the auto-rewritten yaml files (`nav2_params*.yaml`, `mid360.yaml`, `livox_360*.yaml`) for host-specific values; edit `global_config/__init__.py` instead. Other yaml fields can still be edited normally.
 
+#### Knowledge Base (Obsidian)
+
+所有技术笔记、项目经验、问题排查、工作日报等**知识资产统一写入 Obsidian vault**，路径：
+
+```
+/Users/qinglinchen/01-Code/98-Custom/obsdian/
+```
+
+**核心规则**：
+- **代码文档**（README、AGENTS、CLAUDE、API doc）留在项目仓库内
+- **知识笔记**（概念卡片、踩坑记录、问题排查、日报周报月报）全部写入 Obsidian vault
+- 禁止在项目仓库中散落 `.md` 知识笔记（`CLAUDE.md` / `AGENTS.md` / 子模块 README 除外）
+
+**Vault 目录映射**：
+
+| 目录 | 写入内容 | 关联 Skill |
+|------|----------|------------|
+| `01-技术学习/概念卡片/` | 技术概念（ROS2, SLAM, LiDAR, Nav2, PID...） | `tech-knowledge-organizer` |
+| `01-技术学习/问题排查/` | Bug 排查、环境问题、异常处理 | `tech-knowledge-organizer` |
+| `01-技术学习/语言/` | C++/Python/Shell 等语言笔记 | `tech-knowledge-organizer` |
+| `01-技术学习/框架/` | Qt6, FFmpeg, OpenCV 等框架笔记 | `tech-knowledge-organizer` |
+| `02-工作项目/进行中/<项目>/` | 项目主文档、经验日志、版本记录 | `tech-knowledge-organizer` |
+| `10-工作记录/YYYY/MM月/第WW周/` | 日报 (`MM-DD.md`)、周报 (`周报.md`)、月报 (`月报.md`) | `report-summarizer` |
+
+**笔记规范**：
+- 必须包含 YAML frontmatter：`type`, `created`, `tags`
+- 强制使用 Obsidian 双链 `[[NoteName]]` 关联已有笔记
+- 新增笔记后同步更新对应 MOC 索引页面（`MOC-*.md`）
+- 概念卡片遵循 `99-Templates/概念卡片模板.md`
+- 问题排查遵循 `99-Templates/问题排查模板.md`
+- 经验日志遵循 `99-Templates/经验日志模板.md`
+
+**重要**：日报/周报/月报只写工作内容，不体现个人知识库整理、Obsidian、skill 配置等个人事务。
+
+**当前活跃项目**：`dog_slam` → `02-工作项目/进行中/dog_slam/`
+
 ---
 
 ## 任务分流与流程选择

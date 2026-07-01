@@ -1,0 +1,706 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>机器狗轨迹 - OSM+Esri 底图</title>
+
+<link rel="stylesheet" href="libs/leaflet.css" />
+
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    background: #0a0e17;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    color: #c8d6e5;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+/* ---- 顶部控制栏 ---- */
+.toolbar {
+    background: #111827;
+    padding: 8px 16px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    border-bottom: 1px solid #1e293b;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+    font-size: 13px;
+}
+
+.toolbar .brand {
+    font-size: 15px;
+    font-weight: 600;
+    color: #e2e8f0;
+    margin-right: 8px;
+}
+
+.toolbar label {
+    color: #64748b;
+    white-space: nowrap;
+}
+
+.toolbar input[type="text"] {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 4px;
+    color: #e2e8f0;
+    padding: 4px 8px;
+    font-size: 12px;
+    width: 140px;
+}
+.toolbar input[type="number"] {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 4px;
+    color: #e2e8f0;
+    padding: 4px 6px;
+    font-size: 12px;
+    width: 56px;
+}
+
+.toolbar button {
+    background: #1d4ed8;
+    border: none;
+    border-radius: 4px;
+    color: white;
+    padding: 5px 12px;
+    font-size: 12px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.toolbar button:hover { background: #2563eb; }
+.toolbar button.danger { background: #991b1b; }
+.toolbar button.danger:hover { background: #b91c1c; }
+.toolbar button.secondary {
+    background: #1e293b; border: 1px solid #334155; color: #94a3b8;
+}
+.toolbar button.secondary:hover { background: #2d3a51; }
+.toolbar button.secondary.active {
+    border-color: #22c55e; color: #22c55e;
+}
+
+/* 置灰：按钮禁用状态 */
+.toolbar button:disabled {
+    opacity: 0.38;
+    filter: grayscale(60%);
+    cursor: not-allowed;
+    pointer-events: none;
+}
+.toolbar button:disabled:hover {
+    background: inherit;
+}
+
+/* 状态区 */
+.stat-group {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-left: auto;
+}
+.stat-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    color: #94a3b8;
+    font-size: 12px;
+}
+.stat-item .val { color: #e2e8f0; font-variant-numeric: tabular-nums; }
+
+.status-dot {
+    width: 8px; height: 8px; border-radius: 50%; display: inline-block;
+}
+.status-dot.online { background: #22c55e; box-shadow: 0 0 6px #22c55e; }
+.status-dot.offline { background: #ef4444; }
+
+/* 地图 */
+#map {
+    flex: 1;
+    background: #0a0e17;
+}
+
+/* 图例 */
+.legend-box {
+    background: rgba(17,24,39,0.92);
+    border: 1px solid #1e293b;
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 12px;
+    color: #c8d6e5;
+    line-height: 1.8;
+}
+.legend-color {
+    display: inline-block; width: 20px; height: 3px; border-radius: 1px;
+    vertical-align: middle; margin-right: 6px;
+}
+
+/* 底部状态栏 */
+.statusbar {
+    background: #111827;
+    padding: 4px 16px;
+    font-size: 11px;
+    color: #64748b;
+    border-top: 1px solid #1e293b;
+    flex-shrink: 0;
+    display: flex;
+    gap: 16px;
+}
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+    <span class="brand">🐕 机器狗轨迹</span>
+
+    <label>狗IP:</label>
+    <input type="text" id="host-input" value="10.0.4.4" />
+    <label>端口:</label>
+    <input type="number" id="port-input" value="8765" min="1" max="65535" />
+
+    <button id="btn-connect" onclick="doConnect()">连接</button>
+    <button class="danger" id="btn-disconnect" onclick="doDisconnect()" disabled>断开</button>
+
+    <span style="color:#334155">|</span>
+
+    <span>GPS源:</span>
+    <button class="secondary active" id="btn-src-fix" onclick="setGpsSource('/fix')">fix</button>
+    <button class="secondary" id="btn-src-gpsfix" onclick="setGpsSource('/gps/fix')">gps/fix</button>
+
+    <span style="color:#334155">|</span>
+
+    <span>RTK:</span>
+    <button class="secondary active" id="btn-rtk-auto" onclick="setRtkSource('auto')">自动</button>
+    <button class="secondary" id="btn-rtk-real" onclick="setRtkSource('real')">真实</button>
+    <button class="secondary" id="btn-rtk-test" onclick="setRtkSource('test')">测试</button>
+
+    <span style="color:#334155">|</span>
+
+    <span>推送模式:</span>
+    <button class="secondary active" id="btn-inc" onclick="setMode('incremental')">增量</button>
+    <button class="secondary" id="btn-full" onclick="setMode('full_periodic')">全量定时</button>
+
+    <span style="color:#334155">|</span>
+
+    <button class="secondary" id="btn-sat" onclick="switchLayer('sat')" style="color:#22c55e;border-color:#22c55e;">卫星图</button>
+    <button class="secondary" id="btn-vec" onclick="switchLayer('vec')">矢量图</button>
+
+    <span style="color:#334155">|</span>
+
+    <button class="secondary active" id="btn-follow" onclick="toggleFollow()" title="自动跟随最新点位">📍 跟随</button>
+    <button class="secondary" onclick="goHome()" title="回到罗普特园区中心点">🏠 中心</button>
+    <button class="secondary" onclick="clearTrails()">清除轨迹</button>
+
+    <div class="stat-group">
+        <div class="stat-item">🔵 LIO <span class="val" id="cnt-lio">0</span>pts</div>
+        <div class="stat-item">🟢 融合 <span class="val" id="cnt-fused">0</span>pts</div>
+        <div class="stat-item">📡 <span class="val" id="cur-pos">--</span></div>
+        <span class="status-dot offline" id="status-dot" title="未连接"></span>
+    </div>
+</div>
+
+<div id="map"></div>
+
+<div class="statusbar">
+    <span id="ws-info">未连接</span>
+    <span id="push-info"></span>
+</div>
+
+<!-- ===== 依赖 ===== -->
+<script src="libs/leaflet.js"></script>
+
+<script>
+// ==================== OSM + Esri 瓦片（WGS84 坐标系，无 GCJ02 偏移） ====================
+// 卫星底图 - Esri World Imagery（WGS84）
+const esriSat = L.tileLayer(
+    'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    { maxZoom: 19, attribution: '&copy; Esri' }
+);
+// OSM 标准地图（矢量/路网）
+const osmMap = L.tileLayer(
+    'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+    { maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>' }
+);
+// CartoDB 浅色矢量图
+const cartoVec = L.tileLayer(
+    'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png',
+    { subdomains: ['a','b','c','d'], maxZoom: 19, attribution: '&copy; OSM, CartoDB' }
+);
+
+// ==================== 地图 ====================
+// 罗普特园区中心点：厦门市集美区凤岐路1888号
+const HOME_CENTER = [24.6080, 118.0450];
+const HOME_ZOOM = 17;
+
+const map = L.map('map', {
+    zoomControl: true,
+    preferCanvas: true,
+}).setView(HOME_CENTER, HOME_ZOOM);
+
+// 默认：Esri 卫星图（WGS84）
+esriSat.addTo(map);
+let currentLayer = 'sat';
+
+function switchLayer(type) {
+    map.removeLayer(esriSat);
+    map.removeLayer(osmMap);
+    map.removeLayer(cartoVec);
+    document.getElementById('btn-sat').style.cssText = '';
+    document.getElementById('btn-vec').style.cssText = '';
+
+    if (type === 'sat') {
+        esriSat.addTo(map);
+        document.getElementById('btn-sat').style.cssText = 'color:#22c55e;border-color:#22c55e;';
+    } else {
+        cartoVec.addTo(map);
+        document.getElementById('btn-vec').style.cssText = 'color:#22c55e;border-color:#22c55e;';
+    }
+    currentLayer = type;
+}
+
+// 图例
+const legendCtrl = L.control({position: 'bottomleft'});
+legendCtrl.onAdd = function() {
+    const d = L.DomUtil.create('div', 'legend-box');
+    d.innerHTML = `
+        <div><span class="legend-color" style="background:#3b82f6"></span>LIO 原始轨迹</div>
+        <div><span class="legend-color" style="background:#22c55e"></span>GPS 融合轨迹</div>
+        <div style="font-size:10px;color:#64748b;margin-top:2px">底图: Esri卫星 (WGS84)</div>
+    `;
+    return d;
+};
+legendCtrl.addTo(map);
+
+// ==================== 轨迹图层 ====================
+let lioLine = L.polyline([], { color: '#3b82f6', weight: 3, opacity: 0.9, smoothFactor: 1 });
+let fusedLine = L.polyline([], { color: '#22c55e', weight: 3, opacity: 0.9, smoothFactor: 1 });
+
+// 三角箭头标记（替代圆点，显示前进方向）
+function _makeArrowIcon(color, headingDeg) {
+    const deg = headingDeg || 0;
+    return L.divIcon({
+        className: 'arrow-marker',
+        html: '<div style="transform:rotate(' + deg + 'deg);width:24px;height:24px;">' +
+              '<svg width="24" height="24" viewBox="-12 -12 24 24" style="display:block;">' +
+              '<polygon points="0,-10 7,4 -7,4" fill="' + color + '" stroke="#fff" stroke-width="1.2" stroke-linejoin="round"/>' +
+              '</svg></div>',
+        iconSize: [24, 24],
+        iconAnchor: [12, 12],
+    });
+}
+function _calcHeading(p1, p2) {
+    // p1, p2 = [lat, lng]; 返回角度(deg), 0=正北
+    if (!p1 || !p2) return 0;
+    const dLng = p2[1] - p1[1];
+    const dLat = p2[0] - p1[0];
+    return Math.atan2(dLng, dLat) * 180 / Math.PI;
+}
+let fusedMarker = L.marker([0, 0], { icon: _makeArrowIcon('#22c55e', 0), interactive: false });
+
+lioLine.addTo(map);
+fusedLine.addTo(map);
+
+let lioCoords = [];   // [[lat, lng], ...]
+let fusedCoords = []; // [[lat, lng], ...]
+let autoFollow = true;
+let _firstPointReceived = false;  // 首次收到点位标记
+
+function setFollow(enabled) {
+    autoFollow = enabled;
+    const btn = document.getElementById('btn-follow');
+    if (enabled) {
+        btn.className = 'secondary active';
+        btn.title = '自动跟随最新点位（已开启）';
+    } else {
+        btn.className = 'secondary';
+        btn.title = '自动跟随最新点位（已关闭，按 F 或点击按钮开启）';
+    }
+}
+
+function toggleFollow() {
+    setFollow(!autoFollow);
+    // 如果开启跟随且有数据，立即跳转到最新点位
+    if (autoFollow && fusedCoords.length > 0) {
+        map.panTo(fusedCoords[fusedCoords.length - 1], { maxZoom: 19 });
+    } else if (autoFollow && lioCoords.length > 0) {
+        map.panTo(lioCoords[lioCoords.length - 1], { maxZoom: 19 });
+    }
+}
+
+function clearTrails() {
+    lioCoords = [];
+    fusedCoords = [];
+    lioLine.setLatLngs([]);
+    fusedLine.setLatLngs([]);
+    fusedMarker.setLatLng([0, 0]);
+    fusedMarker.setIcon(_makeArrowIcon('#22c55e', 0));
+    _firstPointReceived = false;
+    updateStats();
+}
+
+// 回到罗普特园区中心点
+function goHome() {
+    map.setView(HOME_CENTER, HOME_ZOOM, { animate: true });
+    setFollow(false);
+}
+
+// 用户拖拽地图时关闭跟随
+map.on('dragstart', () => { setFollow(false); });
+
+// ==================== WebSocket ====================
+let ws = null;
+let pushMode = 'incremental';
+let reconnectAttempts = 0;
+let reconnectTimer = null;
+let lastPongTime = 0;
+let heartbeatTimer = null;
+let heartbeatTimeout = null;
+const HEARTBEAT_INTERVAL = 10000;  // 10秒发一次 ping
+const HEARTBEAT_TIMEOUT  = 5000;   // 5秒内无回应则断连
+
+function startHeartbeat() {
+    stopHeartbeat();
+    lastPongTime = Date.now();
+    heartbeatTimer = setInterval(() => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'ping', timestamp: Date.now() }));
+            // 超时检测
+            heartbeatTimeout = setTimeout(() => {
+                const elapsed = Date.now() - lastPongTime;
+                if (elapsed > HEARTBEAT_INTERVAL + HEARTBEAT_TIMEOUT) {
+                    console.warn('[心跳] 超时 %dms，主动断连', elapsed);
+                    if (ws) { ws.close(); ws = null; }
+                    stopHeartbeat();
+                }
+            }, HEARTBEAT_TIMEOUT);
+        }
+    }, HEARTBEAT_INTERVAL);
+}
+
+function stopHeartbeat() {
+    if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+    if (heartbeatTimeout) { clearTimeout(heartbeatTimeout); heartbeatTimeout = null; }
+}
+
+const hostInput = document.getElementById('host-input');
+const portInput = document.getElementById('port-input');
+
+// 从页面 URL 自动读取 IP（适配远程访问 robot-ip:8084 的场景）
+const pageHost = window.location.hostname;
+if (pageHost && pageHost !== 'localhost' && pageHost !== '127.0.0.1') {
+    hostInput.value = pageHost;
+}
+// 用户手动保存的 IP 优先
+const savedHost = localStorage.getItem('dog_ws_host');
+const savedPort = localStorage.getItem('dog_ws_port');
+if (savedHost) hostInput.value = savedHost;
+if (savedPort) portInput.value = savedPort;
+
+function setMode(mode) {
+    pushMode = mode;
+    document.getElementById('btn-inc').className = 'secondary' + (mode === 'incremental' ? ' active' : '');
+    document.getElementById('btn-full').className = 'secondary' + (mode === 'full_periodic' ? ' active' : '');
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'mode', mode: mode }));
+    }
+}
+
+let gpsSource = '/fix';
+function setGpsSource(src) {
+    gpsSource = src;
+    document.getElementById('btn-src-fix').className = 'secondary' + (src === '/fix' ? ' active' : '');
+    document.getElementById('btn-src-gpsfix').className = 'secondary' + (src === '/gps/fix' ? ' active' : '');
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'gps_source', source: src }));
+    }
+}
+
+let rtkSource = 'auto';
+function setRtkSource(src) {
+    rtkSource = src;
+    document.getElementById('btn-rtk-auto').className = 'secondary' + (src === 'auto' ? ' active' : '');
+    document.getElementById('btn-rtk-real').className = 'secondary' + (src === 'real' ? ' active' : '');
+    document.getElementById('btn-rtk-test').className = 'secondary' + (src === 'test' ? ' active' : '');
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'rtk_source', source: src }));
+    }
+}
+
+function updateStatus(online) {
+    const dot = document.getElementById('status-dot');
+    const info = document.getElementById('ws-info');
+    const btnConn = document.getElementById('btn-connect');
+    const btnDisc = document.getElementById('btn-disconnect');
+
+    if (online) {
+        dot.className = 'status-dot online';
+        dot.title = '已连接';
+        info.textContent = '已连接 ws://' + hostInput.value + ':' + portInput.value;
+        btnConn.disabled = true;
+        btnDisc.disabled = false;
+    } else {
+        dot.className = 'status-dot offline';
+        dot.title = '未连接';
+        info.textContent = '未连接';
+        btnConn.disabled = false;
+        btnDisc.disabled = true;
+    }
+}
+
+function setConnecting(active) {
+    const btnConn = document.getElementById('btn-connect');
+    const btnDisc = document.getElementById('btn-disconnect');
+    if (active) {
+        btnConn.disabled = true;
+        btnConn.textContent = '连接中...';
+        btnDisc.disabled = true;
+    } else {
+        btnConn.textContent = '连接';
+    }
+}
+
+function doConnect() {
+    // 清除上一次的重连计时器
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+
+    // 停止心跳
+    stopHeartbeat();
+    if (ws) { ws.close(); ws = null; }
+
+    const host = hostInput.value.trim();
+    const port = parseInt(portInput.value) || 8765;
+    if (!host) { alert('请输入机器狗的 IP 地址'); return; }
+
+    localStorage.setItem('dog_ws_host', host);
+    localStorage.setItem('dog_ws_port', port);
+
+    const url = 'ws://' + host + ':' + port;
+    // 立即禁用按钮，防止重复点击
+    setConnecting(true);
+    document.getElementById('ws-info').textContent = '连接中... ' + url;
+
+    ws = new WebSocket(url);
+
+    ws.onopen = () => {
+        reconnectAttempts = 0;
+        console.log('[WS] 已连接 → %s', url);
+        setConnecting(false);
+        updateStatus(true);
+        // 重新连接时重置首次点位标记，确保第一个点自动居中
+        _firstPointReceived = false;
+        setFollow(true);
+        // 发送当前模式、GPS源和RTK源
+        ws.send(JSON.stringify({ type: 'mode', mode: pushMode }));
+        ws.send(JSON.stringify({ type: 'gps_source', source: gpsSource }));
+        ws.send(JSON.stringify({ type: 'rtk_source', source: rtkSource }));
+        // 启动心跳
+        startHeartbeat();
+    };
+
+    ws.onmessage = (evt) => {
+        try {
+            const msg = JSON.parse(evt.data);
+            handleMessage(msg);
+        } catch (e) {
+            console.warn('[WS] 解析失败:', e);
+        }
+    };
+
+    ws.onerror = () => {
+        console.error('[WS] 连接失败 → %s', url);
+        setConnecting(false);
+        updateStatus(false);
+        stopHeartbeat();
+        document.getElementById('ws-info').textContent =
+            '❌ 连接失败 ' + url + ' — 请确认机器人端 trajactory_ws_server 已启动';
+    };
+
+    ws.onclose = (evt) => {
+        const reason = evt.code ? ' (code:' + evt.code + ')' : '';
+        console.log('[WS] 断开%s → %s', reason, url);
+        setConnecting(false);
+        updateStatus(false);
+        stopHeartbeat();
+
+        // 指数退避重连: 3s, 6s, 12s, 24s, max 30s
+        reconnectAttempts++;
+        const delay = Math.min(3000 * Math.pow(2, Math.min(reconnectAttempts - 1, 4)), 30000);
+        document.getElementById('ws-info').textContent =
+            '⏳ 第' + reconnectAttempts + '次重连，等待' + (delay / 1000).toFixed(0) + 's... ' + url;
+
+        reconnectTimer = setTimeout(() => {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                doConnect();
+            }
+        }, delay);
+    };
+}
+
+function doDisconnect() {
+    // 立即禁用断开按钮
+    document.getElementById('btn-disconnect').disabled = true;
+    stopHeartbeat();
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    if (ws) { ws.close(); ws = null; }
+    reconnectAttempts = 0;
+    updateStatus(false);
+}
+
+// ==================== 消息处理 ====================
+function handleMessage(msg) {
+    switch (msg.type) {
+        case 'full':
+            // 全量数据
+            if (msg.lio) {
+                lioCoords = msg.lio.map(p => [p[1], p[0]]);  // [lon,lat] → [lat,lon]
+                lioLine.setLatLngs(lioCoords);
+            }
+            if (msg.fused) {
+                fusedCoords = msg.fused.map(p => [p[1], p[0]]);
+                fusedLine.setLatLngs(fusedCoords);
+                if (fusedCoords.length >= 2) {
+                    const last = fusedCoords[fusedCoords.length - 1];
+                    const prev = fusedCoords[fusedCoords.length - 2];
+                    fusedMarker.setLatLng(last);
+                    fusedMarker.setIcon(_makeArrowIcon('#22c55e', _calcHeading(prev, last)));
+                    if (!map.hasLayer(fusedMarker)) fusedMarker.addTo(map);
+                    _centerOnPoint(last);
+                } else if (fusedCoords.length === 1) {
+                    fusedMarker.setLatLng(fusedCoords[0]);
+                    if (!map.hasLayer(fusedMarker)) fusedMarker.addTo(map);
+                    _centerOnPoint(fusedCoords[0]);
+                }
+            } else if (lioCoords.length > 0) {
+                // 没有融合数据时，以 LIO 最后一点居中
+                _centerOnPoint(lioCoords[lioCoords.length - 1]);
+            }
+            updateStats(msg.stats);
+            break;
+
+        case 'incremental':
+            // 增量数据
+            let changed = false;
+            if (msg.lio && msg.lio.length > 0) {
+                for (const p of msg.lio) {
+                    lioCoords.push([p[1], p[0]]);
+                }
+                lioLine.setLatLngs(lioCoords);
+                changed = true;
+            }
+            if (msg.fused && msg.fused.length > 0) {
+                for (const p of msg.fused) {
+                    fusedCoords.push([p[1], p[0]]);
+                }
+                fusedLine.setLatLngs(fusedCoords);
+                if (fusedCoords.length >= 2) {
+                    const last = fusedCoords[fusedCoords.length - 1];
+                    const prev = fusedCoords[fusedCoords.length - 2];
+                    fusedMarker.setLatLng(last);
+                    fusedMarker.setIcon(_makeArrowIcon('#22c55e', _calcHeading(prev, last)));
+                    if (!map.hasLayer(fusedMarker)) fusedMarker.addTo(map);
+                } else if (fusedCoords.length === 1) {
+                    fusedMarker.setLatLng(fusedCoords[0]);
+                    if (!map.hasLayer(fusedMarker)) fusedMarker.addTo(map);
+                }
+                if (fusedCoords.length > 0) {
+                    _centerOnPoint(fusedCoords[fusedCoords.length - 1]);
+                }
+                changed = true;
+            } else if (msg.lio && msg.lio.length > 0) {
+                // 没有融合点时用 LIO 点居中
+                const lastLio = [msg.lio[msg.lio.length - 1][1], msg.lio[msg.lio.length - 1][0]];
+                _centerOnPoint(lastLio);
+            }
+            if (changed) updateStats(msg.stats);
+            break;
+
+        case 'pong':
+            // 心跳回应
+            lastPongTime = Date.now();
+            if (heartbeatTimeout) {
+                clearTimeout(heartbeatTimeout);
+                heartbeatTimeout = null;
+            }
+            break;
+
+        case 'info':
+            document.getElementById('push-info').textContent = msg.message;
+            // 同步 gps_source 状态（可能是服务端返回的）
+            if (msg.gps_source && msg.gps_source !== gpsSource) {
+                gpsSource = msg.gps_source;
+                document.getElementById('btn-src-fix').className = 'secondary' + (gpsSource === '/fix' ? ' active' : '');
+                document.getElementById('btn-src-gpsfix').className = 'secondary' + (gpsSource === '/gps/fix' ? ' active' : '');
+            }
+            // 同步 rtk_source 状态
+            if (msg.rtk_source && msg.rtk_source !== rtkSource) {
+                rtkSource = msg.rtk_source;
+                document.getElementById('btn-rtk-auto').className = 'secondary' + (rtkSource === 'auto' ? ' active' : '');
+                document.getElementById('btn-rtk-real').className = 'secondary' + (rtkSource === 'real' ? ' active' : '');
+                document.getElementById('btn-rtk-test').className = 'secondary' + (rtkSource === 'test' ? ' active' : '');
+            }
+            break;
+    }
+}
+
+/** 根据 autoFollow 和首次点位标记决定是否居中 */
+function _centerOnPoint(latlng) {
+    if (!latlng || latlng[0] === 0) return;
+    // 首次收到点位：强制居中（忽略之前的拖拽）
+    if (!_firstPointReceived) {
+        _firstPointReceived = true;
+        setFollow(true);
+        map.setView(latlng, Math.max(map.getZoom(), HOME_ZOOM), { animate: true });
+        return;
+    }
+    // 后续点位：跟随模式下平移
+    if (autoFollow) {
+        map.panTo(latlng, { animate: true, maxZoom: 19 });
+    }
+}
+
+function updateStats(stats) {
+    if (!stats) return;
+    document.getElementById('cnt-lio').textContent = stats.lio_count || lioCoords.length;
+    document.getElementById('cnt-fused').textContent = stats.fused_count || fusedCoords.length;
+    if (stats.fused_last) {
+        document.getElementById('cur-pos').textContent =
+            stats.fused_last[1].toFixed(7) + ', ' + stats.fused_last[0].toFixed(7);
+    } else if (stats.lio_last) {
+        document.getElementById('cur-pos').textContent =
+            stats.lio_last[1].toFixed(7) + ', ' + stats.lio_last[0].toFixed(7);
+    }
+    // 同步 gps_source 按钮状态
+    if (stats.gps_source && stats.gps_source !== gpsSource) {
+        gpsSource = stats.gps_source;
+        document.getElementById('btn-src-fix').className = 'secondary' + (gpsSource === '/fix' ? ' active' : '');
+        document.getElementById('btn-src-gpsfix').className = 'secondary' + (gpsSource === '/gps/fix' ? ' active' : '');
+    }
+    // 同步 rtk_source 按钮状态
+    if (stats.rtk_source && stats.rtk_source !== rtkSource) {
+        rtkSource = stats.rtk_source;
+        document.getElementById('btn-rtk-auto').className = 'secondary' + (rtkSource === 'auto' ? ' active' : '');
+        document.getElementById('btn-rtk-real').className = 'secondary' + (rtkSource === 'real' ? ' active' : '');
+        document.getElementById('btn-rtk-test').className = 'secondary' + (rtkSource === 'test' ? ' active' : '');
+    }
+}
+
+// ==================== 键盘快捷键 ====================
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'f' && !e.ctrlKey && !e.metaKey && !e.target.closest('input')) {
+        // 切换跟随模式
+        setFollow(!autoFollow);
+        if (autoFollow && fusedCoords.length > 0) {
+            map.panTo(fusedCoords[fusedCoords.length - 1], { maxZoom: 19 });
+        } else if (autoFollow && lioCoords.length > 0) {
+            map.panTo(lioCoords[lioCoords.length - 1], { maxZoom: 19 });
+        }
+    }
+});
+</script>
+
+</body>
+</html>

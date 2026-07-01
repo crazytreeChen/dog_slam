@@ -1,0 +1,59 @@
+# NavSat Transform配置 - gps_fusion 独立包
+# GPS经纬度 → 地图坐标系位置转换
+#
+# use_sim_time 由 launch 文件覆盖，但必须在此定义占位值以防生命周期节点 on_configure 崩溃
+
+navsat_transform_node:
+  ros__parameters:
+    # 基础参数
+    use_sim_time: false
+    frequency: 30.0
+    delay: 0.0
+    magnetic_declination_radians: 0.0
+    yaw_offset: 0.0
+    zero_altitude: false
+    broadcast_cartesian_transform: true
+    broadcast_cartesian_transform_as_parent_frame: true
+    publish_filtered_gps: true
+
+    # 坐标系配置
+    world_frame: map
+    base_link_frame: base_footprint
+    gps_frame: gps
+
+    # GPS话题配置
+    navsat_fix_topic: /gps/fix
+    navsat_odom_topic: /gps/odom
+
+    # 等待GPS初始化的时间（秒）
+    # false = 不等待GPS fix即可启动；从首次有效 GPS fix 自动设置 datum
+    #
+    # 启动时序保证（gps_fusion.launch.py）：
+    #   1. gps_preprocessor 先发布有效 /fix_filtered（过滤 NaN/无效）
+    #   2. navsat_transform 从首条有效 fix 自动检测 datum
+    #   3. EKF 收到 /gps/odom 后开始融合 GPS 全局约束
+    wait_for_datum: false
+
+    # UTM参数（空字符串 = 自动检测 GPS 所在 UTM 区）
+    utm_zone: ""
+
+    # datum 参数：地图原点 GPS 坐标 [纬度, 经度, yaw_rad]
+    #
+    # 优先级（由 gps_fusion.launch.py 控制）：
+    #   1. map_gps_origin.yaml 存在且有效 → 使用预标定值（精度 8 位小数）
+    #   2. 否则 navsat_transform 从首次有效 GPS fix 自动检测
+    #      此处的占位值仅用于 yaml 解析，实际会被首次 fix 覆盖
+    #
+    # 注意：robot_localization 的日志显示 "%0.2f" 仅为显示截断，
+    # 内部计算使用完整 float64 精度，不影响实际定位。
+    datum: [31.0, 121.0, 0.0, 0.0]    # 华东占位，实际由首次 GPS fix 覆盖
+
+    # 转换参数
+    use_odometry_yaw: true
+
+    # 数据过滤参数
+    use_covariance: true
+
+    # 调试参数
+    print_diagnostics: true
+    debug: false

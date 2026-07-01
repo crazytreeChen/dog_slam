@@ -1,0 +1,28 @@
+# RTK 位姿监控节点参数配置
+#
+# 导航阶段 rtk_pose_monitor 的默认参数。launch 文件可通过命令行参数覆盖。
+#
+# 与 odom_corrector.py 的时序兼容:
+#   odom_corrector 采集周期约 10s + sleep 5s = 15s
+#   本节点 min_correction_interval=15s 确保不会与 odom_corrector 同时纠偏
+
+rtk_pose_monitor:
+  ros__parameters:
+    # 漂移检测
+    drift_threshold: 2.0              # AMCL与GPS偏差超过此值（m）则触发纠偏
+    min_correction_interval: 15.0     # 最小纠偏间隔（s），大于 odom_corrector 周期
+    monitor_rate: 2.0                 # 监控频率（Hz）
+
+    # GPS 容错状态机
+    gps_loss_threshold: 5             # 连续N帧无效GPS → GPS_LOST 停止纠偏
+    gps_recovery_threshold: 3         # 连续M帧有效GPS → 恢复 MONITORING
+    min_accuracy: 5.0                 # GPS最低水平精度（m），低于此值视为无效
+
+    # 协方差自适应（根据RTK质量等级设置 /initialpose 的位置协方差）
+    cov_rtk_fix: 0.01                 # RTK整数解 → 高信任
+    cov_rtk_float: 0.1                # RTK浮点解 → 中信任
+    cov_dgps: 1.0                     # DGPS亚米 → 低信任
+    cov_no_heading: 0.5               # 无RTK航向时 yaw 协方差（让AMCL保持自身航向估计）
+
+    # 航向
+    use_rtk_heading: true             # 是否使用RTK航向纠偏（false则仅纠位置）

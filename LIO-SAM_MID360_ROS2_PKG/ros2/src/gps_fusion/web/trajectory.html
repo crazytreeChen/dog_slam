@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GPS 融合轨迹可视化</title>
+
+<!-- Leaflet CSS (本地离线版本) -->
+<link rel="stylesheet" href="libs/leaflet.css" />
+
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    background: #0a0e17;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    color: #c8d6e5;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.header {
+    background: #111827;
+    padding: 10px 20px;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    border-bottom: 1px solid #1e293b;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+}
+
+.header h1 {
+    font-size: 16px;
+    font-weight: 600;
+    color: #e2e8f0;
+}
+
+.status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+}
+.status-dot.ok { background: #22c55e; box-shadow: 0 0 6px #22c55e; }
+.status-dot.err { background: #ef4444; }
+.status-dot.wait { background: #f59e0b; }
+
+.stat {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: #94a3b8;
+}
+.stat .value { color: #e2e8f0; font-variant-numeric: tabular-nums; }
+.stat .unit { font-size: 11px; color: #64748b; }
+
+/* Leaflet 容器 */
+#map {
+    flex: 1;
+    background: #0a0e17;
+}
+
+/* 三角箭头标记：去掉 Leaflet 默认 divIcon 背景/边框 */
+.arrow-marker {
+    background: transparent !important;
+    border: none !important;
+}
+.leaflet-custom-legend {
+    background: rgba(17, 24, 39, 0.92);
+    border: 1px solid #1e293b;
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 12px;
+    color: #c8d6e5;
+    line-height: 1.8;
+}
+.legend-color {
+    display: inline-block;
+    width: 20px;
+    height: 3px;
+    border-radius: 1px;
+    vertical-align: middle;
+    margin-right: 6px;
+}
+
+/* 切换按钮 */
+.map-toggle {
+    background: rgba(17, 24, 39, 0.92);
+    border: 1px solid #1e293b;
+    border-radius: 4px;
+    color: #c8d6e5;
+    font-size: 12px;
+    padding: 4px 10px;
+    cursor: pointer;
+}
+.map-toggle:hover { background: #1e293b; }
+.map-toggle.active { color: #22c55e; border-color: #22c55e; }
+
+@media (max-width: 600px) {
+    .header { gap: 12px; padding: 8px 12px; }
+    .header h1 { font-size: 14px; }
+    .stat { font-size: 11px; }
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+    <h1>GPS + LIO 轨迹融合</h1>
+    <div class="stat">LIO <span class="value" id="lio-count">0</span> <span class="unit">pts</span></div>
+    <div class="stat">融合 <span class="value" id="fused-count">0</span> <span class="unit">pts</span></div>
+    <div class="stat" id="lio-dist-stat" style="display:none">
+        LIO距离 <span class="value" id="lio-dist">--</span> <span class="unit">m</span>
+    </div>
+    <div class="stat" id="fused-dist-stat" style="display:none">
+        融合距离 <span class="value" id="fused-dist">--</span> <span class="unit">m</span>
+    </div>
+    <div class="stat">当前 <span class="value" id="current-pos">--</span></div>
+    <div class="stat" id="latlon-stat" style="display:none">
+        经纬度 <span class="value" id="latlon-val">--</span>
+    </div>
+    <span class="status-dot wait" id="status-dot" title="连接状态"></span>
+    <span style="font-size:11px;color:#64748b" id="fps-display"></span>
+    <button onclick="clearCache();resetTrails();"
+            style="font-size:11px;color:#64748b;background:none;border:1px solid #334155;border-radius:3px;padding:1px 6px;cursor:pointer;margin-left:8px;"
+            title="清除本地缓存的轨迹数据">清除轨迹</button>
+    <button id="btn-sat" class="map-toggle active" onclick="switchLayer('sat')">卫星图</button>
+    <button id="btn-vec" class="map-toggle" onclick="switchLayer('vec')">矢量图</button>
+</div>
+
+<div id="map"></div>
+
+<!-- 依赖库（本地离线版本，无需外网） -->
+<script src="libs/leaflet.js"></script>
+<script src="libs/roslib.min.js"></script>
+
+<script>
+// ============ OSM + Esri 瓦片图层（WGS84 坐标系，无偏移） ============
+// 卫星底图 - Esri World Imagery（WGS84，全球覆盖）
+const esriSat = L.tileLayer(
+    'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    { maxZoom: 19, attribution: '&copy; Esri' }
+);
+// OSM 路网标注（叠加在卫星图上）
+const osmRoad = L.tileLayer(
+    'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+    { maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>' }
+);
+// CartoDB 浅色矢量图（备选）
+const cartoVec = L.tileLayer(
+    'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png',
+    { subdomains: ['a','b','c','d'], maxZoom: 19, attribution: '&copy; OSM, CartoDB' }
+);
+
+// ============ 地图初始化 ============
+const map = L.map('map', {
+    zoomControl: true,
+    preferCanvas: true,  // Canvas 渲染器，轨迹多时更流畅
+});
+
+// 默认：Esri 卫星图（WGS84，无 GCJ02 偏移）
+esriSat.addTo(map);
+
+let currentLayer = 'sat';
+
+function switchLayer(type) {
+    map.removeLayer(esriSat);
+    map.removeLayer(osmRoad);
+    map.removeLayer(cartoVec);
+    document.getElementById('btn-sat').classList.remove('active');
+    document.getElementById('btn-vec').classList.remove('active');
+
+    if (type === 'sat') {
+        esriSat.addTo(map);
+        document.getElementById('btn-sat').classList.add('active');
+    } else {
+        cartoVec.addTo(map);
+        document.getElementById('btn-vec').classList.add('active');
+    }
+    currentLayer = type;
+}
+
+// 自定义图例
+const legendCtrl = L.control({ position: 'bottomleft' });
+legendCtrl.onAdd = function() {
+    const div = L.DomUtil.create('div', 'leaflet-custom-legend');
+    div.innerHTML = `
+        <div><span class="legend-color" style="background:#3b82f6"></span>LIO 原始轨迹</div>
+        <div><span class="legend-color" style="background:#22c55e"></span>GPS 融合轨迹</div>
+        <div style="font-size:10px;color:#64748b;margin-top:2px">底图: Esri卫星+OSM (WGS84)</div>
+    `;
+    return div;
+};
+legendCtrl.addTo(map);
+
+// ============ 轨迹图层 ============
+let lioLine = L.polyline([], { color: '#3b82f6', weight: 3, opacity: 0.9, smoothFactor: 1 });
+let fusedLine = L.polyline([], { color: '#22c55e', weight: 3, opacity: 0.9, smoothFactor: 1 });
+
+// 三角箭头标记（替代圆点，显示前进方向）
+function _makeArrowIcon(color, headingDeg) {
+    const deg = headingDeg || 0;
+    return L.divIcon({
+        className: 'arrow-marker',
+        html: '<div style="transform:rotate(' + deg + 'deg);width:24px;height:24px;">' +
+              '<svg width="24" height="24" viewBox="-12 -12 24 24" style="display:block;">' +
+              '<polygon points="0,-10 7,4 -7,4" fill="' + color + '" stroke="#fff" stroke-width="1.2" stroke-linejoin="round"/>' +
+              '</svg></div>',
+        iconSize: [24, 24],
+        iconAnchor: [12, 12],
+    });
+}
+function _calcHeading(p1, p2) {
+    // p1, p2 = [lat, lng]; 返回角度(deg), 0=正北
+    if (!p1 || !p2) return 0;
+    const dLng = p2[1] - p1[1];
+    const dLat = p2[0] - p1[0];
+    return Math.atan2(dLng, dLat) * 180 / Math.PI;
+}
+let lioMarker = L.marker([0, 0], { icon: _makeArrowIcon('#3b82f6', 0), interactive: false });
+let fusedMarker = L.marker([0, 0], { icon: _makeArrowIcon('#22c55e', 0), interactive: false });
+
+lioLine.addTo(map);
+fusedLine.addTo(map);
+
+function resetTrails() {
+    lioLine.setLatLngs([]);
+    fusedLine.setLatLngs([]);
+    lioMarker.setLatLng([0, 0]);
+    lioMarker.setIcon(_makeArrowIcon('#3b82f6', 0));
+    fusedMarker.setLatLng([0, 0]);
+    fusedMarker.setIcon(_makeArrowIcon('#22c55e', 0));
+}
+
+// ============ rosbridge 连接 ============
+const WS_HOST = localStorage.getItem('gps_rosbridge_host') || location.hostname;
+const WS_PORT = parseInt(localStorage.getItem('gps_rosbridge_port') || '9091');
+
+let ros = null;
+let lioSub = null;
+let fusedSub = null;
+let gpsLatlonSub = null;
+let connected = false;
+
+function updateStatus(state) {
+    const dot = document.getElementById('status-dot');
+    dot.className = 'status-dot ' + state;
+    dot.title = state === 'ok' ? ('已连接 ws://' + WS_HOST + ':' + WS_PORT)
+              : state === 'err' ? '连接断开'
+              : '连接中...';
+}
+
+function connectROS() {
+    if (ros) { ros.close(); }
+
+    ros = new ROSLIB.Ros({
+        url: 'ws://' + WS_HOST + ':' + WS_PORT
+    });
+
+    ros.on('connection', () => {
+        console.log('[rosbridge] 已连接');
+        connected = true;
+        updateStatus('ok');
+
+        // 订阅经纬度轨迹（x=lon, y=lat）
+        lioSub = new ROSLIB.Topic({
+            ros: ros,
+            name: '/trajectory/lio_latlon',
+            messageType: 'nav_msgs/Path'
+        });
+        lioSub.subscribe((msg) => {
+            const latlngs = [];
+            if (msg.poses) {
+                for (const p of msg.poses) {
+                    latlngs.push([p.pose.position.y, p.pose.position.x]);  // Leaflet: [lat, lng]
+                }
+            }
+            lioLine.setLatLngs(latlngs);
+
+            // 三角箭头标记 LIO 当前位置
+            if (latlngs.length >= 2) {
+                const last = latlngs[latlngs.length - 1];
+                const prev = latlngs[latlngs.length - 2];
+                const hdg = _calcHeading(prev, last);
+                lioMarker.setLatLng(last);
+                lioMarker.setIcon(_makeArrowIcon('#3b82f6', hdg));
+                if (!map.hasLayer(lioMarker)) lioMarker.addTo(map);
+            } else if (latlngs.length === 1) {
+                lioMarker.setLatLng(latlngs[0]);
+                if (!map.hasLayer(lioMarker)) lioMarker.addTo(map);
+            }
+
+            // 同步更新状态（用于统计栏）
+            state.lio = latlngs.map(ll => ({ x: ll[1], y: ll[0] }));
+            afterDataUpdate('lio');
+        });
+
+        fusedSub = new ROSLIB.Topic({
+            ros: ros,
+            name: '/trajectory/fused_latlon',
+            messageType: 'nav_msgs/Path'
+        });
+        fusedSub.subscribe((msg) => {
+            const latlngs = [];
+            if (msg.poses) {
+                for (const p of msg.poses) {
+                    latlngs.push([p.pose.position.y, p.pose.position.x]);
+                }
+            }
+            fusedLine.setLatLngs(latlngs);
+
+            state.fused = latlngs.map(ll => ({ x: ll[1], y: ll[0] }));
+            afterDataUpdate('fused');
+
+            // 三角箭头标记融合当前位置 + 自动聚焦
+            if (latlngs.length >= 2) {
+                const last = latlngs[latlngs.length - 1];
+                const prev = latlngs[latlngs.length - 2];
+                const hdg = _calcHeading(prev, last);
+                fusedMarker.setLatLng(last);
+                fusedMarker.setIcon(_makeArrowIcon('#22c55e', hdg));
+                if (!map.hasLayer(fusedMarker)) fusedMarker.addTo(map);
+                if (!map._dragged) {
+                    map.panTo(last, { animate: false });
+                }
+            } else if (latlngs.length === 1) {
+                fusedMarker.setLatLng(latlngs[0]);
+                if (!map.hasLayer(fusedMarker)) fusedMarker.addTo(map);
+                if (!map._dragged) {
+                    map.panTo(latlngs[0], { animate: false });
+                }
+            }
+        });
+
+        // 订阅 GPS 当前经纬度
+        gpsLatlonSub = new ROSLIB.Topic({
+            ros: ros,
+            name: '/gps/current_latlon',
+            messageType: 'sensor_msgs/NavSatFix'
+        });
+        gpsLatlonSub.subscribe((msg) => {
+            if (typeof msg.latitude === 'number') {
+                const el = document.getElementById('latlon-val');
+                const stat = document.getElementById('latlon-stat');
+                el.textContent = msg.latitude.toFixed(7) + ', ' + msg.longitude.toFixed(7);
+                stat.style.display = 'flex';
+            }
+        });
+    });
+
+    ros.on('error', (err) => {
+        console.error('[rosbridge] 错误:', err);
+        connected = false;
+        updateStatus('err');
+    });
+
+    ros.on('close', () => {
+        console.log('[rosbridge] 断开，3秒后重连...');
+        connected = false;
+        updateStatus('err');
+        if (lioSub) lioSub.unsubscribe();
+        if (fusedSub) fusedSub.unsubscribe();
+        if (gpsLatlonSub) gpsLatlonSub.unsubscribe();
+        setTimeout(connectROS, 3000);
+    });
+}
+
+// 跟踪用户拖拽，避免自动 pan 干扰
+map.on('dragstart', () => { map._dragged = true; });
+
+// ============ localStorage 缓存 ============
+const CACHE_KEY_LIO = 'gps_trajectory_lio';
+const CACHE_KEY_FUSED = 'gps_trajectory_fused';
+const CACHE_MAX_POINTS = 5000;
+
+function saveToCache(key, points) {
+    try {
+        let toSave = points;
+        if (toSave.length > CACHE_MAX_POINTS) {
+            toSave = toSave.filter((_, i) => i % 2 === 0);
+        }
+        localStorage.setItem(key, JSON.stringify(toSave));
+    } catch (e) {
+        console.warn('[cache] 写入失败:', e);
+    }
+}
+
+function loadFromCache(key) {
+    try {
+        const raw = localStorage.getItem(key);
+        return raw ? JSON.parse(raw) : [];
+    } catch (e) {
+        console.warn('[cache] 读取失败:', e);
+        return [];
+    }
+}
+
+function clearCache() {
+    localStorage.removeItem(CACHE_KEY_LIO);
+    localStorage.removeItem(CACHE_KEY_FUSED);
+}
+
+// ============ 状态（经纬度） ============
+const state = {
+    lio: loadFromCache(CACHE_KEY_LIO),
+    fused: loadFromCache(CACHE_KEY_FUSED),
+};
+
+// 如果有缓存数据，恢复轨迹显示
+if (state.lio.length > 0) {
+    lioLine.setLatLngs(state.lio.map(p => [p.y, p.x]));
+    afterDataUpdate('lio');
+}
+if (state.fused.length > 0) {
+    const latlngs = state.fused.map(p => [p.y, p.x]);
+    fusedLine.setLatLngs(latlngs);
+    afterDataUpdate('fused');
+    const last = latlngs[latlngs.length - 1];
+    if (last) {
+        const prev = latlngs.length >= 2 ? latlngs[latlngs.length - 2] : null;
+        fusedMarker.setLatLng(last);
+        fusedMarker.setIcon(_makeArrowIcon('#22c55e', prev ? _calcHeading(prev, last) : 0));
+        fusedMarker.addTo(map);
+        map.setView(last, 18, { animate: false });
+    }
+}
+
+// ============ 距离计算 ============
+function calcDistance(points) {
+    if (points.length < 2) return 0;
+    let d = 0;
+    for (let i = 1; i < points.length; i++) {
+        // 经纬度转近似米
+        const midLat = (points[i].y + points[i - 1].y) / 2;
+        const dx = (points[i].x - points[i - 1].x) * 111320.0 * Math.cos(midLat * Math.PI / 180);
+        const dy = (points[i].y - points[i - 1].y) * 111320.0;
+        d += Math.hypot(dx, dy);
+    }
+    return d;
+}
+
+function afterDataUpdate(which) {
+    if (which === 'lio') {
+        document.getElementById('lio-count').textContent = state.lio.length;
+        const d = calcDistance(state.lio);
+        if (d > 0) {
+            document.getElementById('lio-dist-stat').style.display = 'flex';
+            document.getElementById('lio-dist').textContent = d.toFixed(1);
+        }
+        saveToCache(CACHE_KEY_LIO, state.lio);
+    }
+    if (which === 'fused') {
+        document.getElementById('fused-count').textContent = state.fused.length;
+        const d = calcDistance(state.fused);
+        if (d > 0) {
+            document.getElementById('fused-dist-stat').style.display = 'flex';
+            document.getElementById('fused-dist').textContent = d.toFixed(1);
+        }
+        saveToCache(CACHE_KEY_FUSED, state.fused);
+    }
+
+    // 当前位置
+    if (state.fused.length > 0) {
+        const last = state.fused[state.fused.length - 1];
+        document.getElementById('current-pos').textContent =
+            '(' + last.x.toFixed(7) + ', ' + last.y.toFixed(7) + ')';
+    } else if (state.lio.length > 0) {
+        const last = state.lio[state.lio.length - 1];
+        document.getElementById('current-pos').textContent =
+            '(' + last.x.toFixed(7) + ', ' + last.y.toFixed(7) + ')';
+    }
+}
+
+// ============ 启动 ============
+connectROS();
+</script>
+
+</body>
+</html>

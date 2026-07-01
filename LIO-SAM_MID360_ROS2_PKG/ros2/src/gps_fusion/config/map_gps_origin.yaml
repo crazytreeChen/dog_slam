@@ -1,0 +1,30 @@
+# 地图原点 GPS + 朝向 标定文件
+# 由 calibrate_map_origin.py 自动生成，或手动填写。
+#
+# 含义：地图坐标系原点 (0, 0, 0) 在真实世界中的 GPS 坐标 + 朝向。
+#
+# 转换公式（RTK → map）：
+#   dx = RTK_UTM_E - map_origin_UTM_E
+#   dy = RTK_UTM_N - map_origin_UTM_N
+#   map_x =  dx * cos(θ₀) + dy * sin(θ₀)
+#   map_y = -dx * sin(θ₀) + dy * cos(θ₀)
+#   map_yaw = RTK_heading_deg - heading_deg
+#   其中 θ₀ = heading_deg（弧度）= 地图 y=0 轴与真北的夹角
+
+map_origin:
+  # WGS84 经纬度（必填）
+  latitude: 24.61000000
+  longitude: 118.03000000
+  altitude: 42.52
+
+  # 地图朝向：地图 y=0 轴在真实世界中指向的真北方位角（度）
+  # 例：建图启动时机器人朝正北 → heading_deg = 0
+  #      建图启动时机器人朝正东 → heading_deg = 90
+  heading_deg: 0.0
+
+  # UTM 坐标（自动计算，仅供参考）
+  utm_easting: 604684.19
+  utm_northing: 2722418.28
+  utm_zone: 50
+
+note: "请根据实际建图位置和朝向修改。heading_deg 在建图启动时记录机器人真实朝向 (0=正北, 90=正东)"

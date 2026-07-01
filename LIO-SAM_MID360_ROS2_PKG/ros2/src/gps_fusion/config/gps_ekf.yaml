@@ -1,0 +1,112 @@
+# GPS融合EKF配置 - gps_fusion 独立包
+#
+# 数据流架构:
+#   LIO里程计 → odom0 (高频相对定位)
+#   navsat_transform → /gps/odom → odom1 (GPS绝对位置，全局约束)
+#   IMU → imu0 (姿态/角速度/加速度)
+#   EKF输出 → /odometry/gps_fused
+#
+# 注意：navsat0 不是 ekf_node 的有效传感器类型（Humble 中仅 navsat_transform_node 支持）。
+#       GPS 必须先经 navsat_transform 转为 odometry，再作为 odom1 融入 EKF。
+
+ekf_filter_node:
+  ros__parameters:
+    # 基础参数
+    use_sim_time: false
+    frequency: 30.0
+    sensor_timeout: 2.0             # 从 0.1s 放宽到 2s，避免传感器临时缺失时纯预测发散
+    two_d_mode: false
+    transform_time_offset: 0.0
+    transform_timeout: 0.0
+    print_diagnostics: true
+    debug: false
+    smooth_lagged_data: true        # 增强时间戳乱序鲁棒性
+
+    # 坐标系配置
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link
+    world_frame: map
+
+    # LIO里程计输入（odom0: 高频相对定位，话题名由 launch 文件 remap）
+    odom0: /lio_odom
+    odom0_config: [true,  true,  true,   # X, Y, Z位置
+                  false, false, false,  # 滚转、俯仰、偏航角度
+                  true,  true,  true,   # X, Y, Z线速度
+                  false, false, true,   # 滚转、俯仰、偏航角速度
+                  false, false, false]  # 加速度
+    odom0_queue_size: 10
+    odom0_nodelay: false                # 改为 false，避免乱序时间戳导致预测异常
+    odom0_differential: false
+    odom0_relative: false
+    odom0_pose_rejection_threshold: 50.0   # 拒绝 >50m 的位置跳变（NaN 防护）
+
+    # GPS绝对位置输入（odom1: navsat_transform 输出的 UTM 坐标 odometry）
+    odom1: /gps/odom
+    odom1_config: [true,  true,  false,  # X, Y位置（GPS提供全局约束）
+                  false, false, false,  # 不使用GPS的姿态
+                  false, false, false,  # 不使用GPS的速度
+                  false, false, false,  # 不使用GPS的角速度
+                  false, false, false]  # 不使用GPS的加速度
+    odom1_queue_size: 10
+    odom1_nodelay: false                # 改为 false
+    odom1_differential: false
+    odom1_relative: false
+    odom1_pose_rejection_threshold: 5.0   # GPS 位置跳变 >5m 时拒绝（防止 NaN 或异常跳变）
+
+    # IMU输入（imu0: 姿态/角速度/加速度，话题名由 launch 文件 remap）
+    imu0: /imu/data
+    imu0_config: [false, false, false,   # 位置
+                  true,  true,  false,   # 滚转、俯仰、偏航角度
+                  false, false, false,   # 线速度
+                  true,  true,  true,    # 角速度
+                  true,  true,  true]    # 线性加速度
+    imu0_queue_size: 10
+    imu0_nodelay: false                 # 改为 false，避免乱序
+    imu0_differential: false
+    imu0_relative: false
+    # 关闭重力去除：EKF 启动时方向未收敛，去重力会引入异常加速度导致 NaN
+    # LIO odom0 已提供可靠的线速度，IMU 仅用于角速度和局部加速度约束
+    imu0_remove_gravitational_acceleration: false
+
+    # 不使用控制输入
+    use_control: false
+
+    # 过程噪声协方差矩阵（控制状态预测的不确定性）
+    # 索引: X Y Z roll pitch yaw vx vy vz vroll vpitch vyaw ax ay az
+    # 值越小 → 越信任运动模型（匀速假设），减小预测发散风险
+    # LIO odom0 以 10+ Hz 高频提供位置+速度观测，不需要大的过程噪声
+    process_noise_covariance: [0.01, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                              0.0,  0.01, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                              0.0,  0.0,  0.01, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                              0.0,  0.0,  0.0,  0.01, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                              0.0,  0.0,  0.0,  0.0,  0.01, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                              0.0,  0.0,  0.0,  0.0,  0.0,  0.01, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                              0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.01, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                              0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.01, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                              0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.01, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                              0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.01, 0.0,  0.0,  0.0,  0.0,  0.0,
+                              0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.01, 0.0,  0.0,  0.0,  0.0,
+                              0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.01, 0.0,  0.0,  0.0,
+                              0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.01, 0.0,  0.0,
+                              0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.01, 0.0,
+                              0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.01]
+
+    # 初始估计协方差（滤波器启动时状态不确定性）
+    # 索引: X Y Z roll pitch yaw vx vy vz vroll vpitch vyaw ax ay az
+    # 关键：所有对角线值必须处于同一量级区间，避免 Kalman 增益矩阵病态 → NaN
+    initial_estimate_covariance: [1.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                                  0.0,  1.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                                  0.0,  0.0,  1.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                                  0.0,  0.0,  0.0,  0.1,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                                  0.0,  0.0,  0.0,  0.0,  0.1,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                                  0.0,  0.0,  0.0,  0.0,  0.0,  0.1,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                                  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.1,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                                  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.1,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                                  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.1,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                                  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.1,  0.0,  0.0,  0.0,  0.0,  0.0,
+                                  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.1,  0.0,  0.0,  0.0,  0.0,
+                                  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.1,  0.0,  0.0,  0.0,
+                                  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.1,  0.0,  0.0,
+                                  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.1,  0.0,
+                                  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.1]

@@ -112,3 +112,35 @@ conda activate dog_slam_envs
 ```
 
 Direct interpreter path (no activation): `D:/miniforge_cache/envs/dog_slam_envs/python.exe`. (System `python` may be a Windows Store stub that exits 49 — avoid it.)
+
+## Knowledge Base (Obsidian)
+
+所有技术笔记、项目经验、问题排查、工作日报等知识资产统一存放在 Obsidian vault：
+
+```
+/Users/qinglinchen/01-Code/98-Custom/obsdian/
+```
+
+### Vault 目录结构
+
+| 目录 | 用途 | 写入技能 |
+|------|------|----------|
+| `01-技术学习/概念卡片/` | 技术概念卡片（ROS2, SLAM, LiDAR, Nav2...） | `tech-knowledge-organizer` |
+| `01-技术学习/问题排查/` | 问题排查记录 | `tech-knowledge-organizer` |
+| `01-技术学习/语言/` | 编程语言笔记 | `tech-knowledge-organizer` |
+| `01-技术学习/框架/` | 框架/库笔记 | `tech-knowledge-organizer` |
+| `02-工作项目/进行中/dog_slam/` | dog_slam 项目经验日志、版本记录 | `tech-knowledge-organizer` |
+| `10-工作记录/YYYY/MM月/第WW周/` | 日报、周报、月报（按年/月/周/日层级） | `report-summarizer` |
+| `99-Templates/` | 笔记模板 | — |
+
+### 相关 Skills
+
+- **`tech-knowledge-organizer`**：技术内容归类、概念卡片、问题排查笔记，强制 Obsidian 双链 `[[]]`
+- **`report-summarizer`**：日报/周报/月报生成
+
+### 规范
+
+- 所有 `.md` 笔记必须有 YAML frontmatter（`type`, `created`, `tags`）
+- 强制使用 `[[双链]]` 关联已有笔记
+- MOC 索引页面（`MOC-*.md`）需在新增笔记后同步更新
+- **不要**在项目仓库内创建 `.md` 笔记文件（代码文档除外），统一写入 Obsidian vault

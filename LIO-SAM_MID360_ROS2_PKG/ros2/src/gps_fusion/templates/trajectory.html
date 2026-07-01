@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GPS 融合轨迹可视化</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    background: #0a0e17;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    color: #c8d6e5;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.header {
+    background: #111827;
+    padding: 10px 20px;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    border-bottom: 1px solid #1e293b;
+    flex-shrink: 0;
+}
+
+.header h1 {
+    font-size: 16px;
+    font-weight: 600;
+    color: #e2e8f0;
+}
+
+.status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+}
+.status-dot.ok { background: #22c55e; box-shadow: 0 0 6px #22c55e; }
+.status-dot.err { background: #ef4444; }
+
+.stat {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: #94a3b8;
+}
+.stat .value { color: #e2e8f0; font-variant-numeric: tabular-nums; }
+.stat .unit { font-size: 11px; color: #64748b; }
+
+#canvas {
+    flex: 1;
+    display: block;
+    cursor: default;
+}
+
+.legend {
+    position: absolute;
+    bottom: 16px;
+    left: 16px;
+    background: rgba(17, 24, 39, 0.9);
+    border: 1px solid #1e293b;
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 12px;
+    display: flex;
+    gap: 16px;
+}
+
+.legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.legend-color {
+    width: 20px;
+    height: 3px;
+    border-radius: 1px;
+}
+
+@media (max-width: 600px) {
+    .header { gap: 12px; padding: 8px 12px; }
+    .header h1 { font-size: 14px; }
+    .stat { font-size: 11px; }
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+    <h1>📍 GPS + LIO 轨迹融合</h1>
+    <div class="stat">LIO <span class="value" id="lio-count">0</span> <span class="unit">pts</span></div>
+    <div class="stat">融合 <span class="value" id="fused-count">0</span> <span class="unit">pts</span></div>
+    <div class="stat" id="lio-dist-stat" style="display:none">
+        LIO距离 <span class="value" id="lio-dist">--</span> <span class="unit">m</span>
+    </div>
+    <div class="stat" id="fused-dist-stat" style="display:none">
+        融合距离 <span class="value" id="fused-dist">--</span> <span class="unit">m</span>
+    </div>
+    <div class="stat">当前 <span class="value" id="current-pos">--</span></div>
+    <span class="status-dot ok" id="status-dot" title="连接状态"></span>
+    <span style="font-size:11px;color:#64748b" id="fps-display"></span>
+</div>
+
+<div style="position:relative;flex:1;">
+    <canvas id="canvas"></canvas>
+    <div class="legend">
+        <div class="legend-item">
+            <div class="legend-color" style="background:#3b82f6"></div>
+            <span>LIO 原始轨迹</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background:#22c55e"></div>
+            <span>GPS 融合轨迹</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background:#64748b; border: 1px dashed #64748b; background:transparent; height:0"></div>
+            <span>网格 1m</span>
+        </div>
+    </div>
+</div>
+
+<script>
+// ============ 状态 ============
+const state = {
+    lio: [],
+    fused: [],
+    lioDist: 0,
+    fusedDist: 0,
+};
+
+let pollInterval = 200;  // ms 轮询间隔
+let frameCount = 0;
+let lastFpsTime = performance.now();
+
+// ============ Canvas 初始化 ============
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let W, H;
+
+function resize() {
+    const rect = canvas.parentElement.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    W = rect.width;
+    H = rect.height;
+    canvas.width = W * dpr;
+    canvas.height = H * dpr;
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+window.addEventListener('resize', resize);
+resize();
+
+// ============ 绘制 ============
+const COLORS = {
+    bg: '#0a0e17',
+    grid: '#1a2233',
+    gridMinor: '#111827',
+    lio: '#3b82f6',
+    fused: '#22c55e',
+    lioCur: '#60a5fa',
+    fusedCur: '#4ade80',
+    text: '#64748b',
+    axis: '#334155',
+};
+
+function computeBounds() {
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    const all = state.lio.concat(state.fused);
+    if (all.length === 0) return null;
+    for (const p of all) {
+        if (p.x < minX) minX = p.x;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.y > maxY) maxY = p.y;
+    }
+    // 至少覆盖 10m x 10m
+    const dx = maxX - minX, dy = maxY - minY;
+    const pad = Math.max(dx, dy) * 0.12 + 1.0;
+    return {
+        xMin: minX - pad,
+        xMax: maxX + pad,
+        yMin: minY - pad,
+        yMax: maxY + pad,
+    };
+}
+
+function worldToScreen(x, y, bounds) {
+    const sx = ((x - bounds.xMin) / (bounds.xMax - bounds.xMin)) * W;
+    const sy = H - ((y - bounds.yMin) / (bounds.yMax - bounds.yMin)) * H;
+    return [sx, sy];
+}
+
+function niceStep(range) {
+    const rough = range / 6;
+    const exp = Math.pow(10, Math.floor(Math.log10(rough)));
+    const mant = rough / exp;
+    if (mant <= 1.5) return exp;
+    if (mant <= 3.5) return 2 * exp;
+    if (mant <= 7.5) return 5 * exp;
+    return 10 * exp;
+}
+
+function drawGrid(bounds) {
+    const step = niceStep(Math.max(bounds.xMax - bounds.xMin, bounds.yMax - bounds.yMin));
+    ctx.strokeStyle = COLORS.gridMinor;
+    ctx.lineWidth = 0.5;
+
+    // 小网格
+    const minorStep = step / 5;
+    for (let x = Math.floor(bounds.xMin / minorStep) * minorStep; x <= bounds.xMax; x += minorStep) {
+        if (Math.abs(x % step) < 1e-6) continue;
+        const [sx, sy0] = worldToScreen(x, bounds.yMin, bounds);
+        const [, sy1] = worldToScreen(x, bounds.yMax, bounds);
+        ctx.beginPath();
+        ctx.moveTo(sx, sy0);
+        ctx.lineTo(sx, sy1);
+        ctx.stroke();
+    }
+    for (let y = Math.floor(bounds.yMin / minorStep) * minorStep; y <= bounds.yMax; y += minorStep) {
+        if (Math.abs(y % step) < 1e-6) continue;
+        const [sx0, sy] = worldToScreen(bounds.xMin, y, bounds);
+        const [sx1] = worldToScreen(bounds.xMax, y, bounds);
+        ctx.beginPath();
+        ctx.moveTo(sx0, sy);
+        ctx.lineTo(sx1, sy);
+        ctx.stroke();
+    }
+
+    // 大网格
+    ctx.strokeStyle = COLORS.grid;
+    ctx.lineWidth = 1;
+    for (let x = Math.floor(bounds.xMin / step) * step; x <= bounds.xMax; x += step) {
+        const [sx, sy0] = worldToScreen(x, bounds.yMin, bounds);
+        const [, sy1] = worldToScreen(x, bounds.yMax, bounds);
+        ctx.beginPath();
+        ctx.moveTo(sx, sy0);
+        ctx.lineTo(sx, sy1);
+        ctx.stroke();
+    }
+    for (let y = Math.floor(bounds.yMin / step) * step; y <= bounds.yMax; y += step) {
+        const [sx0, sy] = worldToScreen(bounds.xMin, y, bounds);
+        const [sx1] = worldToScreen(bounds.xMax, y, bounds);
+        ctx.beginPath();
+        ctx.moveTo(sx0, sy);
+        ctx.lineTo(sx1, sy);
+        ctx.stroke();
+    }
+}
+
+function drawTrajectory(points, color, bounds) {
+    if (points.length < 2) return;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    const [sx0, sy0] = worldToScreen(points[0].x, points[0].y, bounds);
+    ctx.moveTo(sx0, sy0);
+    for (let i = 1; i < points.length; i++) {
+        const [sx, sy] = worldToScreen(points[i].x, points[i].y, bounds);
+        ctx.lineTo(sx, sy);
+    }
+    ctx.stroke();
+}
+
+function _calcHeading(p1, p2) {
+    // p1, p2 = {x, y}; 返回角度(rad), 0=向上(Y+)
+    if (!p1 || !p2) return 0;
+    return Math.atan2(p2.x - p1.x, p2.y - p1.y);
+}
+
+function drawCurrentMarker(x, y, color, headingRad, bounds) {
+    const [sx, sy] = worldToScreen(x, y, bounds);
+    const hdg = headingRad || 0;
+    const size = 9;
+    const half = size / 2;
+
+    ctx.save();
+    ctx.translate(sx, sy);
+    ctx.rotate(hdg - Math.PI / 2);  // 调整：0° 默认向上
+
+    // 三角箭头主体
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(0, -size);
+    ctx.lineTo(-half, half);
+    ctx.lineTo(half, half);
+    ctx.closePath();
+    ctx.fill();
+
+    // 白边描边
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1.5;
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(0, -size);
+    ctx.lineTo(-half, half);
+    ctx.lineTo(half, half);
+    ctx.closePath();
+    ctx.stroke();
+
+    ctx.restore();
+}
+
+function drawGridLabels(bounds) {
+    const step = niceStep(Math.max(bounds.xMax - bounds.xMin, bounds.yMax - bounds.yMin));
+    ctx.fillStyle = COLORS.text;
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'center';
+
+    for (let x = Math.floor(bounds.xMin / step) * step; x <= bounds.xMax; x += step) {
+        const [sx] = worldToScreen(x, bounds.yMin, bounds);
+        ctx.fillText(x.toFixed(1) + 'm', sx, H - 4);
+    }
+    for (let y = Math.floor(bounds.yMin / step) * step; y <= bounds.yMax; y += step) {
+        const [, sy] = worldToScreen(bounds.xMin, y, bounds);
+        ctx.textAlign = 'right';
+        ctx.fillText(y.toFixed(1) + 'm', W - 4, sy + 3);
+    }
+}
+
+function drawZeroIndicator(bounds) {
+    if (bounds.xMin <= 0 && bounds.xMax >= 0 && bounds.yMin <= 0 && bounds.yMax >= 0) {
+        const [sx, sy] = worldToScreen(0, 0, bounds);
+        ctx.strokeStyle = COLORS.axis;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(sx, 0);
+        ctx.lineTo(sx, H);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(0, sy);
+        ctx.lineTo(W, sy);
+        ctx.stroke();
+        ctx.setLineDash([]);
+    }
+}
+
+function render() {
+    if (W === 0 || H === 0) return;
+
+    ctx.fillStyle = COLORS.bg;
+    ctx.fillRect(0, 0, W, H);
+
+    const bounds = computeBounds();
+    if (!bounds) {
+        ctx.fillStyle = COLORS.text;
+        ctx.font = '14px system-ui';
+        ctx.textAlign = 'center';
+        ctx.fillText('等待轨迹数据...', W / 2, H / 2);
+        return;
+    }
+
+    drawGrid(bounds);
+    drawZeroIndicator(bounds);
+    drawGridLabels(bounds);
+
+    // LIO 轨迹 (底层)
+    drawTrajectory(state.lio, COLORS.lio, bounds);
+
+    // GPS融合轨迹 (上层，更明显)
+    drawTrajectory(state.fused, COLORS.fused, bounds);
+
+    // 当前位置三角箭头标记
+    if (state.lio.length >= 2) {
+        const last = state.lio[state.lio.length - 1];
+        const prev = state.lio[state.lio.length - 2];
+        drawCurrentMarker(last.x, last.y, COLORS.lioCur, _calcHeading(prev, last), bounds);
+    } else if (state.lio.length === 1) {
+        const last = state.lio[0];
+        drawCurrentMarker(last.x, last.y, COLORS.lioCur, 0, bounds);
+    }
+    if (state.fused.length >= 2) {
+        const last = state.fused[state.fused.length - 1];
+        const prev = state.fused[state.fused.length - 2];
+        drawCurrentMarker(last.x, last.y, COLORS.fusedCur, _calcHeading(prev, last), bounds);
+    } else if (state.fused.length === 1) {
+        const last = state.fused[0];
+        drawCurrentMarker(last.x, last.y, COLORS.fusedCur, 0, bounds);
+    }
+}
+
+// ============ 数据轮询 ============
+function calcDistance(points) {
+    if (points.length < 2) return 0;
+    let d = 0;
+    for (let i = 1; i < points.length; i++) {
+        const dx = points[i].x - points[i - 1].x;
+        const dy = points[i].y - points[i - 1].y;
+        d += Math.sqrt(dx * dx + dy * dy);
+    }
+    return d;
+}
+
+async function fetchData() {
+    const t0 = performance.now();
+    try {
+        const resp = await fetch('/data', { cache: 'no-store' });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const data = await resp.json();
+
+        state.lio = data.lio || [];
+        state.fused = data.fused || [];
+        state.lioDist = calcDistance(state.lio);
+        state.fusedDist = calcDistance(state.fused);
+
+        // 更新头部
+        document.getElementById('lio-count').textContent = data.counts.lio;
+        document.getElementById('fused-count').textContent = data.counts.fused;
+
+        if (state.lioDist > 0) {
+            document.getElementById('lio-dist-stat').style.display = 'flex';
+            document.getElementById('lio-dist').textContent = state.lioDist.toFixed(1);
+        }
+        if (state.fusedDist > 0) {
+            document.getElementById('fused-dist-stat').style.display = 'flex';
+            document.getElementById('fused-dist').textContent = state.fusedDist.toFixed(1);
+        }
+
+        if (state.fused.length > 0) {
+            const last = state.fused[state.fused.length - 1];
+            document.getElementById('current-pos').textContent =
+                `(${last.x.toFixed(2)}, ${last.y.toFixed(2)})`;
+        } else if (state.lio.length > 0) {
+            const last = state.lio[state.lio.length - 1];
+            document.getElementById('current-pos').textContent =
+                `(${last.x.toFixed(2)}, ${last.y.toFixed(2)})`;
+        }
+
+        document.getElementById('status-dot').className = 'status-dot ok';
+    } catch (e) {
+        document.getElementById('status-dot').className = 'status-dot err';
+        console.debug('数据获取失败:', e.message);
+    }
+
+    // FPS
+    frameCount++;
+    const now = performance.now();
+    if (now - lastFpsTime >= 1000) {
+        const fps = Math.round(frameCount / ((now - lastFpsTime) / 1000));
+        document.getElementById('fps-display').textContent = `${fps} FPS`;
+        frameCount = 0;
+        lastFpsTime = now;
+    }
+
+    // 自适应轮询间隔
+    const elapsed = performance.now() - t0;
+    const nextDelay = Math.max(50, pollInterval - elapsed);
+    setTimeout(fetchData, nextDelay);
+}
+
+// ============ 启动 ============
+function animate() {
+    render();
+    requestAnimationFrame(animate);
+}
+
+fetchData();
+animate();
+</script>
+
+</body>
+</html>
