@@ -30,6 +30,7 @@ import os
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import NavSatFix
+from nav_msgs.msg import Odometry
 from std_srvs.srv import Trigger
 from pyproj import Transformer
 
@@ -66,6 +67,9 @@ class MapOriginRecorder(Node):
         self.declare_parameter('rtk_min_accuracy', 0.1)     # RTK 精度门槛
         self.declare_parameter('output_file', '')
         self.declare_parameter('auto_record', True)         # 自动记录模式
+        self.declare_parameter('odom_topic', '/lio/robo/odom')
+        self.declare_parameter('origin_distance_threshold', 1.0)
+        self.declare_parameter('require_origin_odom', True)  # 模拟时设为 false 跳过 odom 检查
 
         self._utm_zone = self.get_parameter('utm_zone').value
         self._sample_count = self.get_parameter('sample_count').value
@@ -73,6 +77,8 @@ class MapOriginRecorder(Node):
         self._rtk_min_accuracy = self.get_parameter('rtk_min_accuracy').value
         self._use_rtk_heading = self.get_parameter('use_rtk_heading').value
         self._auto_record = self.get_parameter('auto_record').value
+        self._odom_threshold = self.get_parameter('origin_distance_threshold').value
+        self._require_origin_odom = self.get_parameter('require_origin_odom').value
 
         # 输出文件路径
         output_file = self.get_parameter('output_file').value
@@ -93,6 +99,8 @@ class MapOriginRecorder(Node):
         self._latest_fix = None
         self._latest_rtk_heading = None
         self._record_done = False
+        self._latest_odom_x = None
+        self._latest_odom_y = None
 
         # ---- 订阅 /fix_filtered ----
         self._fix_sub = self.create_subscription(
@@ -112,6 +120,12 @@ class MapOriginRecorder(Node):
                 'robots_dog_msgs 未安装，无法获取 RTK 航向，'
                 '将使用 heading_deg=0 记录（地图与真北对齐）')
             self._use_rtk_heading = False
+
+        self._odom_sub = self.create_subscription(
+            Odometry,
+            self.get_parameter('odom_topic').value,
+            self._odom_callback, 10,
+        )
 
         # ---- 手动触发 service ----
         self._record_srv = self.create_service(
@@ -156,20 +170,41 @@ class MapOriginRecorder(Node):
             self._collect_sample(msg, self._latest_rtk_heading)
 
         if self._auto_record and len(self._lat_samples) >= self._sample_count:
+            if not self._is_at_origin():
+                ox = self._latest_odom_x
+                oy = self._latest_odom_y
+                if ox is not None and oy is not None:
+                    self.get_logger().warn(
+                        f'odom 距原点较远 (({ox:.2f},{oy:.2f}) > {self._odom_threshold}m)，'
+                        f'等待机器人回到原点后再记录')
+                else:
+                    self.get_logger().debug('odom 数据未就绪，暂不记录')
+                return
             self._do_record('auto')
 
     def _rtk_callback(self, msg):
         """从 RTK 原始消息获取航向"""
         try:
             heading = msg.heading
-            # heading_type: 16=DGPS, 34=浮点解, 50=整数解 → 有效
-            if heading.heading_type not in (16, 34, 50):
+            # heading_type: 16=单点, 17=DGPS, 34=浮点解, 50=整数解 → 有效
+            if heading.heading_type not in (16, 17, 34, 50):
                 return
             if heading.sol_status not in (0, 2):
                 return
             self._latest_rtk_heading = float(heading.heading_deg)
         except Exception:
             pass
+
+    def _odom_callback(self, msg: Odometry):
+        self._latest_odom_x = msg.pose.pose.position.x
+        self._latest_odom_y = msg.pose.pose.position.y
+
+    def _is_at_origin(self):
+        if not self._require_origin_odom:
+            return True
+        if self._latest_odom_x is None:
+            return False
+        return math.hypot(self._latest_odom_x, self._latest_odom_y) <= self._odom_threshold
 
     def _record_callback(self, request, response):
         """手动触发记录 service"""
@@ -208,7 +243,8 @@ class MapOriginRecorder(Node):
         self.get_logger().info(
             f'采集进度: {n}/{self._sample_count} 帧, '
             f'GPS={"OK" if fix_ok else "WAIT"}, '
-            f'航向={"OK" if hdg_ok else "WAIT"}')
+            f'航向={"OK" if hdg_ok else "WAIT"}, '
+            f'odom={"({:.2f},{:.2f})".format(self._latest_odom_x, self._latest_odom_y) if self._latest_odom_x is not None else "WAIT"}')
         if not fix_ok:
             self.get_logger().warn(
                 '未收到有效 GPS，请确认 RTK 已收敛且 gps_preprocessor 已启动')

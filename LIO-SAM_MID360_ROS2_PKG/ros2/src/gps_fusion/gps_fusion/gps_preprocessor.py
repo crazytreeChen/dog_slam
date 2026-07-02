@@ -57,6 +57,8 @@ class GPSPreprocessor(Node):
         self.declare_parameter('utm_zone', 50)
         self.declare_parameter('gps_source', '/fix')  # 双源切换: /fix (实际) /gps/fix (测试)
         self.declare_parameter('rtk_topic', '/rtk_pvh')     # RTK 原始数据话题，空字符串=不启用
+        self.declare_parameter('indoor_threshold', 20)
+        self.declare_parameter('outdoor_recover_threshold', 10)
 
         self.min_satellites = self.get_parameter('min_satellites').value
         self.max_hdop = self.get_parameter('max_hdop').value
@@ -67,6 +69,8 @@ class GPSPreprocessor(Node):
         self.utm_zone = self.get_parameter('utm_zone').value
         self.gps_source = self.get_parameter('gps_source').value  # 当前活跃GPS源
         self.rtk_topic = self.get_parameter('rtk_topic').value
+        self._indoor_threshold = self.get_parameter('indoor_threshold').value
+        self._outdoor_recover_threshold = self.get_parameter('outdoor_recover_threshold').value
 
         # 创建投影器（使用新版 pyproj Transformer API）
         self.transformer = Transformer.from_crs(
@@ -145,6 +149,10 @@ class GPSPreprocessor(Node):
         self.rtk_mode = False  # 是否处于RTK模式
         self.rtk_active = False  # 当前是否正在使用 RTK 输入
 
+        self._indoor_mode = False
+        self._indoor_consecutive = 0
+        self._outdoor_consecutive = 0
+
         # RTK 诊断状态（用于限频日志）
         self._rtk_reject_count = 0
         self._rtk_reject_reason = None     # 上次拒绝原因
@@ -185,10 +193,35 @@ class GPSPreprocessor(Node):
 
         RTK 有效性判定：
         - heading.sol_status ∈ {0, 2} 且 bestnav.p_sol_status ∈ {0, 2} (已解出/DGPS)
-        - bestnav.pos_type ∈ {16, 34, 50} (16=DGPS亚米, 34=浮点解, 50=整数解)
-          航向未收敛不影响位置输出（仅INFO提示）
+        - heading.heading_type ∈ {16, 17, 34, 50} (16=单点, 17=DGPS, 34=浮点解, 50=整数解)
+          以 heading_type 作为统一质量指标，替代 pos_type
         - 未通过验证时输出 WARN 级诊断日志（限频），帮助判断 RTK 收敛状态
+
+        室内/室外自动检测：
+        - pos_type=0 且 svs_num=0 → 无卫星信号，累积后进入室内模式
+        - 室内模式下 suppress 日志噪音，停止 GPS 数据输出
+        - 信号恢复后自动退出室内模式
         """
+        bestnav = msg.bestnav
+
+        if bestnav.pos_type == 0 and bestnav.svs_num == 0:
+            self._indoor_consecutive += 1
+            self._outdoor_consecutive = 0
+            if not self._indoor_mode and self._indoor_consecutive == self._indoor_threshold:
+                self._indoor_mode = True
+                self.gps_available = False
+                self.get_logger().warn(
+                    f'进入室内模式（连续{self._indoor_consecutive}帧无卫星信号），停止GPS输出')
+            return
+        else:
+            self._outdoor_consecutive += 1
+            self._indoor_consecutive = 0
+            if self._indoor_mode and self._outdoor_consecutive >= self._outdoor_recover_threshold:
+                self._indoor_mode = False
+                self.get_logger().info('退出室内模式，GPS信号恢复')
+
+        if self._indoor_mode:
+            return
         navsat = self._rtk_to_navsat_fix(msg)
         if navsat is None:
             return
@@ -224,7 +257,7 @@ class GPSPreprocessor(Node):
         RTK 收敛判定：
         - sol_status: 0=已解出, 2=DGPS/差分  → 有效状态
         - p_sol_status: 0=已解出, 2=DGPS/差分 → 有效状态
-        - heading_type / pos_type: 16=DGPS(亚米), 34=浮点解, 50=整数解 → 有效定位
+        - heading_type: 16=单点, 17=DGPS, 34=浮点解, 50=整数解 → 统一质量指标，替代 pos_type
         """
         bestnav = msg.bestnav
         heading = msg.heading
@@ -240,23 +273,17 @@ class GPSPreprocessor(Node):
             )
             return None
 
-        # 位置定位类型：16=DGPS(亚米), 34=浮点解, 50=整数解；其余视为未收敛
-        # 注意：heading_type 是双天线航向收敛度，与位置精度无关 —— 航向未收敛不影响位置数据使用
-        VALID_POS_TYPES = (16, 34, 50)
-        if bestnav.pos_type not in VALID_POS_TYPES:
+        # 以 heading_type 作为统一质量指标（替代 pos_type）
+        # 16=单点, 17=DGPS, 34=浮点解, 50=整数解；其余视为未收敛
+        VALID_HEADING_TYPES = (16, 17, 34, 50)
+        if heading.heading_type not in VALID_HEADING_TYPES:
             self._rtk_diag_log(
                 'position_not_converged',
-                f'heading_type={heading.heading_type}, '
-                f'pos_type={bestnav.pos_type}(期望16/34/50), '
+                f'heading_type={heading.heading_type}(期望16/17/34/50), '
+                f'pos_type={bestnav.pos_type}, '
                 f'可见星={bestnav.svs_num}, 解算星={bestnav.soln_svs_num}'
             )
             return None
-
-        # 航向未收敛时仅 INFO 提示，不阻塞位置数据输出
-        if heading.heading_type not in VALID_POS_TYPES:
-            self.get_logger().info(
-                f'RTK 航向未收敛 (heading_type={heading.heading_type})，位置数据仍正常输出'
-            )
 
         if math.isnan(bestnav.latitude_deg) or math.isnan(bestnav.longitude_deg):
             self.get_logger().debug('RTK 经纬度包含 NaN')
@@ -270,13 +297,13 @@ class GPSPreprocessor(Node):
         navsat.longitude = bestnav.longitude_deg
         navsat.altitude = bestnav.altitude_m if not math.isnan(bestnav.altitude_m) else 0.0
 
-        # pos_type: 50→RTK_FIX(4), 34→RTK_FLOAT(5), 16(DGPS)→GBAS_FIX(2)
-        if bestnav.pos_type == 50:
+        # heading_type → NavSatFix status（统一质量指标）
+        if heading.heading_type == 50:
             navsat.status.status = RTK_FIX_INDICATOR
-        elif bestnav.pos_type == 34:
+        elif heading.heading_type == 34:
             navsat.status.status = RTK_FLOAT_INDICATOR
-        else:
-            navsat.status.status = STATUS_GBAS_FIX  # DGPS(16) 使用地基增强状态
+        else:  # 17=DGPS, 16=单点
+            navsat.status.status = STATUS_GBAS_FIX
 
         navsat.position_covariance_type = 1  # COVARIANCE_TYPE_KNOWN
         lat_var = bestnav.lat_std ** 2 if not math.isnan(bestnav.lat_std) else 1.0

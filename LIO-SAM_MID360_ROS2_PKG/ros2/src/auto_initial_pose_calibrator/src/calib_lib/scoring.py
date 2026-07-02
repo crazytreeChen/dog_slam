@@ -493,6 +493,8 @@ def dual_template_global_match(scan_pts, map_ctx,
                                penalty_weight=3.0,
                                scan_max_points=500,
                                free_space_penalty_weight=0.0,
+                               dt_scale_ref_pixels=300000,
+                               dt_scale_max=4.0,
                                logger=None):
     """双模板光线投射全局匹配 — 核心算法。
 
@@ -501,6 +503,8 @@ def dual_template_global_match(scan_pts, map_ctx,
       - 射线模板: 从机器狗原点到扫描点的连线, 穿过墙壁/未知区则惩罚
       - 使用 cv2.matchTemplate 做全图卷积, 一次性计算所有 (x,y) 位置得分
       - 粗搜 (coarse_angle_step_deg) → 精搜 (fine_angle_step_deg) 两阶段
+      - 室外大场景自适应: 当合法中心区域像素数超过参考值时,
+        按 sqrt(valid_pixels / ref_pixels) 比例放大角度步长, 降低计算量
 
     参数:
       scan_pts:   (N, 2) numpy array, 雷达扫描点在 odom 坐标系下的坐标
@@ -510,6 +514,8 @@ def dual_template_global_match(scan_pts, map_ctx,
       penalty_weight:        射线穿透惩罚权重 (越大越排斥穿墙)
       scan_max_points:       扫描点最大采样数 (提高速度)
       free_space_penalty_weight: 面积比惩罚权重 (越大越排斥面积不匹配, 0=禁用, 防对称走廊误匹配)
+      dt_scale_ref_pixels:   自适应缩放参考像素数 (合法中心区域超过此值开始缩放, 默认30万)
+      dt_scale_max:          自适应缩放上限 (防止步长过大导致漏匹配, 默认4.0)
       logger:                日志器
 
     返回: (best_pose, best_score)
@@ -548,6 +554,52 @@ def dual_template_global_match(scan_pts, map_ctx,
 
     if logger is not None:
         logger.info(f'[双模板] 启动, {len(pts)} 个扫描点')
+
+    # ── 室外大场景自适应: 合法中心区域像素数与步长按比例缩放 ──
+    valid_pixels = int(np.sum(valid_center_mask))
+    if valid_pixels > dt_scale_ref_pixels:
+        dt_scale = min(dt_scale_max, np.sqrt(valid_pixels / dt_scale_ref_pixels))
+        adaptive_coarse_step = coarse_angle_step_deg * dt_scale
+    else:
+        dt_scale = 1.0
+        adaptive_coarse_step = coarse_angle_step_deg
+
+    # ── 室外大场景自适应: 地图降采样 (大幅减少 matchTemplate 卷积计算量) ──
+    # 参考: 500K像素(室内) → 不降采样; 2M像素(室外) → 4x降采样, 卷积量降至1/16
+    if valid_pixels > 2000000:
+        ds_factor = 4
+    elif valid_pixels > 1000000:
+        ds_factor = 3
+    elif valid_pixels > 500000:
+        ds_factor = 2
+    else:
+        ds_factor = 1
+
+    if ds_factor > 1:
+        new_H, new_W = H // ds_factor, W // ds_factor
+        if new_H < 20 or new_W < 20:
+            ds_factor = 1  # 地图太小，不降采样
+        else:
+            likelihood_map = cv2.resize(likelihood_map, (new_W, new_H), interpolation=cv2.INTER_AREA)
+            ray_penalty_map = cv2.resize(ray_penalty_map, (new_W, new_H), interpolation=cv2.INTER_AREA)
+            valid_center_mask = cv2.resize(
+                valid_center_mask.astype(np.uint8), (new_W, new_H),
+                interpolation=cv2.INTER_NEAREST).astype(bool)
+            res = res * ds_factor  # 等效分辨率: 0.05→0.10/0.15/0.20m
+            H, W = new_H, new_W
+
+    if logger is not None:
+        parts = [f'[双模板] 室外大场景自适应: 合法中心区域 {valid_pixels} 像素']
+        if dt_scale > 1.0:
+            parts.append(
+                f'缩放因子 {dt_scale:.1f}x, 粗搜步长 {coarse_angle_step_deg}° → {adaptive_coarse_step:.1f}° '
+                f'(角度数 {int(360/coarse_angle_step_deg)} → {int(360/adaptive_coarse_step)})')
+        if ds_factor > 1:
+            parts.append(
+                f'降采样 {ds_factor}x → 地图 {W}×{H} (等效分辨率 {res:.3f}m), '
+                f'matchTemplate 卷积量降至 1/{ds_factor*ds_factor}')
+        if dt_scale > 1.0 or ds_factor > 1:
+            logger.info(', '.join(parts))
 
     best_score = -float('inf')
     best_pose = (0.0, 0.0, 0.0)
@@ -629,7 +681,8 @@ def dual_template_global_match(scan_pts, map_ctx,
         ry = match_y * res + oy - tpl_oy
 
         # ── 面积比惩罚: 扫描点围合区域 vs 地图对应位置自由空间面积 ──
-        if free_space_penalty_weight > 0 and map_ctx.dt_free_space_integral is not None:
+        # 注意: 降采样后积分图分辨率不匹配, 跳过此惩罚
+        if ds_factor <= 1 and free_space_penalty_weight > 0 and map_ctx.dt_free_space_integral is not None:
             area_penalty = _compute_area_ratio_penalty(
                 rotated, rx, ry, map_ctx, free_space_penalty_weight, res, ox, oy, H, W)
             max_val -= area_penalty
@@ -637,9 +690,9 @@ def dual_template_global_match(scan_pts, map_ctx,
         return (rx, ry, max_val)
 
     # ── Phase 1: 粗搜索 ──
-    coarse_angles = np.arange(-np.pi, np.pi, np.deg2rad(coarse_angle_step_deg))
+    coarse_angles = np.arange(-np.pi, np.pi, np.deg2rad(adaptive_coarse_step))
     if logger is not None:
-        logger.info(f'[双模板] 粗搜: {len(coarse_angles)} 个角度 (步长 {coarse_angle_step_deg}°)')
+        logger.info(f'[双模板] 粗搜: {len(coarse_angles)} 个角度 (步长 {adaptive_coarse_step:.1f}°)')
 
     for theta in coarse_angles:
         result = _score_one_angle(math.cos(theta), math.sin(theta))
@@ -654,8 +707,8 @@ def dual_template_global_match(scan_pts, map_ctx,
 
     # ── Phase 2: 精细局部角度搜索 ──
     fine_angles = np.arange(
-        best_pose[2] - np.deg2rad(coarse_angle_step_deg),
-        best_pose[2] + np.deg2rad(coarse_angle_step_deg) + 1e-5,
+        best_pose[2] - np.deg2rad(adaptive_coarse_step),
+        best_pose[2] + np.deg2rad(adaptive_coarse_step) + 1e-5,
         np.deg2rad(fine_angle_step_deg))
 
     for theta in fine_angles:

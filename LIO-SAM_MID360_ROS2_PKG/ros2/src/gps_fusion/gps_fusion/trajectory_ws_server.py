@@ -40,6 +40,7 @@ try:
     import tornado.web
     import tornado.websocket
     import tornado.httpserver
+    import tornado.netutil
     HAS_TORNADO = True
 except ImportError:
     HAS_TORNADO = False
@@ -383,17 +384,10 @@ class TrajectoryWsServer(Node):
         self._ws_app = tornado.web.Application([
             (r'/', _WsHandler, {'server_node': self}),
         ])
-
-        # 手动创建 socket 并设置 SO_REUSEADDR，避免重启时端口残留
-        # tornado 内置的 listen() 不设置此选项，导致 "Address already in use"
-        import socket as _socket
-        _sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-        _sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
-        _sock.bind((self._ws_host, self._ws_port))
-        _sock.listen(128)
-
+        sockets = tornado.netutil.bind_sockets(
+            self._ws_port, address=self._ws_host, reuse_port=True)
         self._ws_server = tornado.httpserver.HTTPServer(self._ws_app)
-        self._ws_server.add_sockets([_sock])
+        self._ws_server.add_sockets(sockets)
         self.get_logger().info(
             'WebSocket 服务器已启动 (tornado): ws://%s:%d' %
             (self._ws_host, self._ws_port))
@@ -403,12 +397,11 @@ class TrajectoryWsServer(Node):
         except Exception:
             pass
 
-    def _broadcast(self, message, clients):
-        """在 tornado IOLoop 线程内广播消息"""
+    async def _broadcast(self, message, clients):
         closed = []
         for handler in clients:
             try:
-                handler.write_message(message)
+                await handler.write_message(message)
             except tornado.websocket.WebSocketClosedError:
                 closed.append(handler)
             except Exception as e:

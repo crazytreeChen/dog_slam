@@ -5,15 +5,15 @@ GPS融合独立启动文件 - gps_fusion 包
 启动完整的 GPS 融合管道：
   gps_preprocessor → navsat_transform → ekf_filter + 轨迹可视化
 
-Web 架构（对齐 nav2_dog_slam）：
-  - python3 -m http.server 提供静态HTML/JS/CSS（端口 8084）
-  - rosbridge_websocket 作为 ROS2 ↔ 浏览器 WebSocket 桥接（端口 9091）
+Web 架构：
+  - python3 http.server 提供静态页面（端口 8084）→ 浏览器打开 map_viewer.html
+  - trajectory_ws_server WebSocket 直推轨迹（端口 8765）→ 前端直连，无需 rosbridge
   - trajectory_server 发布 nav_msgs/Path 到 ROS2 话题
 
 用法:
   ros2 launch gps_fusion gps_fusion.launch.py
   ros2 launch gps_fusion gps_fusion.launch.py lio_odom_topic:=/lio/odom
-  ros2 launch gps_fusion gps_fusion.launch.py web_port:=8085 rosbridge_port:=9092
+  ros2 launch gps_fusion gps_fusion.launch.py web_port:=8085
   ros2 launch gps_fusion gps_fusion.launch.py enable_web:=false
   # 多机器人命名空间（ns 参数自动为 frame_id 加前缀）：
   ros2 launch gps_fusion gps_fusion.launch.py ns:=rkbot \\
@@ -86,10 +86,15 @@ def generate_launch_description():
     utm_zone = LaunchConfiguration('utm_zone', default='50')
     fused_odom_topic = '/odometry/gps_fused'
     web_port = LaunchConfiguration('web_port', default='8084')
-    rosbridge_port = LaunchConfiguration('rosbridge_port', default='9091')
     ws_trajectory_port = LaunchConfiguration('ws_trajectory_port', default='8765')
     gps_source = LaunchConfiguration('gps_source', default='/fix')
     enable_web = LaunchConfiguration('enable_web', default='true')
+    enable_correction = LaunchConfiguration('enable_correction', default='true')
+    enable_ekf = LaunchConfiguration('enable_ekf', default='true')
+    enable_recording = LaunchConfiguration('enable_recording', default='false')
+    map_origin_file = LaunchConfiguration('map_origin_file', default='')
+    rtk_min_accuracy = LaunchConfiguration('rtk_min_accuracy', default='0.02')
+    dgps_min_accuracy = LaunchConfiguration('dgps_min_accuracy', default='30.0')
 
     # ======== 核心融合节点 ========
 
@@ -106,7 +111,8 @@ def generate_launch_description():
             'min_satellites': 4,
             'max_hdop': 2.0,
             'min_accuracy': 1.0,
-            'rtk_min_accuracy': 0.02,
+            'rtk_min_accuracy': rtk_min_accuracy,
+            'dgps_min_accuracy': dgps_min_accuracy,
             'status_threshold': 0,
         }],
     )
@@ -144,6 +150,7 @@ def generate_launch_description():
         executable='navsat_transform_node',
         name='navsat_transform_node',
         output='screen',
+        condition=IfCondition(enable_ekf),
         parameters=[navsat_config, navsat_params_override],
         remappings=[
             ('/imu/data', imu_topic),
@@ -163,6 +170,7 @@ def generate_launch_description():
         executable='static_transform_publisher',
         name='gps_antenna_tf',
         output='screen',
+        condition=IfCondition(enable_ekf),
         arguments=['0', '0', '0', '0', '0', '0',
                    ns_imu_frame, 'gps'],
     )
@@ -177,6 +185,7 @@ def generate_launch_description():
         executable='static_transform_publisher',
         name='map_odom_tf_static',
         output='screen',
+        condition=IfCondition(enable_ekf),
         arguments=['0', '0', '0', '0', '0', '0',
                    ns_map_frame, ns_odom_frame],
     )
@@ -187,6 +196,7 @@ def generate_launch_description():
         executable='ekf_node',
         name='ekf_filter_node',
         output='screen',
+        condition=IfCondition(enable_ekf),
         parameters=[gps_ekf_config, {
             'use_sim_time': use_sim_time,
             'odom_frame': ns_odom_frame,
@@ -199,6 +209,44 @@ def generate_launch_description():
             ('/lio_odom', lio_odom_topic),
             ('/imu/data', imu_topic),
         ],
+    )
+
+    rtk_pose_monitor_node = Node(
+        package='gps_fusion',
+        executable='rtk_pose_monitor.py',
+        name='rtk_pose_monitor',
+        output='screen',
+        condition=IfCondition(enable_correction),
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'fix_topic': '/fix_filtered',
+            'rtk_topic': '/rtk_pvh',
+            'use_rtk_heading': True,
+            'ns': ns,
+            'drift_threshold': 2.0,
+            'min_correction_interval': 15.0,
+            'monitor_rate': 2.0,
+            'map_origin_file': map_origin_file,
+        }],
+        prefix=['taskset -c 0,1,2,3'],
+    )
+
+    map_origin_recorder_node = Node(
+        package='gps_fusion',
+        executable='map_origin_recorder.py',
+        name='map_origin_recorder',
+        output='screen',
+        condition=IfCondition(enable_recording),
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'fix_topic': '/fix_filtered',
+            'rtk_topic': '/rtk_pvh',
+            'use_rtk_heading': True,
+            'auto_record': True,
+            'sample_count': 10,
+            'min_accuracy': 5.0,
+            'odom_topic': lio_odom_topic,
+        }],
     )
 
     # ======== Web 可视化（对齐 nav2_dog_slam 模式） ========
@@ -222,7 +270,7 @@ def generate_launch_description():
         ],
     )
 
-    # 4.5 WebSocket 轨迹推送节点（供远程电脑 direct 连接，无需 rosbridge）
+    # 4.5 WebSocket 轨迹推送节点（供远程电脑 direct 连接）
     ws_trajectory_node = Node(
         package='gps_fusion',
         executable='trajectory_ws_server.py',
@@ -238,25 +286,6 @@ def generate_launch_description():
         }],
     )
 
-    # 5. rosbridge_websocket（WebSocket 桥接，端口 9091）
-    rosbridge_node = Node(
-        package='rosbridge_server',
-        executable='rosbridge_websocket',
-        name='rosbridge_gps',
-        output='screen',
-        condition=IfCondition(enable_web),
-        parameters=[{
-            'port': rosbridge_port,
-            'default_call_service_timeout': 5.0,
-            'call_services_in_new_thread': True,
-            'send_action_goals_in_new_thread': True,
-            'fragment_timeout': 600,
-            'max_message_size': 100000000,
-        }],
-        prefix=['taskset -c 0,1,2,3'],
-    )
-
-    # 6. Web 静态文件服务（python3 -m http.server，端口 8084）
     web_script_process = ExecuteProcess(
         cmd=['taskset', '-c', '0,1,2,3', 'bash', web_script],
         output='screen',
@@ -269,7 +298,6 @@ def generate_launch_description():
     web_actions = [
         trajectory_broadcaster_node,
         ws_trajectory_node,
-        rosbridge_node,
         web_script_process,
     ]
     delayed_web = TimerAction(
@@ -295,14 +323,22 @@ def generate_launch_description():
                               description='UTM区域编号'),
         DeclareLaunchArgument('web_port', default_value='8084',
                               description='Web静态服务端口'),
-        DeclareLaunchArgument('rosbridge_port', default_value='9091',
-                              description='rosbridge WebSocket端口'),
         DeclareLaunchArgument('ws_trajectory_port', default_value='8765',
                               description='轨迹WebSocket直连端口（远程电脑直连用）'),
         DeclareLaunchArgument('gps_source', default_value='/fix',
                               description='GPS数据源: /fix (实际RTK) /gps/fix (测试模拟)'),
         DeclareLaunchArgument('enable_web', default_value='true',
                               description='启用Web轨迹可视化'),
+        DeclareLaunchArgument('enable_correction', default_value='true',
+                              description='启用 RTK AMCL 漂移纠偏 (rtk_pose_monitor)'),
+        DeclareLaunchArgument('enable_ekf', default_value='true',
+                              description='启用 EKF+navsat GPS融合（导航时建议关闭，避免与AMCL冲突）'),
+        DeclareLaunchArgument('enable_recording', default_value='false',
+                              description='启用建图原点记录 (map_origin_recorder)。首次建图时设为true，记录完成后关闭'),
+        DeclareLaunchArgument('rtk_min_accuracy', default_value='0.02',
+                              description='RTK模式精度门槛（m），室内/真实GPS建议0.02，仿真测试建议10.0'),
+        DeclareLaunchArgument('dgps_min_accuracy', default_value='30.0',
+                              description='DGPS模式精度门槛（m）'),
 
         # 核心融合节点（立即启动，robot_localization Humble 中为普通节点，自动运行）
         gps_preprocessor_node,
@@ -310,6 +346,8 @@ def generate_launch_description():
         gps_tf_node,
         map_odom_tf_node,
         ekf_filter_node,
+        rtk_pose_monitor_node,
+        map_origin_recorder_node,
 
         # Web 组件（延迟 3 秒启动，run_web.sh 已内置端口冲突清理）
         delayed_web,

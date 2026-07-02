@@ -176,6 +176,8 @@
     dt_passive_enabled: true              # 被动匹配首帧使用双模板搜索
     dt_min_wall_coverage_ratio: 0.30    # DT匹配最低墙覆盖率 (低于此值回退到距离场匹配, 0.30=30%)
     dt_free_space_penalty_weight: 0.2   # 自由空间惩罚权重 (越大越排斥扫描点落在空地, 0=禁用, 防止对称走廊误匹配)
+    dt_scale_ref_pixels: 300000          # 室外自适应: 合法中心区域像素数超过此值开始放大搜索步长
+    dt_scale_max: 4.0                    # 室外自适应: 步长放大倍数上限 (防止步长过大漏匹配)
 
     # ────── 偏差监控 ──────
     deviation_monitor_enabled: false  # 是否启用偏差监控 (移动时偏差增大是正常的，关掉无意义日志)

@@ -20,6 +20,9 @@
   <build_depend>tf2_ros</build_depend>
   <build_depend>std_srvs</build_depend>
 
+  <!-- robots_dog_msgs: UniRtkPvh 消息定义（RTK原始数据），rtk_simulator/gps_preprocessor/rtk_pose_monitor 均依赖 -->
+  <build_depend>robots_dog_msgs</build_depend>
+
   <exec_depend>rclpy</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
@@ -27,6 +30,7 @@
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>std_srvs</exec_depend>
+  <exec_depend>robots_dog_msgs</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>robot_localization</exec_depend>
   <exec_depend>nav2_lifecycle_manager</exec_depend>

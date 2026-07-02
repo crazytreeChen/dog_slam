@@ -25,6 +25,9 @@ install(
     gps_fusion/rtk_pose_monitor.py
     scripts/simulate_trajectory.py
     scripts/rtk_simulator.py
+    scripts/mock_tf_broadcaster.py
+    scripts/lio_simulator.py
+    scripts/test_rtk_fusion.sh
   DESTINATION lib/${PROJECT_NAME}
 )
 

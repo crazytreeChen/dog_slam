@@ -502,64 +502,44 @@ def generate_launch_description():
         prefix=['taskset -c 0,1,2,3'],
     )
     
-    # 4. GPS融合节点
-    # GPS预处理节点 - 处理GPS数据质量问题
-    gps_preprocessor_node = Node(
-        package='nav2_dog_slam',
+    enable_rtk_correction = (os.environ.get('ENABLE_RTK_CORRECTION', 'false').lower() == 'true')
+    
+    gps_fusion_preprocessor_node = Node(
+        package='gps_fusion',
         executable='gps_preprocessor.py',
         name='gps_preprocessor',
         output='screen',
         parameters=[{
+            'use_sim_time': use_sim_time,
+            'gps_source': '/fix',
             'min_satellites': 4,
             'max_hdop': 2.0,
-            'min_accuracy': 0.1,
-            'status_threshold': 0
+            'min_accuracy': 1.0,
+            'rtk_min_accuracy': 0.02,
+            'status_threshold': 0,
         }],
+        condition=IfCondition('true' if enable_rtk_correction else 'false'),
         prefix=['taskset -c 0,1,2,3'],
     )
     
-    # NavSat Transform节点 - GPS坐标转换
-    # navsat_transform_node = Node(
-    #     package='robot_localization',
-    #     executable='navsat_transform_node',
-    #     name='navsat_transform_node',
-    #     output='screen',
-    #     parameters=[os.path.join(bringup_dir, 'config', 'navsat_transform.yaml')],
-    #     remappings=[
-    #         ('/imu/data', '/livox/imu'),  # IMU数据话题
-    #         ('/gps/fix', '/fix'),  # 使用预处理后的GPS数据
-    #         ('/odometry/gps', '/odometry/gps'),  # 转换后的GPS里程计
-    #         ('/odometry/filtered', '/odometry/gps_fused')  # EKF融合后的里程计
-    #     ]
-    # )
-    
-    # # EKF滤波器节点 - 传感器融合
-    # ekf_filter_node = Node(
-    #     package='robot_localization',
-    #     executable='ekf_node',
-    #     name='ekf_filter_node',
-    #     output='screen',
-    #     parameters=[os.path.join(bringup_dir, 'config', 'gps_ekf.yaml')],
-    #     remappings=[
-    #         ('/odometry/filtered', '/odometry/gps_fused'),  # GPS融合后的里程计
-    #         ('/tf', '/tf'),
-    #         ('/tf_static', '/tf_static')
-    #     ]
-    # )
-    
-    # # GPS融合生命周期管理器
-    # lifecycle_manager_gps = Node(
-    #     package='nav2_lifecycle_manager',
-    #     executable='lifecycle_manager',
-    #     name='lifecycle_manager_gps',
-    #     output='screen',
-    #     parameters=[{
-    #         'use_sim_time': use_sim_time,
-    #         'autostart': True,
-    #         # 'node_names': ['gps_preprocessor', 'navsat_transform_node', 'ekf_filter_node']
-    #         'node_names': ['navsat_transform_node']
-    #     }]
-    # )
+    rtk_pose_monitor_node = Node(
+        package='gps_fusion',
+        executable='rtk_pose_monitor.py',
+        name='rtk_pose_monitor',
+        output='screen',
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'fix_topic': '/fix_filtered',
+            'rtk_topic': '/rtk_pvh',
+            'use_rtk_heading': True,
+            'ns': ns,
+            'drift_threshold': 2.0,
+            'min_correction_interval': 15.0,
+            'monitor_rate': 2.0,
+        }],
+        condition=IfCondition('true' if enable_rtk_correction else 'false'),
+        prefix=['taskset -c 0,1,2,3'],
+    )
 
     # 5. 导航栈节点
     navigation_include = IncludeLaunchDescription(
@@ -761,18 +741,16 @@ def generate_launch_description():
             )
         )
         
-        # # GPS融合节点
-        # nav2_actions.append(
-        #     TimerAction(
-        #         period=2.5,
-        #         actions=[
-        #             gps_preprocessor_node, 
-        #             # navsat_transform_node, 
-        #             # ekf_filter_node, 
-        #             # lifecycle_manager_gps
-        #             ]
-        #     )
-        # )
+        if enable_rtk_correction:
+            nav2_actions.append(
+                TimerAction(
+                    period=2.5,
+                    actions=[
+                        gps_fusion_preprocessor_node,
+                        rtk_pose_monitor_node,
+                    ]
+                )
+            )
         
     # 导航栈
     nav2_actions.append(

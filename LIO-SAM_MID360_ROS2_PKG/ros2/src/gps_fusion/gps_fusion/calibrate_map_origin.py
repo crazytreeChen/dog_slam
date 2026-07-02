@@ -183,8 +183,8 @@ class CalibrateMapOrigin(Node):
         """从原始 RTK 消息获取航向"""
         try:
             heading = msg.heading
-            # heading_type: 16=DGPS, 34=浮点解, 50=整数解 → 有效
-            if heading.heading_type not in (16, 34, 50):
+            # heading_type: 16=单点, 17=DGPS, 34=浮点解, 50=整数解 → 有效
+            if heading.heading_type not in (16, 17, 34, 50):
                 return
             if heading.sol_status not in (0, 2):
                 return
@@ -335,12 +335,12 @@ class CalibrateMapOrigin(Node):
         )
         yaml_content = (
             f'map_origin:\n'
-            f'  latitude: {lat0:.8f}\n'
-            f'  longitude: {lon0:.8f}\n'
-            f'  altitude: {a0:.1f}\n'
-            f'  heading_deg: {heading_deg:.4f}\n'
-            f'  utm_easting: {e0:.3f}\n'
-            f'  utm_northing: {n0:.3f}\n'
+            f'  latitude: {lat0:.12f}\n'
+            f'  longitude: {lon0:.12f}\n'
+            f'  altitude: {a0:.4f}\n'
+            f'  heading_deg: {heading_deg:.8f}\n'
+            f'  utm_easting: {e0:.6f}\n'
+            f'  utm_northing: {n0:.6f}\n'
             f'  utm_zone: {self._utm_zone}\n'
             f'note: "{note}"\n'
         )
@@ -354,14 +354,14 @@ class CalibrateMapOrigin(Node):
         print()
         print('=' * 60)
         print('  标定完成！')
-        print(f'  地图原点 GPS:    ({lat0:.8f}, {lon0:.8f})')
+        print(f'  地图原点 GPS:    ({lat0:.12f}, {lon0:.12f})')
         print(f'  地图朝向:         {heading_deg:.4f}° (0=正北, 正=东偏)')
         print(f'  地图原点 UTM:    ({e0:.3f}, {n0:.3f})')
         print(f'  已保存到:         {self._output_file}')
         print()
         print('  接下来运行:')
         print('    ros2 run gps_fusion rtk_initial_pose.py --ros-args \\')
-        print(f'      -p map_origin_lat:={lat0:.8f} -p map_origin_lon:={lon0:.8f} \\')
+        print(f'      -p map_origin_lat:={lat0:.12f} -p map_origin_lon:={lon0:.12f} \\')
         print(f'      -p map_origin_heading_deg:={heading_deg:.4f}')
         print()
         print('  或直接使用 YAML 文件:')

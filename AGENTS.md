@@ -1,5 +1,9 @@
 # AGENTS.md
 
+> **本文件是 `dog_slam` 项目的定制版 AGENTS.md。**  
+> 通用 AGENTS 模板存放在 Obsidian vault `99-Templates/AGENTS模板.md`。  
+> 新项目启动时，复制通用模板 → 替换 `{{变量}}` 占位符 → 按初始化清单 `99-Templates/新项目初始化清单.md` 逐步搭建。
+
 本文件约束自动化代理在本工作区中的默认行为，以 Superpowers 为主工作流体系按需激活。
 
 ## 指令优先级
@@ -87,14 +91,22 @@ Custom Nav2 costmap plugin (`traversability_layer::TraversabilityLayer`) for 3D 
 
 #### Other packages
 
+每个包在 Obsidian vault 中有独立笔记（`子模块/<package>.md`），包含完整的架构、话题、配置与设计决策。
+
 - `LIO-SAM_MID360_ROS2_DOG`, `FAST_LIO_ROS2_edit`, `point_lio_ros2`, `Super-LIO` (submodule) — the four LIO implementations.
+- `nav2_dog_slam` — 统一 launch 系统（`lio_nav2_unified.launch.py`）、LIO 主题映射表 `LIO_TOPIC_CONFIGS`、Nav2 集成、traversability_layer 注册、Web 可视化。
+- `gps_fusion` — **独立 GPS/RTK 融合包**，不依赖 nav2_dog_slam。建图阶段通过 `map_origin_recorder` 采集 RTK 原点写入 `map_gps_origin.yaml`；导航阶段通过 `rtk_pose_monitor` 对比 GPS vs AMCL 位姿，超阈值时发布 `/initialpose` 纠偏。带 `MONITORING↔GPS_LOST` 容错状态机、协方差自适应。依赖 `robot_localization` 的 navsat_transform + EKF。独立启动：`ros2 launch gps_fusion map_origin_record.launch.py`（建图）/ `rtk_nav_bridge.launch.py`（导航）。见 [[gps_fusion]]。
+- `global_config` — **配置单点真理**，`global_config/__init__.py` 根据 `platform.node()` 主机名自动切换路径、LiDAR 参数、Nav2 yaml 路径；import 时副作用重写 `nav2_params.yaml`、`mid360.yaml`、`livox_360.yaml`。要新加机器只需在 `config_by_machine` 加条目。见 [[global_config]]。
+- `traversability_layer` — 自定义 Nav2 costmap 插件（`traversability_layer::TraversabilityLayer`），从原始点云计算坡度、台阶高度、楼梯检测，配置于 `local_costmap.plugins`。默认读 `/cloud_registered_body`。
 - `auto_initial_pose_calibrator` — automatic initial pose calibration using scan matching + AMCL convergence. Depends on `global_config` and `robots_dog_msgs`.
 - `SC_PGO_ROS2` — pose-graph optimization. Super-LIO can output SC-PGO-compatible `Scans/NNNNNN.pcd` + KITTI-format `odom_poses.txt` via `lio.sc_pgo.enable: true` in `livox_360.yaml` / `livox_360_zg.yaml`.
 - `lidar_localization_ros2` + `ndt_omp_ros2` — re-localization on a saved PCD.
+- `lidar_3d_relocalizer` — 3D re-localization using KISS-Matcher.
 - `livox_ros_driver2` — Livox SDK2 ROS2 wrapper. Per-host JSON config selected by `LIVOX_MID360_CONFIG` (e.g., `MID360_config_zg.json` for the ZG dog with two lidars).
 - `livox_gazebo_garden` — Gazebo Garden simulation worlds + URDF.
 - `zsi_tools/` contains the `zg_double_lidar` front+back lidar fusion package, the Robosense Airy LIO submodule, and `d1max` board configs (RK3588/Orin).
 - `m-explore` — frontier-based autonomous exploration (`ros2 launch m-explore explore.launch.py`).
+- `autorccar_interfaces`, `robots_dog_msgs` — 消息定义包（`UniRtkPvh` 等专有消息）。
 
 #### Map saving
 
@@ -133,8 +145,30 @@ Super-LIO writes incremental PCDs to `<save_map_dir>/PCD/` and merges into `<sav
 | `01-技术学习/问题排查/` | Bug 排查、环境问题、异常处理 | `tech-knowledge-organizer` |
 | `01-技术学习/语言/` | C++/Python/Shell 等语言笔记 | `tech-knowledge-organizer` |
 | `01-技术学习/框架/` | Qt6, FFmpeg, OpenCV 等框架笔记 | `tech-knowledge-organizer` |
-| `02-工作项目/进行中/<项目>/` | 项目主文档、经验日志、版本记录 | `tech-knowledge-organizer` |
-| `10-工作记录/YYYY/MM月/第WW周/` | 日报 (`MM-DD.md`)、周报 (`周报.md`)、月报 (`月报.md`) | `report-summarizer` |
+| `02-工作项目/进行中/<项目>/` | 项目主文档、子模块索引、经验日志、版本记录 | `tech-knowledge-organizer` |
+| `02-工作项目/进行中/<项目>/子模块/` | **每个 ROS2 子包的独立笔记**（架构、话题、配置、设计决策） | `tech-knowledge-organizer` |
+| `10-工作记录/YYYY/第WW周/` | 日报 (`MM-DD.md`)、周报 (`周报.md`)，周与月平级解决跨月 | `report-summarizer` |
+| `10-工作记录/YYYY/MM月/` | 月报 (`月报.md`) | `report-summarizer` |
+
+**子模块索引机制**：每个 ROS2 包在 `子模块/` 目录下有独立 `.md` 笔记，`MOC-ROS2包索引.md` 汇总所有包的链接。搜索子模块内容时：先查 `MOC-ROS2包索引` 找到所在包，再读对应笔记。
+
+**包名 ↔ 笔记名对照**（供代理在代码调用中快速跳转知识库）：
+
+| ROS2 包名 | 知识库笔记路径 | 对应知识库笔记 |
+|-----------|--------------|---------------|
+| `nav2_dog_slam` | `子模块/nav2_dog_slam.md` | nav2_dog_slam |
+| `gps_fusion` | `子模块/gps_fusion.md` | [[gps_fusion]] |
+| `global_config` | `子模块/global_config.md` | [[global_config]] |
+| `traversability_layer` | `子模块/traversability_layer.md` | traversability_layer |
+| `SC_PGO_ROS2` | `子模块/SC_PGO_ROS2.md` | SC_PGO_ROS2 |
+| `auto_initial_pose_calibrator` | `子模块/auto_initial_pose_calibrator.md` | auto_initial_pose_calibrator |
+| `FAST_LIO_ROS2_edit` | 概念卡片/`FAST-LIO.md` | FAST-LIO |
+| `point_lio_ros2` | 概念卡片/`Point-LIO.md` | Point-LIO |
+| `LIO-SAM_MID360_ROS2_DOG` | 概念卡片/`LIO-SAM.md` | LIO-SAM |
+| `Super-LIO` | 概念卡片/`Super-LIO.md` | Super-LIO |
+| `lidar_localization_ros2` | `子模块/lidar_localization_ros2.md` | lidar_localization_ros2 |
+
+> **规则**：LIO 算法类的笔记放在 `01-技术学习/概念卡片/`（作为通用技术概念），非算法类的 ROS2 包放在 `02-工作项目/进行中/dog_slam/子模块/`（作为项目代码实体）。
 
 **笔记规范**：
 - 必须包含 YAML frontmatter：`type`, `created`, `tags`
@@ -143,6 +177,16 @@ Super-LIO writes incremental PCDs to `<save_map_dir>/PCD/` and merges into `<sav
 - 概念卡片遵循 `99-Templates/概念卡片模板.md`
 - 问题排查遵循 `99-Templates/问题排查模板.md`
 - 经验日志遵循 `99-Templates/经验日志模板.md`
+- 项目子模块笔记遵循 `99-Templates/项目子模块模板.md`
+
+**相关模板**（所有通用模板位于 `99-Templates/` 目录）：
+- `[[AGENTS模板]]` — 通用 AGENTS.md 模板，新项目启动时复制并替换 `{{变量}}`
+- `[[新项目初始化清单]]` — 新项目 6 阶段初始化 checklist（仓库→文档→Obsidian注册→工具链→环境→资产）
+- `[[项目子模块模板]]` — 子模块笔记模板，代码中每个包对应一个笔记
+- `[[项目文档模板]]` — 项目主文档模板
+- `[[概念卡片模板]]` — 技术概念卡片模板
+- `[[经验日志模板]]` — 经验日志模板
+- `[[问题排查模板]]` — 问题排查模板
 
 **重要**：日报/周报/月报只写工作内容，不体现个人知识库整理、Obsidian、skill 配置等个人事务。
 
@@ -294,6 +338,7 @@ TDD 不默认强制，按"行为影响、共享范围、回归风险、测试价
 - 前端设计：`ui-ux-pro-max`
 - 并行规划：`codex-parallel-collab`
 - 会话收尾：`session-wrap`
+- **新项目初始化**：`new-project-initializer`（一键初始化新项目：代码规范 + AGENTS + Obsidian 知识库注册 + 模板填充）
 
 在回复中声明本次使用了哪些技能。
 

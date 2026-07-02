@@ -2,7 +2,7 @@
 # ============================================================
 # GPS融合 Web 可视化服务启动脚本
 # 使用带 SO_REUSEADDR 的自定义 HTTP 服务器（解决端口残留问题）
-# 前端通过 rosbridge WebSocket 与 ROS2 通信
+# 前端 map_viewer.html 直连 WebSocket 8765 端口（无需 rosbridge）
 # ============================================================
 #
 # 使用脚本自身所在目录作为 web 根目录（colcon install 会将 web/ 安装到
@@ -11,9 +11,8 @@
 WEB_DIR="$(cd "$(dirname "$0")" && pwd)"
 PORT="${WEB_PORT:-8084}"
 
-if [ ! -f "$WEB_DIR/trajectory.html" ]; then
-    echo "[web] 错误: $WEB_DIR 中未找到 trajectory.html"
-    exit 1
+if [ ! -f "$WEB_DIR/map_viewer.html" ]; then
+    echo "[web] 警告: $WEB_DIR 中未找到 map_viewer.html，HTTP 仍可启动用于浏览其他文件"
 fi
 
 # ============================================================
@@ -29,9 +28,7 @@ _cleanup_port() {
         sleep 0.5
     fi
 }
-# 清理 HTTP(8084)、rosbridge(9091)、轨迹WS(8765) 三个端口
 _cleanup_port "$PORT"
-_cleanup_port "${ROSBIRDGE_PORT:-9091}"
 _cleanup_port "${WS_TRAJECTORY_PORT:-8765}"
 
 # 用自定义服务器（带 SO_REUSEADDR）替代 python3 -m http.server

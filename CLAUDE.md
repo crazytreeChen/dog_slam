@@ -130,7 +130,8 @@ Direct interpreter path (no activation): `D:/miniforge_cache/envs/dog_slam_envs/
 | `01-技术学习/语言/` | 编程语言笔记 | `tech-knowledge-organizer` |
 | `01-技术学习/框架/` | 框架/库笔记 | `tech-knowledge-organizer` |
 | `02-工作项目/进行中/dog_slam/` | dog_slam 项目经验日志、版本记录 | `tech-knowledge-organizer` |
-| `10-工作记录/YYYY/MM月/第WW周/` | 日报、周报、月报（按年/月/周/日层级） | `report-summarizer` |
+| `10-工作记录/YYYY/第WW周/` | 日报 (`MM-DD.md`)、周报 (`周报.md`)，周与月平级解决跨月 | `report-summarizer` |
+| `10-工作记录/YYYY/MM月/` | 月报 (`月报.md`) | `report-summarizer` |
 | `99-Templates/` | 笔记模板 | — |
 
 ### 相关 Skills

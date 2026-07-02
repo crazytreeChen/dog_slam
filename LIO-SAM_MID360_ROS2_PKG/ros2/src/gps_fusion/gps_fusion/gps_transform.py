@@ -232,12 +232,12 @@ def write_map_origin_yaml(yaml_path: str, lat: float, lon: float,
 
     yaml_content = (
         f'map_origin:\n'
-        f'  latitude: {lat:.8f}\n'
-        f'  longitude: {lon:.8f}\n'
-        f'  altitude: {altitude:.1f}\n'
-        f'  heading_deg: {heading_deg:.4f}\n'
-        f'  utm_easting: {utm_e:.3f}\n'
-        f'  utm_northing: {utm_n:.3f}\n'
+        f'  latitude: {lat:.12f}\n'
+        f'  longitude: {lon:.12f}\n'
+        f'  altitude: {altitude:.4f}\n'
+        f'  heading_deg: {heading_deg:.8f}\n'
+        f'  utm_easting: {utm_e:.6f}\n'
+        f'  utm_northing: {utm_n:.6f}\n'
         f'  utm_zone: {utm_zone}\n'
         f'note: "{note}"\n'
         f'record_info:\n'

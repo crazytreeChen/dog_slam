@@ -1,0 +1,32 @@
+[Unit]
+Description=GPS RTK Navigation Correction Service
+Documentation=https://github.com/dog_slam/gps_fusion
+After=network.target network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=ztl
+Group=ztl
+WorkingDirectory=/home/ztl/cql/gps_fusion
+
+Environment=ROS_DOMAIN_ID=0
+Environment=HOME=/home/ztl
+Environment=RCUTILS_COLORIZED_OUTPUT=1
+
+ExecStartPre=/bin/sleep 5
+ExecStart=/home/ztl/cql/gps_fusion/scripts/gps_rtk_nav_service.sh
+ExecStop=/usr/bin/pkill -f "rtk_pose_monitor"
+ExecStopPost=/bin/sleep 2
+
+Restart=on-failure
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gps-rtk-nav
+
+[Install]
+WantedBy=multi-user.target

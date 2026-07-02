@@ -74,11 +74,9 @@ install(
   DESTINATION lib/${PROJECT_NAME}
 )
 
-# Install gps preprocessor script as executable
-install(
-  PROGRAMS src/gps_preprocessor.py
-  DESTINATION lib/${PROJECT_NAME}
-)
+# GPS/RTK 纠偏功能已迁移至独立包 gps_fusion
+# 不再通过 nav2_dog_slam 安装旧版 gps_preprocessor
+# 如需启用 RTK 纠偏，请构建 gps_fusion 包并设置环境变量 ENABLE_RTK_CORRECTION=true
 
 # Install gps test publisher script as executable
 install(

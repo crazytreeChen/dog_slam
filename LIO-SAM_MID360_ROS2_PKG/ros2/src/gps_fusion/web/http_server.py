@@ -40,8 +40,8 @@ def main():
         os.chdir(args.dir)
 
     web_dir = os.getcwd()
-    if not os.path.isfile(os.path.join(web_dir, 'trajectory.html')):
-        print(f'[web] 警告: {web_dir} 中未找到 trajectory.html，继续启动...',
+    if not os.path.isfile(os.path.join(web_dir, 'map_viewer.html')):
+        print(f'[web] 警告: {web_dir} 中未找到 map_viewer.html，继续启动...',
               file=sys.stderr)
 
     print(f'[web] 目录: {web_dir}')

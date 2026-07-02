@@ -41,8 +41,11 @@ def generate_launch_description():
     utm_zone = LaunchConfiguration('utm_zone', default='50')
     sample_count = LaunchConfiguration('sample_count', default='10')
     min_accuracy = LaunchConfiguration('min_accuracy', default='5.0')
+    rtk_min_accuracy = LaunchConfiguration('rtk_min_accuracy', default='0.02')
+    dgps_min_accuracy = LaunchConfiguration('dgps_min_accuracy', default='30.0')
     output_file = LaunchConfiguration('output_file', default='')
     use_rtk_heading = LaunchConfiguration('use_rtk_heading', default='true')
+    require_origin_odom = LaunchConfiguration('require_origin_odom', default='true')
 
     # ======== GPS 预处理器（复用，提供 /fix_filtered） ========
     gps_preprocessor_node = Node(
@@ -58,7 +61,8 @@ def generate_launch_description():
             'min_satellites': 4,
             'max_hdop': 2.0,
             'min_accuracy': 1.0,
-            'rtk_min_accuracy': 0.02,
+            'rtk_min_accuracy': rtk_min_accuracy,
+            'dgps_min_accuracy': dgps_min_accuracy,
             'status_threshold': 0,
         }],
     )
@@ -79,6 +83,7 @@ def generate_launch_description():
             'min_accuracy': min_accuracy,
             'output_file': output_file,
             'auto_record': True,
+            'require_origin_odom': require_origin_odom,
         }],
     )
 
@@ -99,10 +104,16 @@ def generate_launch_description():
                               description='自动模式采集帧数'),
         DeclareLaunchArgument('min_accuracy', default_value='5.0',
                               description='最低水平精度门槛（m）'),
+        DeclareLaunchArgument('rtk_min_accuracy', default_value='0.02',
+                              description='RTK模式精度门槛（m），仿真测试建议设为10.0'),
+        DeclareLaunchArgument('dgps_min_accuracy', default_value='30.0',
+                              description='DGPS模式精度门槛（m）'),
         DeclareLaunchArgument('output_file', default_value='',
                               description='输出YAML路径（空则用默认 config/map_gps_origin.yaml）'),
         DeclareLaunchArgument('use_rtk_heading', default_value='true',
                               description='是否使用RTK航向作为地图朝向'),
+        DeclareLaunchArgument('require_origin_odom', default_value='true',
+                              description='是否要求 odom 在原点附近才记录（模拟测试建议设为 false）'),
 
         gps_preprocessor_node,
         map_origin_recorder_node,

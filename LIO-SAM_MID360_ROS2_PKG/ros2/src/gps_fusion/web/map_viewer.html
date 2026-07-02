@@ -198,6 +198,7 @@ body {
     <div class="stat-group">
         <div class="stat-item">🔵 LIO <span class="val" id="cnt-lio">0</span>pts</div>
         <div class="stat-item">🟢 融合 <span class="val" id="cnt-fused">0</span>pts</div>
+        <div class="stat-item" id="dist-stat" style="display:none">📏 LIO <span class="val" id="dst-lio">0</span>m | 融合 <span class="val" id="dst-fused">0</span>m</div>
         <div class="stat-item">📡 <span class="val" id="cur-pos">--</span></div>
         <span class="status-dot offline" id="status-dot" title="未连接"></span>
     </div>
@@ -673,19 +674,60 @@ function updateStats(stats) {
         document.getElementById('cur-pos').textContent =
             stats.lio_last[1].toFixed(7) + ', ' + stats.lio_last[0].toFixed(7);
     }
-    // 同步 gps_source 按钮状态
+
+    const dLio = calcDistance(lioCoords);
+    const dFused = calcDistance(fusedCoords);
+    if (dLio > 0 || dFused > 0) {
+        document.getElementById('dist-stat').style.display = 'flex';
+        document.getElementById('dst-lio').textContent = dLio.toFixed(1);
+        document.getElementById('dst-fused').textContent = dFused.toFixed(1);
+    }
+    saveToCache();
+
     if (stats.gps_source && stats.gps_source !== gpsSource) {
         gpsSource = stats.gps_source;
         document.getElementById('btn-src-fix').className = 'secondary' + (gpsSource === '/fix' ? ' active' : '');
         document.getElementById('btn-src-gpsfix').className = 'secondary' + (gpsSource === '/gps/fix' ? ' active' : '');
     }
-    // 同步 rtk_source 按钮状态
     if (stats.rtk_source && stats.rtk_source !== rtkSource) {
         rtkSource = stats.rtk_source;
         document.getElementById('btn-rtk-auto').className = 'secondary' + (rtkSource === 'auto' ? ' active' : '');
         document.getElementById('btn-rtk-real').className = 'secondary' + (rtkSource === 'real' ? ' active' : '');
         document.getElementById('btn-rtk-test').className = 'secondary' + (rtkSource === 'test' ? ' active' : '');
     }
+}
+
+function calcDistance(coords) {
+    if (coords.length < 2) return 0;
+    let d = 0;
+    for (let i = 1; i < coords.length; i++) {
+        const midLat = (coords[i][0] + coords[i - 1][0]) / 2;
+        const dx = (coords[i][1] - coords[i - 1][1]) * 111320.0 * Math.cos(midLat * Math.PI / 180);
+        const dy = (coords[i][0] - coords[i - 1][0]) * 111320.0;
+        d += Math.hypot(dx, dy);
+    }
+    return d;
+}
+
+const CACHE_KEY = 'gps_map_viewer_trails';
+const CACHE_MAX = 5000;
+function saveToCache() {
+    try {
+        const data = {
+            lio: lioCoords.slice(-CACHE_MAX),
+            fused: fusedCoords.slice(-CACHE_MAX),
+        };
+        localStorage.setItem(CACHE_KEY, JSON.stringify(data));
+    } catch (e) { console.warn('[cache] write fail:', e); }
+}
+function loadFromCache() {
+    try {
+        const raw = localStorage.getItem(CACHE_KEY);
+        return raw ? JSON.parse(raw) : null;
+    } catch (e) { return null; }
+}
+function clearCache() {
+    localStorage.removeItem(CACHE_KEY);
 }
 
 // ==================== 键盘快捷键 ====================

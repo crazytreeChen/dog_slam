@@ -224,7 +224,7 @@ class RtkInitialPosePublisher(Node):
         """从原始 RTK 消息获取航向"""
         try:
             heading = msg.heading
-            if heading.heading_type not in (16, 34, 50):
+            if heading.heading_type not in (16, 17, 34, 50):
                 return
             if heading.sol_status not in (0, 2):
                 return

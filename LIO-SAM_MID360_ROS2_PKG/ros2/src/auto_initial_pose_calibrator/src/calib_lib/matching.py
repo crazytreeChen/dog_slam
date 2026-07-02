@@ -436,6 +436,8 @@ class ScanMatcher:
         fine_step = getattr(node, 'dt_fine_angle_step_deg', 0.5)
         pw = getattr(node, 'dt_penalty_weight', 3.0)
         fspw = getattr(node, 'dt_free_space_penalty_weight', 0.0)
+        scale_ref = getattr(node, 'dt_scale_ref_pixels', 300000)
+        scale_max = getattr(node, 'dt_scale_max', 4.0)
 
         return dual_template_global_match(
             frame_pts, map_ctx,
@@ -444,6 +446,8 @@ class ScanMatcher:
             penalty_weight=pw,
             scan_max_points=scan_max,
             free_space_penalty_weight=fspw,
+            dt_scale_ref_pixels=scale_ref,
+            dt_scale_max=scale_max,
             logger=self._logger)
 
     def do_dual_template_global(self, node):
@@ -484,6 +488,8 @@ class ScanMatcher:
         fine_step = getattr(node, 'dt_fine_angle_step_deg', 0.5)
         pw = getattr(node, 'dt_penalty_weight', 3.0)
         fspw = getattr(node, 'dt_free_space_penalty_weight', 0.0)
+        scale_ref = getattr(node, 'dt_scale_ref_pixels', 300000)
+        scale_max = getattr(node, 'dt_scale_max', 4.0)
 
         best_pose, best_score = dual_template_global_match(
             submap_pts, map_ctx,
@@ -492,6 +498,8 @@ class ScanMatcher:
             penalty_weight=pw,
             scan_max_points=scan_max,
             free_space_penalty_weight=fspw,
+            dt_scale_ref_pixels=scale_ref,
+            dt_scale_max=scale_max,
             logger=self._logger)
 
         if best_pose is None:

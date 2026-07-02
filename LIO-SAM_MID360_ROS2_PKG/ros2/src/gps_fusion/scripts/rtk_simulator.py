@@ -54,7 +54,7 @@ class RtkSimulator(Node):
 
         # ---- 可调参数 ----
         self.declare_parameter('rate', 1.0)               # 发布频率 (Hz)
-        self.declare_parameter('pos_type', 16)              # 定位类型: 16=DGPS, 34=FLOAT, 50=FIX
+        self.declare_parameter('pos_type', 16)              # 定位类型: 16=单点, 17=DGPS, 34=FLOAT, 50=FIX
         self.declare_parameter('topic', '/test/rtk_pvh')
         self.declare_parameter('radius', 80.0)              # 圆形半径 (m)
         self.declare_parameter('speed', 0.6)                # 线速度 (m/s)
@@ -85,7 +85,7 @@ class RtkSimulator(Node):
         self._init_noise_state()
 
         # 日志
-        pos_label = {16: 'DGPS(亚米)', 34: 'RTK_FLOAT', 50: 'RTK_FIX'}.get(self._pos_type, '?')
+        pos_label = {16: '单点', 17: 'DGPS', 34: 'RTK_FLOAT', 50: 'RTK_FIX'}.get(self._pos_type, '?')
         circum = 2.0 * math.pi * self._radius
         lap_time = circum / self._speed if self._speed > 0 else float('inf')
 
@@ -330,7 +330,7 @@ class RtkSimulator(Node):
         self._angle = (self._angle + self._angle_step) % (2.0 * math.pi)
 
         # ---- 日志（每10帧或首次）----
-        pos_label = {16: 'DGPS', 34: 'FLOAT', 50: 'FIX'}.get(self._pos_type, '?')
+        pos_label = {16: '单点', 17: 'DGPS', 34: 'FLOAT', 50: 'FIX'}.get(self._pos_type, '?')
         if self._seq == 1 or self._seq % 10 == 0:
             self.get_logger().info(
                 f'[{self._seq}] {pos_label} | '
