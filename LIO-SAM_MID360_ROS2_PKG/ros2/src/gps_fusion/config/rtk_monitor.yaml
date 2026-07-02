@@ -9,14 +9,15 @@
 rtk_pose_monitor:
   ros__parameters:
     # 漂移检测
-    drift_threshold: 2.0              # AMCL与GPS偏差超过此值（m）则触发纠偏
+    drift_threshold: 5.0              # AMCL与GPS偏差超过此值（m）则触发纠偏
     min_correction_interval: 15.0     # 最小纠偏间隔（s），大于 odom_corrector 周期
     monitor_rate: 2.0                 # 监控频率（Hz）
 
     # GPS 容错状态机
     gps_loss_threshold: 5             # 连续N帧无效GPS → GPS_LOST 停止纠偏
     gps_recovery_threshold: 3         # 连续M帧有效GPS → 恢复 MONITORING
-    min_accuracy: 5.0                 # GPS最低水平精度（m），低于此值视为无效
+    gps_stale_timeout: 3.0            # RTK数据超时（s），超时视为室内/无信号，清空_latest_fix
+    min_accuracy: 10.0                # GPS最低水平精度（m），低于此值视为无效（单点定位~5-10m）
 
     # 协方差自适应（根据RTK质量等级设置 /initialpose 的位置协方差）
     cov_rtk_fix: 0.01                 # RTK整数解 → 高信任

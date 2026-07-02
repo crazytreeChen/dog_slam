@@ -207,6 +207,8 @@ class AutoInitialPoseCalibrator(Node):
         self.declare_parameter('dt_passive_enabled', True)               # 双模板匹配用于被动匹配首帧
         self.declare_parameter('dt_min_wall_coverage_ratio', 0.30)      # 双模板匹配最低墙覆盖率 (低于此值则回退到距离场匹配)
         self.declare_parameter('dt_free_space_penalty_weight', 0.0)     # 自由空间惩罚权重 (越大越排斥扫描点落在空地, 0=禁用)
+        self.declare_parameter('dt_scale_ref_pixels', 300000)            # 室外自适应: 合法中心区域超过此像素数时放大搜索步长
+        self.declare_parameter('dt_scale_max', 4.0)                     # 室外自适应: 步长放大倍数上限
 
         # ────── 日志持久化参数 ──────
         self.declare_parameter('log_dir', '')                 # 日志持久化目录（为空则不写文件）
@@ -374,6 +376,8 @@ class AutoInitialPoseCalibrator(Node):
         self.dt_passive_enabled = self.get_parameter('dt_passive_enabled').value
         self.dt_min_wall_coverage_ratio = self.get_parameter('dt_min_wall_coverage_ratio').value
         self.dt_free_space_penalty_weight = self.get_parameter('dt_free_space_penalty_weight').value
+        self.dt_scale_ref_pixels = self.get_parameter('dt_scale_ref_pixels').value
+        self.dt_scale_max = self.get_parameter('dt_scale_max').value
 
         # ────── 日志持久化初始化 ──────
         self._setup_file_logging()
@@ -463,11 +467,12 @@ class AutoInitialPoseCalibrator(Node):
 
         # 订阅 AMCL 位姿用于交叉验证和调试对比
         self.amcl_sub = self.create_subscription(PoseWithCovarianceStamped, self.amcl_pose_topic, self._amcl_cb, 10)
-        # 监听 RViz 2D Pose Estimate 触发真值标记或常规设置
-        self.initialpose_sub = self.create_subscription(PoseWithCovarianceStamped, '/initialpose', self._initialpose_cb, 10)
+        # 监听 RViz 2D Pose Estimate / auto_initial_pose 触发真值标记或常规设置
+        # 使用相对路径让 ROS2 自动添加命名空间前缀（与 rtk_pose_monitor 保持一致）
+        self.initialpose_sub = self.create_subscription(PoseWithCovarianceStamped, 'initialpose', self._initialpose_cb, 10)
 
         # ────── 发布器 ──────
-        self.initialpose_pub = self.create_publisher(PoseWithCovarianceStamped, '/initialpose', 10)
+        self.initialpose_pub = self.create_publisher(PoseWithCovarianceStamped, 'initialpose', 10)
         self.cmd_vel_pub = self.create_publisher(Twist, self.cmd_vel_topic, 10)
         
         # 调试/可视化发布器

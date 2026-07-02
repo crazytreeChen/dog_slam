@@ -98,9 +98,14 @@ class ScanCollector(Node):
         self.declare_parameter('min_safe_distance', 0.5)     # 避障安全距离 m
         self.declare_parameter('enable_explore', True)       # 是否启用小范围移动
         self.declare_parameter('enable_rotation', True)      # 是否启用旋转
-        # target_frame 需要 namespace 感知（中狗用 rkbot/odom 而非裸 odom）
-        default_target_frame = f"{ns}/odom" if ns else "odom"
+        # target_frame: 用于 TF scan→target 的目标 frame
+        # 使用 map（全局稳定）避免 odom 漂移导致位置跳变；yaw 同样稳定
+        default_target_frame = f"{ns}/map" if ns else "map"
         self.declare_parameter('target_frame', default_target_frame)
+        # scan_frame: lidar/link frame（通常 lidar_link / base_link / livox_center）
+        # 若 scan header.frame_id 为 base_footprint 等错误值，可通过此参数覆盖
+        default_scan_frame = f"{ns}/lidar_link" if ns else "lidar_link"
+        self.declare_parameter('scan_frame', default_scan_frame)
 
         self.scan_topic = self.get_parameter('scan_topic').value
         self.map_topic = self.get_parameter('map_topic').value
@@ -114,6 +119,7 @@ class ScanCollector(Node):
         self.enable_explore = self.get_parameter('enable_explore').value
         self.enable_rotation = self.get_parameter('enable_rotation').value
         self.target_frame = self.get_parameter('target_frame').value
+        self.scan_frame_override = self.get_parameter('scan_frame').value  # 优先用此值，若为空则用 msg.header.frame_id
 
         # ────── 状态变量 ──────
         self.current_scan = None
@@ -170,13 +176,14 @@ class ScanCollector(Node):
         self.current_scan = msg
         if not hasattr(self, '_scan_first_logged'):
             self._scan_first_logged = True
-            self.scan_frame_id = msg.header.frame_id.strip()
+            # 优先用参数覆盖，否则用 msg header 中的 frame_id
+            self.scan_frame_id = (self.scan_frame_override or msg.header.frame_id).strip()
             self.get_logger().info(
-                f'[scan] 已收到: frame_id="{msg.header.frame_id}", '
-                f'目标变换系="{self.target_frame}", '
+                f'[scan] 已收到: msg_frame="{msg.header.frame_id}", '
+                f'使用frame="{self.scan_frame_id}", '
+                f'target="{self.target_frame}", '
                 f'FOV={math.degrees(msg.angle_max - msg.angle_min):.1f}°, '
-                f'beams={len(msg.ranges)}, '
-                f'(使用TF变换替代手工R+t)'
+                f'beams={len(msg.ranges)}'
             )
 
     def _odom_cb(self, msg):
@@ -486,6 +493,15 @@ class ScanCollector(Node):
             t = transform.transform.translation
             q = transform.transform.rotation
             yaw = self._quat_to_yaw(q)
+
+            # ── TF 有效性校验：位置距离原点过远 → 跳过（SLAM 未收敛或 TF 异常）──
+            dist_from_origin = math.sqrt(t.x**2 + t.y**2)
+            MAX_DIST = 200.0  # 地图原点 200m 外的帧视为无效
+            if dist_from_origin > MAX_DIST:
+                self.get_logger().warn(
+                    f'[保存] 跳过: |pos|=({t.x:.1f},{t.y:.1f})={dist_from_origin:.1f}m > {MAX_DIST}m '
+                    f'({self.scan_frame_id}→{self.target_frame} TF 异常)')
+                return
 
             self.saved_scans.append({
                 'ts': ts,
