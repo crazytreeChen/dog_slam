@@ -7,13 +7,16 @@ RTK 位姿监控与自动纠偏 launch 文件
   - 之后持续对比 RTK 与当前位姿（tf map→base_footprint），超阈值时纠偏
   - 无需预标定文件，无需单独的 gps_preprocessor
 
+参数配置：config/rtk_monitor.yaml 为单一真相源
+运行时覆盖：--ros-args -p drift_threshold:=3.0
+
 用法:
     # 导航时启动（与 nav2_dog_slam lio_nav2_unified.launch.py 并行）
     ros2 launch gps_fusion rtk_nav_bridge.launch.py ns:=rkbot
 
-    # 调整纠偏参数
+    # 运行时覆盖 YAML 参数
     ros2 launch gps_fusion rtk_nav_bridge.launch.py \\
-        ns:=rkbot drift_threshold:=1.5 min_correction_interval:=20.0
+        ns:=rkbot --ros-args -p drift_threshold:=3.0 -p use_rtk_heading:=false
 """
 
 import os
@@ -35,10 +38,8 @@ def generate_launch_description():
     rtk_topic = LaunchConfiguration('rtk_topic', default='/rtk_pvh')
     use_sim_time = LaunchConfiguration('use_sim_time', default='false')
     utm_zone = LaunchConfiguration('utm_zone', default='50')
-    drift_threshold = LaunchConfiguration('drift_threshold', default='1.0')
-    min_correction_interval = LaunchConfiguration('min_correction_interval', default='15.0')
-    monitor_rate = LaunchConfiguration('monitor_rate', default='2.0')
-    use_rtk_heading = LaunchConfiguration('use_rtk_heading', default='true')
+    # 以下参数由 rtk_monitor.yaml 统一管理，此处仅声明供 CLI --help 展示
+    # 运行时通过 --ros-args -p <key>:=<value> 覆盖
     web_port = LaunchConfiguration('web_port', default='8084')
     ws_trajectory_port = LaunchConfiguration('ws_trajectory_port', default='8765')
     enable_web = LaunchConfiguration('enable_web', default='true')
@@ -61,16 +62,16 @@ def generate_launch_description():
         parameters=[
             monitor_config,
             {
+                # 仅传递 YAML 中不存在的动态/运行时参数
+                # （drift_threshold / min_correction_interval / monitor_rate / use_rtk_heading
+                #  均在 rtk_monitor.yaml 中定义，此处不覆盖）
                 'use_sim_time': use_sim_time,
                 'utm_zone': utm_zone,
                 'rtk_topic': rtk_topic,
-                'use_rtk_heading': use_rtk_heading,
+                'lio_odom_topic': lio_odom_topic,  # LIO 里程计（轨迹推算用）
                 'ns': ns,
                 'map_frame': ns_map_frame,
                 'base_frame': ns_base_footprint_frame,
-                'drift_threshold': drift_threshold,
-                'min_correction_interval': min_correction_interval,
-                'monitor_rate': monitor_rate,
             },
         ],
     )
@@ -137,14 +138,8 @@ def generate_launch_description():
                               description='使用仿真时间'),
         DeclareLaunchArgument('utm_zone', default_value='50',
                               description='UTM区域编号'),
-        DeclareLaunchArgument('drift_threshold', default_value='1.0',
-                              description='漂移阈值（m），超过则纠偏'),
-        DeclareLaunchArgument('min_correction_interval', default_value='15.0',
-                              description='最小纠偏间隔（s）'),
-        DeclareLaunchArgument('monitor_rate', default_value='2.0',
-                              description='监控频率（Hz）'),
-        DeclareLaunchArgument('use_rtk_heading', default_value='true',
-                              description='是否使用RTK航向纠偏'),
+        # drift_threshold / min_correction_interval / monitor_rate / use_rtk_heading
+        # 由 rtk_monitor.yaml 统一管理，通过 --ros-args -p <key>:=<value> 覆盖
         DeclareLaunchArgument('web_port', default_value='8084',
                               description='Web静态服务端口'),
         DeclareLaunchArgument('ws_trajectory_port', default_value='8765',

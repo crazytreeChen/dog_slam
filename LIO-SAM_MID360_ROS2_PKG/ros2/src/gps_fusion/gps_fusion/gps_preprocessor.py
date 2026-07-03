@@ -193,8 +193,7 @@ class GPSPreprocessor(Node):
 
         RTK 有效性判定：
         - heading.sol_status ∈ {0, 2} 且 bestnav.p_sol_status ∈ {0, 2} (已解出/DGPS)
-        - heading.heading_type ∈ {16, 17, 34, 50} (16=单点, 17=DGPS, 34=浮点解, 50=整数解)
-          以 heading_type 作为统一质量指标，替代 pos_type
+        - bestnav.pos_type ∈ {16, 17, 34, 50} (16=单点, 17=DGPS, 34=浮点解, 50=整数解)
         - 未通过验证时输出 WARN 级诊断日志（限频），帮助判断 RTK 收敛状态
 
         室内/室外自动检测：
@@ -257,7 +256,8 @@ class GPSPreprocessor(Node):
         RTK 收敛判定：
         - sol_status: 0=已解出, 2=DGPS/差分  → 有效状态
         - p_sol_status: 0=已解出, 2=DGPS/差分 → 有效状态
-        - heading_type: 16=单点, 17=DGPS, 34=浮点解, 50=整数解 → 统一质量指标，替代 pos_type
+        - pos_type: 16=单点, 17=DGPS, 34=浮点解, 50=整数解 → 位置质量
+        - heading_type: 同上枚举 → 航向质量（独立于 pos_type）
         """
         bestnav = msg.bestnav
         heading = msg.heading
@@ -273,14 +273,13 @@ class GPSPreprocessor(Node):
             )
             return None
 
-        # 以 heading_type 作为统一质量指标（替代 pos_type）
-        # 16=单点, 17=DGPS, 34=浮点解, 50=整数解；其余视为未收敛
-        VALID_HEADING_TYPES = (16, 17, 34, 50)
-        if heading.heading_type not in VALID_HEADING_TYPES:
+        # pos_type 位置质量：16=单点, 17=DGPS, 34=浮点解, 50=整数解；其余视为未收敛
+        VALID_POS_TYPES = (16, 17, 34, 50)
+        if bestnav.pos_type not in VALID_POS_TYPES:
             self._rtk_diag_log(
                 'position_not_converged',
-                f'heading_type={heading.heading_type}(期望16/17/34/50), '
-                f'pos_type={bestnav.pos_type}, '
+                f'pos_type={bestnav.pos_type}(期望16/17/34/50), '
+                f'heading_type={heading.heading_type}, '
                 f'可见星={bestnav.svs_num}, 解算星={bestnav.soln_svs_num}'
             )
             return None
@@ -297,10 +296,12 @@ class GPSPreprocessor(Node):
         navsat.longitude = bestnav.longitude_deg
         navsat.altitude = bestnav.altitude_m if not math.isnan(bestnav.altitude_m) else 0.0
 
-        # heading_type → NavSatFix status（统一质量指标）
-        if heading.heading_type == 50:
+        # pos_type → NavSatFix status（位置质量指标）
+        # 注意：pos_type 可能因设备未注册激活而偏低（如始终=16），
+        # 此时 heading_type 可独立达到 50（双天线基线收敛），不影响航向精度
+        if bestnav.pos_type == 50:
             navsat.status.status = RTK_FIX_INDICATOR
-        elif heading.heading_type == 34:
+        elif bestnav.pos_type == 34:
             navsat.status.status = RTK_FLOAT_INDICATOR
         else:  # 17=DGPS, 16=单点
             navsat.status.status = STATUS_GBAS_FIX

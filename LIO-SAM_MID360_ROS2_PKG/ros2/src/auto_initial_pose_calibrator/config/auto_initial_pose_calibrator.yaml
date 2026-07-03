@@ -167,17 +167,32 @@
     # ────── 双模板光线投射全局匹配 (来自 global_match2.py 算法) ──────
     # 核心: 命中模板(奖励) + 射线惩罚模板(惩罚穿墙) + cv2.matchTemplate全图卷积
     # 优点: 速度极快(全图卷积), 天然防穿墙, 角度精修达0.5°
+    # 室内/室外参数分离: 系统根据 RTK/GPS 信号自动选择参数组
     use_dual_template_matching: true      # 启用双模板匹配替代网格/距离场 (优先级最高)
-    dt_angle_step_deg: 3.0               # 双模板粗搜角度步长 (度, 默认2°)
-    dt_fine_angle_step_deg: 0.5          # 双模板精修角度步长 (度, 默认0.5°)
-    dt_penalty_weight: 3.0               # 射线穿透惩罚权重 (越大越排斥穿墙, 默认3.0)
-    dt_scan_max_points: 500              # 匹配用最大扫描点数
     dt_multistep_enabled: true            # 多步递推首帧使用双模板搜索
     dt_passive_enabled: true              # 被动匹配首帧使用双模板搜索
-    dt_min_wall_coverage_ratio: 0.30    # DT匹配最低墙覆盖率 (低于此值回退到距离场匹配, 0.30=30%)
-    dt_free_space_penalty_weight: 0.2   # 自由空间惩罚权重 (越大越排斥扫描点落在空地, 0=禁用, 防止对称走廊误匹配)
-    dt_scale_ref_pixels: 300000          # 室外自适应: 合法中心区域像素数超过此值开始放大搜索步长
-    dt_scale_max: 4.0                    # 室外自适应: 步长放大倍数上限 (防止步长过大漏匹配)
+
+    # ── 室内双模板参数 ──
+    dt_indoor:
+      angle_step_deg: 3.0               # 粗搜角度步长 (度)
+      fine_angle_step_deg: 0.5          # 精修角度步长 (度)
+      penalty_weight: 3.0               # 射线穿透惩罚权重
+      scan_max_points: 500              # 匹配用最大扫描点数
+      min_wall_coverage_ratio: 0.30     # 最低墙覆盖率 (室内墙多, 30%合理)
+      free_space_penalty_weight: 0.2    # 自由空间惩罚权重 (防对称走廊误匹配)
+      scale_ref_pixels: 300000          # 自适应缩放触发像素数 (室内通常不触发)
+      scale_max: 1.5                    # 自适应缩放倍数上限 (室内小地图无需大幅缩放)
+
+    # ── 室外双模板参数 ──
+    dt_outdoor:
+      angle_step_deg: 3.0               # 粗搜角度步长 (度)
+      fine_angle_step_deg: 0.5          # 精修角度步长 (度)
+      penalty_weight: 3.0               # 射线穿透惩罚权重
+      scan_max_points: 500              # 匹配用最大扫描点数
+      min_wall_coverage_ratio: 0.15     # 最低墙覆盖率 (室外空旷墙少, 降低到15%)
+      free_space_penalty_weight: 0.2    # 自由空间惩罚权重
+      scale_ref_pixels: 500000          # 自适应缩放触发像素数 (提高以延迟触发, 保留精度)
+      scale_max: 2.5                    # 自适应缩放倍数上限 (室外场景限制在2.5x, 避免步长过大漏匹配)
 
     # ────── 偏差监控 ──────
     deviation_monitor_enabled: false  # 是否启用偏差监控 (移动时偏差增大是正常的，关掉无意义日志)

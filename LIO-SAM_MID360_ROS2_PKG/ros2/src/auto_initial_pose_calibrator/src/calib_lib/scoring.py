@@ -503,6 +503,8 @@ def dual_template_global_match(scan_pts, map_ctx,
       - 射线模板: 从机器狗原点到扫描点的连线, 穿过墙壁/未知区则惩罚
       - 使用 cv2.matchTemplate 做全图卷积, 一次性计算所有 (x,y) 位置得分
       - 粗搜 (coarse_angle_step_deg) → 精搜 (fine_angle_step_deg) 两阶段
+      - 粗搜阶段: 仅用命中模板 (skip_ray), 跳过射线模板构建+卷积, 大幅提速
+      - 精搜阶段: 完整双模板 (命中+射线惩罚), 保证精度
       - 室外大场景自适应: 当合法中心区域像素数超过参考值时,
         按 sqrt(valid_pixels / ref_pixels) 比例放大角度步长, 降低计算量
 
@@ -605,8 +607,11 @@ def dual_template_global_match(scan_pts, map_ctx,
     best_pose = (0.0, 0.0, 0.0)
     pad = 0.5  # 模板边距 (米)
 
-    def _build_templates(rotated_pts):
-        """为给定旋转后的点云构建命中/射线模板。"""
+    def _build_templates(rotated_pts, skip_ray=False):
+        """为给定旋转后的点云构建命中/射线模板。
+
+        skip_ray=True: 跳过射线模板 (粗搜提速, 仅构建命中模板)
+        """
         min_x, max_x = min(0.0, np.min(rotated_pts[:, 0])), max(0.0, np.max(rotated_pts[:, 0]))
         min_y, max_y = min(0.0, np.min(rotated_pts[:, 1])), max(0.0, np.max(rotated_pts[:, 1]))
 
@@ -617,7 +622,6 @@ def dual_template_global_match(scan_pts, map_ctx,
             return None
 
         tpl_hit = np.zeros((tph, tpw), dtype=np.float32)
-        tpl_ray = np.zeros((tph, tpw), dtype=np.float32)
         tpl_ox = min_x - pad
         tpl_oy = min_y - pad
 
@@ -632,25 +636,32 @@ def dual_template_global_match(scan_pts, map_ctx,
         if len(vx) == 0:
             return None
 
-        # 绘制射线模板 (机器狗 → 各扫描点)
-        for px, py in zip(vx, vy):
-            cv2.line(tpl_ray, (robot_x_tpl, robot_y_tpl), (px, py), 1.0, 1)
-        # 擦除终点 (扫描点命中墙壁是合法结果)
-        tpl_ray[vy, vx] = 0.0
-
-        # 绘制命中模板
+        # 绘制命中模板 (始终构建)
         tpl_hit[vy, vx] = 1.0
+
+        tpl_ray = None
+        if not skip_ray:
+            # 精搜阶段: 使用 cv2.line (Bresenham 保证像素连续性, 防穿墙关键)
+            tpl_ray = np.zeros((tph, tpw), dtype=np.float32)
+            for px, py in zip(vx, vy):
+                cv2.line(tpl_ray, (robot_x_tpl, robot_y_tpl), (px, py), 1.0, 1)
+            tpl_ray[vy, vx] = 0.0  # 擦除终点 (命中墙壁合法)
+        else:
+            tpl_ray = np.zeros((1, 1), dtype=np.float32)  # 占位, 不会被使用
 
         return (tpl_hit, tpl_ray, tpl_ox, tpl_oy, robot_x_tpl, robot_y_tpl, tpw, tph)
 
-    def _score_one_angle(cos_t, sin_t):
-        """对一个旋转角度评分, 返回 (best_local_x, best_local_y, score)。"""
+    def _score_one_angle(cos_t, sin_t, skip_ray=False):
+        """对一个旋转角度评分, 返回 (best_local_x, best_local_y, score)。
+
+        skip_ray=True: 仅用命中模板匹配 (粗搜提速模式)
+        """
         rotated = np.column_stack([
             pts[:, 0] * cos_t - pts[:, 1] * sin_t,
             pts[:, 0] * sin_t + pts[:, 1] * cos_t,
         ])
 
-        tpl_result = _build_templates(rotated)
+        tpl_result = _build_templates(rotated, skip_ray=skip_ray)
         if tpl_result is None:
             return None
 
@@ -658,8 +669,14 @@ def dual_template_global_match(scan_pts, map_ctx,
 
         # 全图卷积
         res_hit = cv2.matchTemplate(likelihood_map, tpl_hit, cv2.TM_CCORR)
-        res_ray = cv2.matchTemplate(ray_penalty_map, tpl_ray, cv2.TM_CCORR)
-        res_final = res_hit - (res_ray * penalty_weight)
+
+        if skip_ray:
+            # 粗搜模式: 仅用命中模板
+            res_final = res_hit
+        else:
+            # 精搜模式: 完整双模板 (命中 - 射线惩罚)
+            res_ray = cv2.matchTemplate(ray_penalty_map, tpl_ray, cv2.TM_CCORR)
+            res_final = res_hit - (res_ray * penalty_weight)
 
         rh, rw = res_final.shape
         ys, ye = ryt, ryt + rh
@@ -689,13 +706,17 @@ def dual_template_global_match(scan_pts, map_ctx,
 
         return (rx, ry, max_val)
 
-    # ── Phase 1: 粗搜索 ──
+    # ── Phase 1: 粗搜索 (仅命中模板, 跳过射线模板提速) ──
     coarse_angles = np.arange(-np.pi, np.pi, np.deg2rad(adaptive_coarse_step))
+    num_coarse = len(coarse_angles)
+
     if logger is not None:
-        logger.info(f'[双模板] 粗搜: {len(coarse_angles)} 个角度 (步长 {adaptive_coarse_step:.1f}°)')
+        logger.info(
+            f'[双模板] 粗搜: {num_coarse} 个角度 (步长 {adaptive_coarse_step:.1f}°)'
+            f' [仅命中模板提速]')
 
     for theta in coarse_angles:
-        result = _score_one_angle(math.cos(theta), math.sin(theta))
+        result = _score_one_angle(math.cos(theta), math.sin(theta), skip_ray=True)
         if result is not None and result[2] > best_score:
             best_score = result[2]
             best_pose = (result[0], result[1], theta)
@@ -705,14 +726,15 @@ def dual_template_global_match(scan_pts, map_ctx,
         logger.info(f'[双模板] 粗搜完成 ({t1 - t0:.2f}s), best=({best_pose[0]:.2f},{best_pose[1]:.2f},'
                     f'{math.degrees(best_pose[2]):.1f}deg) score={best_score:.1f}')
 
-    # ── Phase 2: 精细局部角度搜索 ──
+    # ── Phase 2: 精细局部角度搜索 (串行, 完整双模板) ──
+    fine_half_range = np.deg2rad(adaptive_coarse_step)
     fine_angles = np.arange(
-        best_pose[2] - np.deg2rad(adaptive_coarse_step),
-        best_pose[2] + np.deg2rad(adaptive_coarse_step) + 1e-5,
+        best_pose[2] - fine_half_range,
+        best_pose[2] + fine_half_range + 1e-5,
         np.deg2rad(fine_angle_step_deg))
 
     for theta in fine_angles:
-        result = _score_one_angle(math.cos(theta), math.sin(theta))
+        result = _score_one_angle(math.cos(theta), math.sin(theta), skip_ray=False)
         if result is not None and result[2] > best_score:
             best_score = result[2]
             best_pose = (result[0], result[1], theta)

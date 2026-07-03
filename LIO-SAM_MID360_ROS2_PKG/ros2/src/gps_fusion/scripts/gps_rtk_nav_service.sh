@@ -33,7 +33,4 @@ cd "$GPS_FUSION_DIR"
 exec ros2 launch gps_fusion rtk_nav_bridge.launch.py \
     ns:=rkbot \
     rtk_topic:=/rtk_pvh \
-    drift_threshold:=1.0 \
-    min_correction_interval:=15.0 \
-    use_rtk_heading:=true \
     "$@"

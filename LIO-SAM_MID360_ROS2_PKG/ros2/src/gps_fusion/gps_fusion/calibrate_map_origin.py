@@ -17,7 +17,7 @@
     dx = utm_e - E₀,  dy = utm_n - N₀
     map_x =  dx*cos(θ₀) + dy*sin(θ₀)
     map_y = -dx*sin(θ₀) + dy*cos(θ₀)
-    map_yaw = heading_deg - θ₀
+    map_yaw = θ₀ - heading_deg   (取反号：RTK heading 顺时针正，ROS yaw 逆时针正)
 
 用法:
     # 自动模式：收集 N 帧同步数据，取平均

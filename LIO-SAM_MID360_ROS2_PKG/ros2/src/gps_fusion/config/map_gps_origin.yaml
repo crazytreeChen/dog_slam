@@ -8,7 +8,7 @@
 #   dy = RTK_UTM_N - map_origin_UTM_N
 #   map_x =  dx * cos(θ₀) + dy * sin(θ₀)
 #   map_y = -dx * sin(θ₀) + dy * cos(θ₀)
-#   map_yaw = RTK_heading_deg - heading_deg
+#   map_yaw = heading_deg - RTK_heading_deg   (取反号：RTK heading 顺时针正，ROS yaw 逆时针正)
 #   其中 θ₀ = heading_deg（弧度）= 地图 y=0 轴与真北的夹角
 
 map_origin:

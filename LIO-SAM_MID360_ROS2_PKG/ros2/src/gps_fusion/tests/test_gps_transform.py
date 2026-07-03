@@ -203,17 +203,23 @@ class TestHeadingYaw(unittest.TestCase):
         yaw = rtk_heading_to_map_yaw(90.0, math.radians(90.0))
         self.assertAlmostEqual(yaw, 0.0, delta=1e-6)
 
-    def test_plus_90(self):
-        """RTK heading = θ₀+90° → yaw=π/2"""
+    def test_clockwise_turn(self):
+        """顺时针转 90°: RTK heading 90°→180° → yaw 0°→-90°(=-π/2)"""
+        # 标定时: θ₀=90°, rtk_heading=90° → yaw=0
+        # 顺时针转90°: rtk_heading=180° → yaw=θ₀-180°=-90°=-π/2
         yaw = rtk_heading_to_map_yaw(180.0, math.radians(90.0))
+        self.assertAlmostEqual(yaw, -math.pi / 2, delta=1e-6)
+
+    def test_counterclockwise_turn(self):
+        """逆时针转 90°: RTK heading 90°→0° → yaw 0°→90°(=+π/2)"""
+        yaw = rtk_heading_to_map_yaw(0.0, math.radians(90.0))
         self.assertAlmostEqual(yaw, math.pi / 2, delta=1e-6)
 
     def test_wrap_around(self):
-        """RTK heading=10°, θ₀=350° → 不自动wrap，返回原始差值"""
+        """RTK heading=10°, θ₀=350°(=-10°等价) → yaw=-20°"""
+        # θ₀=350°= -10°, rtk=10° → yaw = -10° - 10° = -20°
         yaw = rtk_heading_to_map_yaw(10.0, math.radians(350.0))
-        # rtk_heading_to_map_yaw = radians(10) - radians(350) = -340° in rad
-        # 函数不做角度归一化，调用者自行处理
-        self.assertAlmostEqual(yaw, math.radians(-340.0), delta=1e-6)
+        self.assertAlmostEqual(yaw, math.radians(-20.0), delta=1e-6)
 
 
 class TestDetectRtkQuality(unittest.TestCase):

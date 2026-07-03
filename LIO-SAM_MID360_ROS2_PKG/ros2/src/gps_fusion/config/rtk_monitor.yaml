@@ -18,6 +18,7 @@ rtk_pose_monitor:
     gps_recovery_threshold: 3         # 连续M帧有效GPS → 恢复 MONITORING
     gps_stale_timeout: 3.0            # RTK数据超时（s），超时视为室内/无信号，清空_latest_fix
     min_accuracy: 10.0                # GPS最低水平精度（m），低于此值视为无效（单点定位~5-10m）
+    gps_jump_threshold: 5.0           # GPS 位置跳变速度阈值（m/s），超过视为抖动，跳过纠偏
 
     # 协方差自适应（根据RTK质量等级设置 /initialpose 的位置协方差）
     cov_rtk_fix: 0.01                 # RTK整数解 → 高信任
@@ -25,5 +26,41 @@ rtk_pose_monitor:
     cov_dgps: 1.0                     # DGPS亚米 → 低信任
     cov_no_heading: 0.5               # 无RTK航向时 yaw 协方差（让AMCL保持自身航向估计）
 
+    # RTK 数据质量门禁（可靠性提升后，可收紧阈值）
+    max_diff_age: 5.0                 # 最大差分龄期（s），>此值视为差分修正过时，拒绝
+    max_heading_std: 5.0              # 最大航向标准差（°），>此值丢弃RTK航向，用AMCL yaw兜底
+
     # 航向
     use_rtk_heading: true             # 是否使用RTK航向纠偏（false则仅纠位置）
+
+    # 多条件纠偏触发（解决"AMCL 渐进漂移，缺少纠偏契机"问题）
+    # 四个触发维度互为补充：
+    #   1. instantaneous: drift > drift_threshold → 紧急纠正
+    #   2. amcl_covariance: AMCL 自己都不确定位置了 → 注入 GPS 确定性
+    #   3. prediction: LIO odom 推算的"应到位置"与 AMCL 实际位置偏差过大
+    #      → 移动过程中 AMCL 跟丢了（最重要的"移动中契机"）
+    #   4. stationary: 机器人静止 + 小偏差 → 低成本精准微调
+    #   5. cumulative: 滑动窗口内 GPS/AMCL 位移持续偏离 → 系统偏差
+    amcl_pose_topic: amcl_pose         # AMCL位姿话题（含协方差）
+    amcl_cov_threshold: 2.0            # AMCL xy协方差膨胀阈值，超过触发纠偏
+    cumulative_drift_window: 30.0      # 累积偏差滑动窗口（秒）
+    cumulative_drift_threshold: 3.0    # 窗口内GPS/AMCL位移偏差阈值（m）
+    stationary_speed: 0.15             # 静止判定线速度（m/s）
+    stationary_drift_threshold: 1.0    # 静止时微调阈值（m），比运动时更低
+
+    # LIO 里程计（高频精确的速度+方向，用于轨迹推算和静止检测）
+    lio_odom_topic: /Odometry          # LIO里程计话题（提供twist: 线速度+角速度）
+    predict_window: 5.0                # 前向预测窗口（秒），用LIO odom积分推算"应到位置"
+    predict_drift_threshold: 1.5       # 预测位置 vs AMCL 实际位置偏差阈值（m）
+
+    # 多帧标定（提高地图原点精度，避免单帧标定的随机误差）
+    calib_sample_count: 10             # 标定采集帧数（越多越准，但首次收敛等待时间更长）
+    calib_max_std_position: 0.5        # 标定位置标准差上限（m），超限告警但不拒绝
+    calib_max_std_heading: 2.0         # 标定朝向标准差上限（°），超限告警但不拒绝
+
+    # 纠偏协方差策略（避免过度信任GPS推算位置，给AMCL scan matching留修正空间）
+    # 纠偏时发布的初始位姿协方差 = max(gps精度协方差, 标定误差², correction_cov_base)
+    # 原理：GPS→map转换本身有标定误差，不能把GPS精度直接当作地图位置精度。
+    #       correction_cov_base 保证即使GPS+标定都完美，AMCL粒子云也有0.25m²散布空间，
+    #       使其能通过scan matching在附近精确定位。
+    correction_cov_base: 0.25          # 纠偏协方差下限（m²），0.25≈±0.5m @ 1σ

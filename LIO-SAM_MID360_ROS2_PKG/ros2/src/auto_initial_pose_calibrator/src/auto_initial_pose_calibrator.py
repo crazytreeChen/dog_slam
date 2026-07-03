@@ -199,16 +199,28 @@ class AutoInitialPoseCalibrator(Node):
 
         # ────── 双模板光线投射全局匹配参数 (来自 global_match2.py) ──────
         self.declare_parameter('use_dual_template_matching', True)       # 是否启用双模板光线投射全局匹配
-        self.declare_parameter('dt_angle_step_deg', 2.0)                 # 双模板粗搜角度步长 (度)
-        self.declare_parameter('dt_fine_angle_step_deg', 0.5)            # 双模板精修角度步长 (度)
-        self.declare_parameter('dt_penalty_weight', 3.0)                 # 双模板射线穿透惩罚权重
-        self.declare_parameter('dt_scan_max_points', 500)                # 双模板匹配最大扫描点数
         self.declare_parameter('dt_multistep_enabled', True)             # 双模板匹配用于多步递推首帧
         self.declare_parameter('dt_passive_enabled', True)               # 双模板匹配用于被动匹配首帧
-        self.declare_parameter('dt_min_wall_coverage_ratio', 0.30)      # 双模板匹配最低墙覆盖率 (低于此值则回退到距离场匹配)
-        self.declare_parameter('dt_free_space_penalty_weight', 0.0)     # 自由空间惩罚权重 (越大越排斥扫描点落在空地, 0=禁用)
-        self.declare_parameter('dt_scale_ref_pixels', 300000)            # 室外自适应: 合法中心区域超过此像素数时放大搜索步长
-        self.declare_parameter('dt_scale_max', 4.0)                     # 室外自适应: 步长放大倍数上限
+
+        # 室内参数 (dt_indoor.*)
+        self.declare_parameter('dt_indoor.angle_step_deg', 3.0)          # 粗搜角度步长 (度)
+        self.declare_parameter('dt_indoor.fine_angle_step_deg', 0.5)     # 精修角度步长 (度)
+        self.declare_parameter('dt_indoor.penalty_weight', 3.0)          # 射线穿透惩罚权重
+        self.declare_parameter('dt_indoor.scan_max_points', 500)         # 最大扫描点数
+        self.declare_parameter('dt_indoor.min_wall_coverage_ratio', 0.30) # 最低墙覆盖率
+        self.declare_parameter('dt_indoor.free_space_penalty_weight', 0.2) # 自由空间惩罚权重
+        self.declare_parameter('dt_indoor.scale_ref_pixels', 300000)     # 自适应缩放触发像素数
+        self.declare_parameter('dt_indoor.scale_max', 1.5)               # 自适应缩放倍数上限
+
+        # 室外参数 (dt_outdoor.*)
+        self.declare_parameter('dt_outdoor.angle_step_deg', 3.0)         # 粗搜角度步长 (度)
+        self.declare_parameter('dt_outdoor.fine_angle_step_deg', 0.5)    # 精修角度步长 (度)
+        self.declare_parameter('dt_outdoor.penalty_weight', 3.0)         # 射线穿透惩罚权重
+        self.declare_parameter('dt_outdoor.scan_max_points', 500)        # 最大扫描点数
+        self.declare_parameter('dt_outdoor.min_wall_coverage_ratio', 0.15) # 最低墙覆盖率 (室外墙少)
+        self.declare_parameter('dt_outdoor.free_space_penalty_weight', 0.2) # 自由空间惩罚权重
+        self.declare_parameter('dt_outdoor.scale_ref_pixels', 500000)    # 自适应缩放触发像素数 (提高延迟触发)
+        self.declare_parameter('dt_outdoor.scale_max', 2.5)              # 自适应缩放倍数上限 (限制步长放大)
 
         # ────── 日志持久化参数 ──────
         self.declare_parameter('log_dir', '')                 # 日志持久化目录（为空则不写文件）
@@ -366,18 +378,35 @@ class AutoInitialPoseCalibrator(Node):
         self.df_multistep_enabled = self.get_parameter('df_multistep_enabled').value
         self.df_passive_enabled = self.get_parameter('df_passive_enabled').value
 
-        # ────── 双模板匹配参数加载 ──────
+        # ────── 双模板匹配参数加载 (室内/室外分离) ──────
         self.use_dual_template_matching = self.get_parameter('use_dual_template_matching').value
-        self.dt_angle_step_deg = self.get_parameter('dt_angle_step_deg').value
-        self.dt_fine_angle_step_deg = self.get_parameter('dt_fine_angle_step_deg').value
-        self.dt_penalty_weight = self.get_parameter('dt_penalty_weight').value
-        self.dt_scan_max_points = self.get_parameter('dt_scan_max_points').value
         self.dt_multistep_enabled = self.get_parameter('dt_multistep_enabled').value
         self.dt_passive_enabled = self.get_parameter('dt_passive_enabled').value
-        self.dt_min_wall_coverage_ratio = self.get_parameter('dt_min_wall_coverage_ratio').value
-        self.dt_free_space_penalty_weight = self.get_parameter('dt_free_space_penalty_weight').value
-        self.dt_scale_ref_pixels = self.get_parameter('dt_scale_ref_pixels').value
-        self.dt_scale_max = self.get_parameter('dt_scale_max').value
+
+        # 加载室内参数集
+        self._dt_params_indoor = {
+            'angle_step_deg': self.get_parameter('dt_indoor.angle_step_deg').value,
+            'fine_angle_step_deg': self.get_parameter('dt_indoor.fine_angle_step_deg').value,
+            'penalty_weight': self.get_parameter('dt_indoor.penalty_weight').value,
+            'scan_max_points': self.get_parameter('dt_indoor.scan_max_points').value,
+            'min_wall_coverage_ratio': self.get_parameter('dt_indoor.min_wall_coverage_ratio').value,
+            'free_space_penalty_weight': self.get_parameter('dt_indoor.free_space_penalty_weight').value,
+            'scale_ref_pixels': self.get_parameter('dt_indoor.scale_ref_pixels').value,
+            'scale_max': self.get_parameter('dt_indoor.scale_max').value,
+        }
+        # 加载室外参数集
+        self._dt_params_outdoor = {
+            'angle_step_deg': self.get_parameter('dt_outdoor.angle_step_deg').value,
+            'fine_angle_step_deg': self.get_parameter('dt_outdoor.fine_angle_step_deg').value,
+            'penalty_weight': self.get_parameter('dt_outdoor.penalty_weight').value,
+            'scan_max_points': self.get_parameter('dt_outdoor.scan_max_points').value,
+            'min_wall_coverage_ratio': self.get_parameter('dt_outdoor.min_wall_coverage_ratio').value,
+            'free_space_penalty_weight': self.get_parameter('dt_outdoor.free_space_penalty_weight').value,
+            'scale_ref_pixels': self.get_parameter('dt_outdoor.scale_ref_pixels').value,
+            'scale_max': self.get_parameter('dt_outdoor.scale_max').value,
+        }
+        # 初始默认室内 (更保守), 模式检测后会更新
+        self._apply_dt_params('INDOOR')
 
         # ────── 日志持久化初始化 ──────
         self._setup_file_logging()
@@ -641,6 +670,34 @@ class AutoInitialPoseCalibrator(Node):
                 return getattr(self._ros2, name)
 
         self._logger = _LoggerProxy(ros2_logger, file_logger)
+
+    def _apply_dt_params(self, mode):
+        """根据检测到的室内/室外模式, 将对应的双模板参数写入 self.dt_xxx 属性。
+
+        这样 matching.py 中 getattr(node, 'dt_xxx') 读取到的参数自动适配场景。
+        """
+        if mode == 'OUTDOOR':
+            params = self._dt_params_outdoor
+            tag = '室外'
+        else:
+            params = self._dt_params_indoor
+            tag = '室内'
+
+        self.dt_angle_step_deg = params['angle_step_deg']
+        self.dt_fine_angle_step_deg = params['fine_angle_step_deg']
+        self.dt_penalty_weight = params['penalty_weight']
+        self.dt_scan_max_points = params['scan_max_points']
+        self.dt_min_wall_coverage_ratio = params['min_wall_coverage_ratio']
+        self.dt_free_space_penalty_weight = params['free_space_penalty_weight']
+        self.dt_scale_ref_pixels = params['scale_ref_pixels']
+        self.dt_scale_max = params['scale_max']
+
+        self._logger.info(
+            f'[DT参数] 已切换至{tag}参数: '
+            f'粗搜步长={self.dt_angle_step_deg}° 精修步长={self.dt_fine_angle_step_deg}° '
+            f'墙覆盖率≥{100*self.dt_min_wall_coverage_ratio:.0f}% '
+            f'自适应缩放≤{self.dt_scale_max:.1f}x '
+            f'(触发阈值={self.dt_scale_ref_pixels}像素)')
 
     def _flog(self, level, msg):
         """双写日志：ROS2 logger + 文件 logger。
@@ -3293,7 +3350,7 @@ class AutoInitialPoseCalibrator(Node):
                     return
                 current_mode = "INDOOR"
 
-        # 如果检测到的模式发生改变，则打印日志
+        # 如果检测到的模式发生改变，则打印日志并切换双模板参数
         if current_mode != self.detected_mode:
             self.detected_mode = current_mode
             if current_mode == "OUTDOOR":
@@ -3301,6 +3358,10 @@ class AutoInitialPoseCalibrator(Node):
             elif current_mode == "INDOOR":
                 self._logger.info("[模式自动识别] 未检测到有效 RTK/GPS 信号，系统当前运行于【室内模式】")
             elif current_mode == "NONE":
+                self._logger.warn("[模式自动识别] 室内与室外模式均已关闭！")
+            # 切换双模板匹配参数到对应模式
+            if current_mode in ('INDOOR', 'OUTDOOR'):
+                self._apply_dt_params(current_mode)
                 self._logger.warn("[模式自动识别] 室内与室外模式均已关闭！")
 
 

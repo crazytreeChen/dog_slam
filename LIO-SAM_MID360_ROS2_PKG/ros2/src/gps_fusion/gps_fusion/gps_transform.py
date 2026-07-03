@@ -8,11 +8,11 @@ rtk_pose_monitor 复用，保证转换逻辑与现有 rtk_initial_pose.py / cali
 
 坐标系约定（与 rtk_initial_pose.py:263-286 保持一致）:
     RTK lat/lon → pyproj → UTM (E=东, N=北)
-    地图原点: UTM (E₀, N₀) + 朝向 θ₀ (heading_deg, 0=正北)
+    地图原点: UTM (E₀, N₀) + 朝向 θ₀ (rad, θ₀ = rtk_heading₀ - amcl_yaw₀)
     dx = E - E₀,  dy = N - N₀
     map_x   =  dx * cos(θ₀) + dy * sin(θ₀)
     map_y   = -dx * sin(θ₀) + dy * cos(θ₀)
-    map_yaw = θ_rtk - θ₀
+    map_yaw = θ₀ - θ_rtk_rad   (取反号：RTK heading 顺时针正，ROS yaw 逆时针正)
 
 ⚠️ 待验证确认点:
     map_yaw = θ_rtk - θ₀ 隐含假设 RTK heading_deg 的角度方向与 ROS yaw 一致。
@@ -89,17 +89,18 @@ def rtk_to_map(transformer: Transformer, lon: float, lat: float,
 def rtk_heading_to_map_yaw(heading_deg: float, theta0_rad: float) -> float:
     """RTK 真北航向 → 地图 yaw (弧度)。
 
-    复用 rtk_initial_pose.py:280 的逻辑: map_yaw = θ_rtk - θ₀
+    map_yaw = θ₀ - θ_rtk (rad)
 
-    ⚠️ 假设 RTK heading_deg 与 ROS yaw 方向一致，见模块文档警告。
+    RTK heading: 0°=北, 顺时针正 → ROS yaw: 0°=东, 逆时针正
+    两者正方向相反，故取反号。
 
     Args:
-        heading_deg: RTK 真北航向（度，0=正北）
-        theta0_rad: 地图原点朝向（弧度）
+        heading_deg: RTK 真北航向（度，0=正北，顺时针正）
+        theta0_rad: 地图原点朝向（弧度，θ₀ = rtk_heading₀ - amcl_yaw₀）
     Returns:
         map_yaw (弧度)
     """
-    return math.radians(heading_deg) - theta0_rad
+    return theta0_rad - math.radians(heading_deg)
 
 
 def detect_rtk_quality(msg) -> str:
