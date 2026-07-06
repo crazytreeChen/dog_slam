@@ -193,7 +193,7 @@ class RtkSimulator(Node):
             lat_std *= spike
             lon_std *= spike
 
-        # 硬上限：保证 h_accuracy 低于 dgps_min_accuracy(30m)
+        # 硬上限：保证 h_accuracy 低于 GPS 精度门槛
         # h_accuracy = sqrt(lat_std² + lon_std²)
         if self._pos_type == 16:
             max_h = 25.0  # 留余量，门槛30m

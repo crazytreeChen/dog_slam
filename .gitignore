@@ -245,3 +245,6 @@ nul
 
 # Point cloud data (large binary files)
 *.pcd
+
+# AtomCode local-scope configs (machine-specific)
+.atomcode/*

@@ -94,7 +94,7 @@ def generate_launch_description():
     enable_recording = LaunchConfiguration('enable_recording', default='false')
     map_origin_file = LaunchConfiguration('map_origin_file', default='')
     rtk_min_accuracy = LaunchConfiguration('rtk_min_accuracy', default='0.02')
-    dgps_min_accuracy = LaunchConfiguration('dgps_min_accuracy', default='30.0')
+    rtk_timeout = LaunchConfiguration('rtk_timeout', default='5.0')
 
     # ======== 核心融合节点 ========
 
@@ -112,7 +112,7 @@ def generate_launch_description():
             'max_hdop': 2.0,
             'min_accuracy': 1.0,
             'rtk_min_accuracy': rtk_min_accuracy,
-            'dgps_min_accuracy': dgps_min_accuracy,
+            'rtk_timeout': rtk_timeout,
             'status_threshold': 0,
         }],
     )
@@ -326,7 +326,7 @@ def generate_launch_description():
         DeclareLaunchArgument('ws_trajectory_port', default_value='8765',
                               description='轨迹WebSocket直连端口（远程电脑直连用）'),
         DeclareLaunchArgument('gps_source', default_value='/fix',
-                              description='GPS数据源: /fix (实际RTK) /gps/fix (测试模拟)'),
+                              description='GPS设备话题: /fix (串口GPS) /gps/fix (测试模拟)。RTK走独立管道 /rtk_pvh'),
         DeclareLaunchArgument('enable_web', default_value='true',
                               description='启用Web轨迹可视化'),
         DeclareLaunchArgument('enable_correction', default_value='true',
@@ -336,9 +336,9 @@ def generate_launch_description():
         DeclareLaunchArgument('enable_recording', default_value='false',
                               description='启用建图原点记录 (map_origin_recorder)。首次建图时设为true，记录完成后关闭'),
         DeclareLaunchArgument('rtk_min_accuracy', default_value='0.02',
-                              description='RTK模式精度门槛（m），室内/真实GPS建议0.02，仿真测试建议10.0'),
-        DeclareLaunchArgument('dgps_min_accuracy', default_value='30.0',
-                              description='DGPS模式精度门槛（m）'),
+                              description='RTK模式精度门槛（m），厘米级精度，室内/真实GPS建议0.02，仿真测试建议10.0'),
+        DeclareLaunchArgument('rtk_timeout', default_value='5.0',
+                              description='RTK超时回退GPS（秒），RTK断连超过此时间后自动切换到GPS设备数据'),
 
         # 核心融合节点（立即启动，robot_localization Humble 中为普通节点，自动运行）
         gps_preprocessor_node,

@@ -42,7 +42,7 @@ def generate_launch_description():
     sample_count = LaunchConfiguration('sample_count', default='10')
     min_accuracy = LaunchConfiguration('min_accuracy', default='5.0')
     rtk_min_accuracy = LaunchConfiguration('rtk_min_accuracy', default='0.02')
-    dgps_min_accuracy = LaunchConfiguration('dgps_min_accuracy', default='30.0')
+    rtk_timeout = LaunchConfiguration('rtk_timeout', default='5.0')
     output_file = LaunchConfiguration('output_file', default='')
     use_rtk_heading = LaunchConfiguration('use_rtk_heading', default='true')
     require_origin_odom = LaunchConfiguration('require_origin_odom', default='true')
@@ -62,7 +62,7 @@ def generate_launch_description():
             'max_hdop': 2.0,
             'min_accuracy': 1.0,
             'rtk_min_accuracy': rtk_min_accuracy,
-            'dgps_min_accuracy': dgps_min_accuracy,
+            'rtk_timeout': rtk_timeout,
             'status_threshold': 0,
         }],
     )
@@ -91,7 +91,7 @@ def generate_launch_description():
         DeclareLaunchArgument('ns', default_value='',
                               description='命名空间（建图阶段一般不需要）'),
         DeclareLaunchArgument('gps_source', default_value='/fix',
-                              description='GPS数据源: /fix (实际RTK) /gps/fix (测试)'),
+                              description='GPS设备话题: /fix (串口GPS) /gps/fix (测试)。RTK走独立管道 /rtk_pvh'),
         DeclareLaunchArgument('rtk_topic', default_value='/rtk_pvh',
                               description='RTK原始数据话题（获取航向）'),
         DeclareLaunchArgument('imu_topic', default_value='/livox/imu',
@@ -106,8 +106,8 @@ def generate_launch_description():
                               description='最低水平精度门槛（m）'),
         DeclareLaunchArgument('rtk_min_accuracy', default_value='0.02',
                               description='RTK模式精度门槛（m），仿真测试建议设为10.0'),
-        DeclareLaunchArgument('dgps_min_accuracy', default_value='30.0',
-                              description='DGPS模式精度门槛（m）'),
+        DeclareLaunchArgument('rtk_timeout', default_value='5.0',
+                              description='RTK超时回退GPS（秒）'),
         DeclareLaunchArgument('output_file', default_value='',
                               description='输出YAML路径（空则用默认 config/map_gps_origin.yaml）'),
         DeclareLaunchArgument('use_rtk_heading', default_value='true',

@@ -2,12 +2,23 @@
 """
 GPS/RTK数据预处理节点 - gps_fusion 包独立版本
 
-处理GPS无定位状态和NaN值，将经纬度转换为UTM坐标，确保只有有效的GPS数据进入EKF滤波器。
-RTK高精度模式：RTK_FIX(4)/RTK_FLOAT(5) 时自动降低 covariance 门槛。
-双数据源兼容：同时订阅 /fix (实际) 和 /gps/fix (测试)，通过 gps_source 参数切换。
-额外支持 robots_dog_msgs/UniRtkPvh 原始 RTK 输入：
-  - 真实硬件: 默认 /rtk_pvh（可通过 rtk_topic 参数配置）
-  - 测试模拟: 始终订阅 /test/rtk_pvh（与真实硬件自动共存）
+双管道架构（独立话题，统一输出 /fix_filtered）：
+  管道A - GPS设备数据：
+    话题: /fix 或 /gps/fix (通过 gps_source 参数切换)
+    类型: sensor_msgs/NavSatFix（NMEA 串口驱动输出）
+    精度: 米级，使用 min_accuracy 门槛
+  管道B - RTK 高精度数据：
+    话题: /rtk_pvh (真实硬件) + /test/rtk_pvh (模拟，始终订阅)
+    类型: robots_dog_msgs/UniRtkPvh（双天线 RTK 原始数据）
+    精度: 厘米级，使用 rtk_min_accuracy 门槛
+    内部先转换为 NavSatFix 再进入统一处理管线
+
+优先级策略：
+  - RTK 活跃时屏蔽 GPS 设备数据（避免精度抖动）
+  - RTK 超时 (rtk_timeout 秒无数据) 后自动回退到 GPS
+  - 仅 GPS 可用时独立工作，不依赖 RTK
+
+处理职责：有效性校验、室内/室外检测、经纬度→UTM 坐标转换。
 
 用法:
   ros2 run gps_fusion gps_preprocessor.py --ros-args -p utm_zone:=50
@@ -50,13 +61,13 @@ class GPSPreprocessor(Node):
         # 参数
         self.declare_parameter('min_satellites', 4)
         self.declare_parameter('max_hdop', 2.0)
-        self.declare_parameter('min_accuracy', 0.1)         # 普通GPS精度门槛 (m)
-        self.declare_parameter('rtk_min_accuracy', 0.02)    # RTK精度门槛 (m)
-        self.declare_parameter('dgps_min_accuracy', 30.0)    # DGPS精度门槛 (m)，RTK模块上报的std可能偏保守
+        self.declare_parameter('min_accuracy', 0.1)         # GPS精度门槛 (m)
+        self.declare_parameter('rtk_min_accuracy', 0.02)    # RTK精度门槛 (m)，厘米级
         self.declare_parameter('status_threshold', 0)       # 0=FIX, -1=NO_FIX
         self.declare_parameter('utm_zone', 50)
-        self.declare_parameter('gps_source', '/fix')  # 双源切换: /fix (实际) /gps/fix (测试)
+        self.declare_parameter('gps_source', '/fix')        # GPS设备话题: /fix /gps/fix
         self.declare_parameter('rtk_topic', '/rtk_pvh')     # RTK 原始数据话题，空字符串=不启用
+        self.declare_parameter('rtk_timeout', 5.0)          # RTK 超时回退GPS (秒)
         self.declare_parameter('indoor_threshold', 20)
         self.declare_parameter('outdoor_recover_threshold', 10)
 
@@ -64,11 +75,11 @@ class GPSPreprocessor(Node):
         self.max_hdop = self.get_parameter('max_hdop').value
         self.min_accuracy = self.get_parameter('min_accuracy').value
         self.rtk_min_accuracy = self.get_parameter('rtk_min_accuracy').value
-        self.dgps_min_accuracy = self.get_parameter('dgps_min_accuracy').value
         self.status_threshold = self.get_parameter('status_threshold').value
         self.utm_zone = self.get_parameter('utm_zone').value
-        self.gps_source = self.get_parameter('gps_source').value  # 当前活跃GPS源
+        self.gps_source = self.get_parameter('gps_source').value
         self.rtk_topic = self.get_parameter('rtk_topic').value
+        self.rtk_timeout = self.get_parameter('rtk_timeout').value
         self._indoor_threshold = self.get_parameter('indoor_threshold').value
         self._outdoor_recover_threshold = self.get_parameter('outdoor_recover_threshold').value
 
@@ -79,15 +90,15 @@ class GPSPreprocessor(Node):
             always_xy=True
         )
 
-        # 双源订阅：同时订阅 /fix 和 /gps/fix，只处理活跃源的数据
+        # 管道A: GPS设备数据 (/fix, /gps/fix) — NavSatFix
+        # 通过 gps_source 参数选择活跃源；非活跃源静默丢弃
         self._sub_fix = self.create_subscription(
-            NavSatFix, '/fix', self._make_source_callback('/fix'), 10)
+            NavSatFix, '/fix', self._make_gps_callback('/fix'), 10)
         self._sub_gps_fix = self.create_subscription(
-            NavSatFix, '/gps/fix', self._make_source_callback('/gps/fix'), 10)
+            NavSatFix, '/gps/fix', self._make_gps_callback('/gps/fix'), 10)
 
-        # RTK 订阅：解析 /rtk_pvh 类型的 UniRtkPvh，转成 NavSatFix 后注入处理链路
-        # 同时订阅真实硬件 (/rtk_pvh) 和测试模拟 (/test/rtk_pvh) 两条链路
-        # 通过 rtk_source 参数控制活跃源: "real" / "test" / "auto"（默认auto=两条都收）
+        # 管道B: RTK 原始数据 (/rtk_pvh, /test/rtk_pvh) — UniRtkPvh
+        # 内部转 NavSatFix 后注入统一处理管线，携带 source='rtk' 标记
         self.declare_parameter('rtk_source', 'auto')
         self._rtk_subs = []
         self._rtk_source = self.get_parameter('rtk_source').value
@@ -146,8 +157,9 @@ class GPSPreprocessor(Node):
         self.gps_available = False
         self.gps_quality_counter = 0
         self.utm_origin = None
-        self.rtk_mode = False  # 是否处于RTK模式
-        self.rtk_active = False  # 当前是否正在使用 RTK 输入
+        self.rtk_mode = False           # 当前数据是否为RTK精度
+        self.rtk_active = False         # RTK管道是否正在提供有效数据
+        self._rtk_last_msg_time = 0.0   # 最后一次RTK消息时间戳（用于超时检测）
 
         self._indoor_mode = False
         self._indoor_consecutive = 0
@@ -160,24 +172,24 @@ class GPSPreprocessor(Node):
 
         self.get_logger().info('GPS预处理节点已启动 (gps_fusion 独立包)')
         self.get_logger().info(
-            '参数: min_sat=%d, max_hdop=%.1f, min_accuracy=%.2fm, dgps_accuracy=%.2fm, rtk_accuracy=%.3fm'
-            % (self.min_satellites, self.max_hdop, self.min_accuracy, self.dgps_min_accuracy, self.rtk_min_accuracy)
+            '参数: min_sat=%d, max_hdop=%.1f, gps_accuracy=%.2fm, rtk_accuracy=%.3fm, rtk_timeout=%.1fs'
+            % (self.min_satellites, self.max_hdop, self.min_accuracy, self.rtk_min_accuracy, self.rtk_timeout)
         )
         self.get_logger().info(f'UTM区域: {self.utm_zone}')
-        self.get_logger().info(f'GPS数据源: {self.gps_source} (双源兼容: /fix /gps/fix)')
+        self.get_logger().info(f'[管道A] GPS设备: {self.gps_source} (NavSatFix)')
         if self.rtk_topic and _HAS_UNI_RTK_PVH:
-            self.get_logger().info(f'RTK数据源: {self.rtk_topic} (robots_dog_msgs/UniRtkPvh)')
+            self.get_logger().info(f'[管道B] RTK高精度: {self.rtk_topic} + /test/rtk_pvh (UniRtkPvh → NavSatFix)')
 
-    def _make_source_callback(self, source_name):
-        """创建带源过滤的回调：只有活跃源的数据才进入处理"""
+    def _make_gps_callback(self, source_topic):
+        """管道A: 创建GPS设备数据回调，带源过滤+RTK优先级"""
         def callback(msg):
-            if source_name == self.gps_source:
-                self.gps_callback(msg)
-            # 非活跃源静默丢弃
+            if source_topic != self.gps_source:
+                return  # 非活跃GPS源，静默丢弃
+            self.gps_callback(msg, source='gps')
         return callback
 
     def _make_rtk_callback(self, rtk_name):
-        """创建带 RTK 源过滤的回调：只有当前活跃 RTK 源或 auto 模式才进入处理
+        """管道B: 创建RTK数据回调，解析 UniRtkPvh → NavSatFix → 注入处理管线
 
         rtk_name: "real" (真实硬件 /rtk_pvh) 或 "test" (模拟 /test/rtk_pvh)
         """
@@ -189,18 +201,19 @@ class GPSPreprocessor(Node):
         return callback
 
     def _rtk_callback_impl(self, msg, rtk_name='unknown'):
-        """接收 robots_dog_msgs/UniRtkPvh，解析后转成 NavSatFix 注入 GPS 处理链路。
+        """管道B核心：接收 UniRtkPvh，转 NavSatFix 后注入统一处理管线。
 
         RTK 有效性判定：
         - heading.sol_status ∈ {0, 2} 且 bestnav.p_sol_status ∈ {0, 2} (已解出/DGPS)
-        - bestnav.pos_type ∈ {16, 17, 34, 50} (16=单点, 17=DGPS, 34=浮点解, 50=整数解)
+        - bestnav.pos_type ∈ {16, 17, 34, 50} (16=单点, 17=伪距差分, 34=浮点解, 50=整数解)
         - 未通过验证时输出 WARN 级诊断日志（限频），帮助判断 RTK 收敛状态
 
         室内/室外自动检测：
         - pos_type=0 且 svs_num=0 → 无卫星信号，累积后进入室内模式
-        - 室内模式下 suppress 日志噪音，停止 GPS 数据输出
+        - 室内模式下 suppress 日志噪音，停止数据输出
         - 信号恢复后自动退出室内模式
         """
+        now = self.get_clock().now().nanoseconds * 1e-9
         bestnav = msg.bestnav
 
         if bestnav.pos_type == 0 and bestnav.svs_num == 0:
@@ -225,13 +238,15 @@ class GPSPreprocessor(Node):
         if navsat is None:
             return
 
+        # RTK 管道活跃状态管理
+        self._rtk_last_msg_time = now
         if not self.rtk_active:
             self.rtk_active = True
             source_label = '/rtk_pvh' if rtk_name == 'real' else '/test/rtk_pvh'
-            self.get_logger().info(f'RTK 输入已接入: {source_label}')
+            self.get_logger().info(f'[RTK] 管道接入: {source_label}，GPS设备数据将暂时屏蔽')
 
-        # RTK 输入优先级高于普通 GPS，直接注入处理
-        self.gps_callback(navsat)
+        # 注入统一处理管线，携带 source='rtk' 标记
+        self.gps_callback(navsat, source='rtk')
 
     def _rtk_diag_log(self, reason, detail):
         """限频输出 RTK 诊断日志（每秒最多一次，且只在原因变化或每60次时输出）"""
@@ -346,46 +361,32 @@ class GPSPreprocessor(Node):
         """返回RTK状态描述字符串"""
         status = gps_msg.status.status
         if status >= RTK_FIX_INDICATOR:
-            return 'RTK_FIX' if status >= RTK_FIX_INDICATOR and (
-                status < RTK_FLOAT_INDICATOR or status == RTK_FIX_INDICATOR
-            ) else 'RTK_FLOAT'
-        if gps_msg.position_covariance_type > 0:
-            h_var = math.sqrt(gps_msg.position_covariance[0] + gps_msg.position_covariance[4])
-            if h_var < 0.02:
-                return 'RTK_FIX(推断)'
-            elif h_var < 0.1:
-                return 'RTK_FLOAT(推断)'
+            return 'RTK_FIX' if status == RTK_FIX_INDICATOR else 'RTK_FLOAT'
         return 'GPS'
 
-    def is_valid_gps_data(self, gps_msg):
-        """检查GPS数据是否有效（RTK/DGPS自适应用门槛）"""
+    def is_valid_gps_data(self, gps_msg, source='gps'):
+        """检查数据有效性（RTK/GPS两档精度门槛，按数据来源直接判定）"""
 
         if gps_msg.status.status < self.status_threshold:
-            self.get_logger().debug(f'GPS状态无效: {gps_msg.status.status}')
+            self.get_logger().debug(f'[{source.upper()}] 状态无效: {gps_msg.status.status}')
             return False
 
         if math.isnan(gps_msg.latitude) or math.isnan(gps_msg.longitude):
-            self.get_logger().debug('GPS经纬度包含NaN值')
+            self.get_logger().debug(f'[{source.upper()}] 经纬度包含NaN值')
             return False
 
         if not (-90 <= gps_msg.latitude <= 90) or not (-180 <= gps_msg.longitude <= 180):
-            self.get_logger().debug(f'GPS经纬度超出范围: lat={gps_msg.latitude}, lon={gps_msg.longitude}')
+            self.get_logger().debug(f'[{source.upper()}] 经纬度超出范围: lat={gps_msg.latitude}, lon={gps_msg.longitude}')
             return False
 
         if gps_msg.position_covariance_type > 0:
             h_accuracy = math.sqrt(gps_msg.position_covariance[0] + gps_msg.position_covariance[4])
-            is_rtk = self._detect_rtk_mode(gps_msg)
-            # 三级精度门槛：RTK(2cm) < DGPS(6m) < 普通GPS(0.1m)
-            if is_rtk:
-                threshold = self.rtk_min_accuracy
-            elif gps_msg.status.status == STATUS_GBAS_FIX:
-                threshold = self.dgps_min_accuracy
-            else:
-                threshold = self.min_accuracy
+            # 按数据来源直接区分门槛：RTK(厘米级) / GPS(米级)
+            threshold = self.rtk_min_accuracy if source == 'rtk' else self.min_accuracy
             if h_accuracy > threshold:
                 self.get_logger().warn(
-                    'GPS精度过低: 水平误差=%.3fm > 门槛=%.3fm (status=%d)'
-                    % (h_accuracy, threshold, gps_msg.status.status)
+                    '[%s] 精度过低: 水平误差=%.3fm > 门槛=%.3fm'
+                    % (source.upper(), h_accuracy, threshold)
                 )
                 return False
 
@@ -398,24 +399,43 @@ class GPSPreprocessor(Node):
             return h_accuracy
         return float('inf')
 
-    def gps_callback(self, msg):
-        """处理原始GPS数据"""
+    def gps_callback(self, msg, source='gps'):
+        """统一数据处理入口（管道A/GPS 或 管道B/RTK 转换后）
 
-        self.get_logger().debug(f'纬度: {msg.latitude}, 经度: {msg.longitude}')
+        Args:
+            msg: NavSatFix 消息
+            source: 'gps' (管道A: GPS设备) 或 'rtk' (管道B: RTK转换)
+        """
+        now = self.get_clock().now().nanoseconds * 1e-9
 
-        is_valid = self.is_valid_gps_data(msg)
+        # RTK 超时检测：超过 rtk_timeout 秒无 RTK 数据，自动回退 GPS
+        if self.rtk_active and (now - self._rtk_last_msg_time > self.rtk_timeout):
+            self.rtk_active = False
+            self.get_logger().warn(
+                f'[RTK] 超时 {self.rtk_timeout}s，回退到 GPS 设备数据'
+            )
+
+        # RTK 活跃时，屏蔽管道A(GPS设备)数据，避免精度抖动
+        if source == 'gps' and self.rtk_active:
+            self.get_logger().debug('[GPS] RTK 优先，跳过 GPS 设备数据')
+            return
+
+        self.get_logger().debug(f'[{source.upper()}] 纬度: {msg.latitude}, 经度: {msg.longitude}')
+
+        is_valid = self.is_valid_gps_data(msg, source=source)
 
         if is_valid:
             hdop = self.calculate_hdop(msg)
-            is_rtk = self._detect_rtk_mode(msg)
+            is_rtk = (source == 'rtk') or self._detect_rtk_mode(msg)
 
             if is_rtk and not self.rtk_mode:
                 self.get_logger().info(
-                    f'进入RTK模式: {self._get_rtk_status_str(msg)}, h_accuracy={hdop:.3f}m'
+                    '[%s] 进入RTK精度模式, h_accuracy=%.3fm'
+                    % (source.upper(), hdop)
                 )
                 self.rtk_mode = True
             elif not is_rtk and self.rtk_mode:
-                self.get_logger().info(f'退出RTK模式, h_accuracy={hdop:.3f}m')
+                self.get_logger().info('[%s] 退出RTK精度模式, h_accuracy=%.3fm' % (source.upper(), hdop))
                 self.rtk_mode = False
 
             self.gps_quality_counter += 1
@@ -482,8 +502,8 @@ class GPSPreprocessor(Node):
                 self.get_logger().error(f'UTM转换失败: {e}')
 
             self.get_logger().debug(
-                '发布有效GPS: lat=%.6f, lon=%.6f, HDOP=%.1f, RTK=%s'
-                % (msg.latitude, msg.longitude, hdop, is_rtk)
+                '[%s] 发布有效数据: lat=%.6f, lon=%.6f, HDOP=%.1f'
+                % (source.upper(), msg.latitude, msg.longitude, hdop)
             )
 
         else:
@@ -492,7 +512,7 @@ class GPSPreprocessor(Node):
                 self.gps_available = False
                 self.rtk_mode = False
 
-            self.get_logger().debug('GPS数据无效，已过滤')
+            self.get_logger().debug('[%s] 数据无效，已过滤' % source.upper())
 
         # 发布GPS状态
         status_msg = Bool()
