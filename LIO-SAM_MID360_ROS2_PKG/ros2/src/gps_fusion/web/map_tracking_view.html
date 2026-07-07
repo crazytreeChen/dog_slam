@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GPS Fusion 地图轨迹监控</title>
+  <link rel="stylesheet" href="libs/leaflet.css" />
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      height: 100vh;
+      overflow: hidden;
+      background: #12151b;
+      color: #d9e2ef;
+      font-family: "Segoe UI", Arial, sans-serif;
+      display: grid;
+      grid-template-columns: 320px minmax(0, 1fr);
+    }
+    #sidebar {
+      border-right: 1px solid #2a3140;
+      background: #171c24;
+      padding: 14px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    h1 { margin: 0 0 10px; font-size: 20px; line-height: 1.25; font-weight: 650; }
+    h2 { margin: 14px 0 6px; color: #9fb2cc; font-size: 13px; font-weight: 650; }
+    label { display: block; margin: 6px 0 3px; color: #9fb2cc; font-size: 12px; }
+    input, select {
+      width: 100%; height: 32px; border: 1px solid #354052; border-radius: 4px;
+      padding: 5px 8px; background: #0f131a; color: #e6edf7; font-size: 13px;
+    }
+    .row { display: grid; grid-template-columns: 1fr 82px; gap: 8px; align-items: end; }
+    button {
+      height: 32px; border: 0; border-radius: 4px; background: #2563eb;
+      color: #fff; cursor: pointer; font-size: 13px; transition: filter 0.15s;
+    }
+    button:hover { filter: brightness(1.1); }
+    button.secondary { background: #283244; color: #c8d6e5; }
+    button.secondary.active { border: 1px solid #22c55e; color: #22c55e; }
+    button.danger { background: #9f2323; }
+    button:disabled { opacity: 0.35; filter: grayscale(60%); cursor: not-allowed; }
+    .button-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+    .btn-group { display: flex; gap: 6px; flex-wrap: wrap; }
+    .btn-group button { flex: 1; min-width: 48px; height: 28px; font-size: 12px; }
+    .status-line {
+      display: flex; justify-content: space-between; gap: 10px; padding: 5px 0;
+      border-bottom: 1px solid #222a38; font-size: 13px;
+    }
+    .status-line span:first-child { color: #8fa3bf; }
+    .value { color: #edf4ff; font-variant-numeric: tabular-nums; text-align: right; overflow-wrap: anywhere; }
+    .legend-item { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 13px; color: #c8d5e6; }
+    .swatch { width: 24px; height: 4px; border-radius: 2px; flex: 0 0 auto; }
+    .status-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-left: 4px; }
+    .status-dot.online { background: #22c55e; box-shadow: 0 0 6px #22c55e; }
+    .status-dot.offline { background: #ef4444; }
+    #map-container { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
+    #map, #grid-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+    #map { z-index: 1; }
+    #grid-canvas { z-index: 1; background: #ffffff; display: none; cursor: grab; }
+    #grid-canvas:active { cursor: grabbing; }
+    .leaflet-container { background: #151b24 !important; }
+    .leaflet-control-zoom a { background: #1e293b !important; color: #c8d6e5 !important; border-color: #334155 !important; }
+    .leaflet-control-attribution { background: rgba(17,24,39,0.8) !important; color: #64748b !important; }
+    .leaflet-control-attribution a { color: #60a5fa !important; }
+    .section-gps, .section-grid { display: none; }
+    .section-gps.visible, .section-grid.visible { display: block; }
+    .note { margin-top: 8px; color: #7d8ca2; font-size: 12px; line-height: 1.5; }
+    /* 占用网格模式缩放控件 */
+    #grid-zoom {
+      position: absolute; right: 14px; bottom: 14px; z-index: 10;
+      display: none; flex-direction: column; gap: 4px;
+    }
+    #grid-zoom button {
+      width: 36px; height: 36px; font-size: 18px; line-height: 1;
+      background: rgba(30,41,59,0.9); border: 1px solid #334155;
+    }
+    #grid-zoom button:hover { background: #1e293b; }
+    @media (max-width: 760px) {
+      body { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+      #sidebar { max-height: 44vh; border-right: 0; border-bottom: 1px solid #2a3140; }
+    }
+  </style>
+</head>
+<body>
+  <aside id="sidebar">
+    <h1>GPS Fusion 地图轨迹监控</h1>
+
+    <h2>显示模式</h2>
+    <div class="btn-group">
+      <button class="secondary active" data-display="gps">GPS 轨迹</button>
+      <button class="secondary" data-display="grid">占用网格</button>
+    </div>
+
+    <!-- ====== GPS 轨迹模式 ====== -->
+    <div id="section-gps" class="section-gps visible">
+      <div class="row">
+        <div><label for="host-input">机器人 IP</label><input id="host-input" type="text" placeholder="默认使用当前主机" /></div>
+        <div><label for="port-input">WS 端口</label><input id="port-input" type="number" value="8765" min="1" max="65535" /></div>
+      </div>
+      <div class="button-grid">
+        <button id="connect-ws-btn">连接</button>
+        <button id="disconnect-ws-btn" class="danger" disabled>断开</button>
+      </div>
+      <h2>数据源</h2>
+      <label>GPS 源</label>
+      <div class="btn-group">
+        <button class="secondary active" data-gps="/fix">/fix</button>
+        <button class="secondary" data-gps="/gps/fix">/gps/fix</button>
+      </div>
+      <label>RTK 源</label>
+      <div class="btn-group">
+        <button class="secondary active" data-rtk="auto">自动</button>
+        <button class="secondary" data-rtk="real">真实</button>
+        <button class="secondary" data-rtk="test">测试</button>
+      </div>
+      <label>推送模式</label>
+      <div class="btn-group">
+        <button class="secondary active" data-mode="incremental">增量</button>
+        <button class="secondary" data-mode="full_periodic">全量定时</button>
+      </div>
+      <h2>显示</h2>
+      <label>底图</label>
+      <div class="btn-group">
+        <button class="secondary active" data-layer="sat">卫星图</button>
+        <button class="secondary" data-layer="vec">矢量图</button>
+      </div>
+      <label>轨迹</label>
+      <div class="btn-group">
+        <button class="secondary active" data-trail="both">全部</button>
+        <button class="secondary" data-trail="fused">仅融合</button>
+        <button class="secondary" data-trail="lio">仅 LIO</button>
+      </div>
+      <div class="button-grid">
+        <button id="fit-btn" class="secondary">适配地图</button>
+        <button id="clear-btn" class="secondary">清除轨迹</button>
+      </div>
+    </div>
+
+    <!-- ====== 占用网格模式 ====== -->
+    <div id="section-grid" class="section-grid">
+      <label>ROSBridge 地址</label>
+      <div class="row">
+        <div><input id="ros-host-input" type="text" placeholder="默认使用当前主机" /></div>
+        <div><input id="ros-port-input" type="number" value="9090" min="1" max="65535" /></div>
+      </div>
+      <label>ROS 命名空间（留空=全局）</label>
+      <div style="display:flex;gap:6px;align-items:center">
+        <input id="ros-ns-input" type="text" value="/rkbot" placeholder="例如 /rkbot" style="flex:1" />
+        <button id="ros-update-btn" class="secondary" style="width:auto;padding:0 12px;height:32px;white-space:nowrap">更新</button>
+      </div>
+    </div>
+
+    <h2>状态</h2>
+    <div class="status-line"><span>连接 <span id="conn-dot" class="status-dot offline"></span></span><span id="conn-status" class="value">未连接</span></div>
+    <div class="status-line"><span>地图</span><span id="lio-status" class="value">--</span></div>
+    <div class="status-line"><span>机器人位姿</span><span id="fused-status" class="value">--</span></div>
+    <div class="status-line"><span>当前位置</span><span id="cur-pos" class="value">--</span></div>
+    <div class="status-line"><span>运动方向</span><span id="motion-status" class="value">--</span></div>
+    <div class="status-line"><span>GPS 源</span><span id="gps-source-status" class="value">--</span></div>
+    <div class="status-line"><span>RTK 源</span><span id="rtk-source-status" class="value">--</span></div>
+
+    <h2>图例</h2>
+    <div class="legend-item"><span class="swatch" style="background:#3b82f6"></span>LIO 原始轨迹</div>
+    <div class="legend-item"><span class="swatch" style="background:#22c55e"></span>GPS 融合轨迹</div>
+    <div class="legend-item"><span class="swatch" style="background:#f97316"></span>运动方向</div>
+
+    <p class="note" id="mode-note">
+      GPS 轨迹模式：WebSocket 8765 · Esri/CartoDB 瓦片底图 · 按 F 切换跟随
+    </p>
+  </aside>
+
+  <main id="map-container">
+    <div id="map"></div>
+    <canvas id="grid-canvas"></canvas>
+    <div id="grid-zoom">
+      <button onclick="gridZoomIn()" title="放大">+</button>
+      <button onclick="gridZoomOut()" title="缩小">−</button>
+      <button onclick="gridResetView()" title="复位">⊙</button>
+    </div>
+  </main>
+
+  <script src="libs/roslib.min.js"></script>
+  <script src="libs/leaflet.js"></script>
+  <script src="libs/map_tracking_view.js?v=4"></script>
+</body>
+</html>

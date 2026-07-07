@@ -502,45 +502,6 @@ def generate_launch_description():
         prefix=['taskset -c 0,1,2,3'],
     )
     
-    enable_rtk_correction = (os.environ.get('ENABLE_RTK_CORRECTION', 'false').lower() == 'true')
-    
-    gps_fusion_preprocessor_node = Node(
-        package='gps_fusion',
-        executable='gps_preprocessor.py',
-        name='gps_preprocessor',
-        output='screen',
-        parameters=[{
-            'use_sim_time': use_sim_time,
-            'gps_source': '/fix',
-            'min_satellites': 4,
-            'max_hdop': 2.0,
-            'min_accuracy': 1.0,
-            'rtk_min_accuracy': 0.02,
-            'status_threshold': 0,
-        }],
-        condition=IfCondition('true' if enable_rtk_correction else 'false'),
-        prefix=['taskset -c 0,1,2,3'],
-    )
-    
-    rtk_pose_monitor_node = Node(
-        package='gps_fusion',
-        executable='rtk_pose_monitor.py',
-        name='rtk_pose_monitor',
-        output='screen',
-        parameters=[{
-            'use_sim_time': use_sim_time,
-            'fix_topic': '/fix_filtered',
-            'rtk_topic': '/rtk_pvh',
-            'use_rtk_heading': True,
-            'ns': ns,
-            'drift_threshold': 2.0,
-            'min_correction_interval': 15.0,
-            'monitor_rate': 2.0,
-        }],
-        condition=IfCondition('true' if enable_rtk_correction else 'false'),
-        prefix=['taskset -c 0,1,2,3'],
-    )
-
     # 5. 导航栈节点
     navigation_include = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(launch_dir, 'navigation_launch.py')),
@@ -740,17 +701,6 @@ def generate_launch_description():
                 condition=IfCondition(PythonExpression(["'", LaunchConfiguration('localization'), "' == 'slam_toolbox'"]))
             )
         )
-        
-        if enable_rtk_correction:
-            nav2_actions.append(
-                TimerAction(
-                    period=2.5,
-                    actions=[
-                        gps_fusion_preprocessor_node,
-                        rtk_pose_monitor_node,
-                    ]
-                )
-            )
         
     # 导航栈
     nav2_actions.append(

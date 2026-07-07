@@ -7,8 +7,7 @@ Type=simple
 User=ztl
 Group=ztl
 WorkingDirectory=/home/ztl/cql
-Environment="ROS_DOMAIN_ID=24"
-Environment="RMW_IMPLEMENTATION=rmw_zenoh_cpp"
+PassEnvironment=ROS_DOMAIN_ID RMW_IMPLEMENTATION
 ExecStart=/home/ztl/cql/auto_initial_pose_calibrator/scripts/run_auto_calibrator_zg.sh
 Restart=always
 RestartSec=10

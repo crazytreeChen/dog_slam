@@ -8,34 +8,38 @@
 
 rtk_pose_monitor:
   ros__parameters:
-    # 漂移检测
-    drift_threshold: 5.0              # AMCL与GPS偏差超过此值（m）则触发纠偏
+    # 漂移检测：RTK 双天线可提供位置+航向，普通 GPS 只做低精度位置兜底
+    rtk_drift_threshold: 1.0          # RTK 模式 AMCL 与 RTK 位置偏差超过此值（m）则纠偏
+    gps_drift_threshold: 8.0          # GPS fallback 模式只允许大偏差纠偏，建议 5-10m
     min_correction_interval: 15.0     # 最小纠偏间隔（s），大于 odom_corrector 周期
     monitor_rate: 2.0                 # 监控频率（Hz）
 
     # GPS 容错状态机
     gps_loss_threshold: 5             # 连续N帧无效GPS → GPS_LOST 停止纠偏
     gps_recovery_threshold: 3         # 连续M帧有效GPS → 恢复 MONITORING
-    gps_stale_timeout: 3.0            # RTK数据超时（s），超时视为室内/无信号，清空_latest_fix
-    min_accuracy: 10.0                # GPS最低水平精度（m），低于此值视为无效（单点定位~5-10m）
+    gps_stale_timeout: 3.0            # 当前定位输入超时（s），RTK超时后允许降级到GPS fallback
+    min_accuracy: 1.0                 # RTK最低水平精度（m），低于此值视为无效
+    gps_min_accuracy: 10.0            # GPS fallback最低水平精度（m），普通GPS只做大偏差保护
     gps_jump_threshold: 5.0           # GPS 位置跳变速度阈值（m/s），超过视为抖动，跳过纠偏
 
     # 协方差自适应（根据RTK质量等级设置 /initialpose 的位置协方差）
     cov_rtk_fix: 0.01                 # RTK整数解 → 高信任
     cov_rtk_float: 0.1                # RTK浮点解 → 中信任
     cov_dgps: 1.0                     # DGPS亚米 → 低信任
+    cov_gps: 25.0                     # 普通GPS fallback → 低信任，约5m标准差
     cov_no_heading: 0.5               # 无RTK航向时 yaw 协方差（让AMCL保持自身航向估计）
 
     # RTK 数据质量门禁（可靠性提升后，可收紧阈值）
     max_diff_age: 5.0                 # 最大差分龄期（s），>此值视为差分修正过时，拒绝
     max_heading_std: 5.0              # 最大航向标准差（°），>此值丢弃RTK航向，用AMCL yaw兜底
 
-    # 航向
+    # 航向：只有 RTK 双天线提供可信 heading；GPS fallback 不纠 yaw，只沿用 AMCL 当前 yaw
     use_rtk_heading: true             # 是否使用RTK航向纠偏（false则仅纠位置）
+    enable_gps_fallback: true         # RTK不可用时是否使用普通GPS做低精度位置纠偏
 
     # 多条件纠偏触发（解决"AMCL 渐进漂移，缺少纠偏契机"问题）
     # 四个触发维度互为补充：
-    #   1. instantaneous: drift > drift_threshold → 紧急纠正
+    #   1. instantaneous: drift > 当前数据源阈值 → 紧急纠正
     #   2. amcl_covariance: AMCL 自己都不确定位置了 → 注入 GPS 确定性
     #   3. prediction: LIO odom 推算的"应到位置"与 AMCL 实际位置偏差过大
     #      → 移动过程中 AMCL 跟丢了（最重要的"移动中契机"）
@@ -55,6 +59,8 @@ rtk_pose_monitor:
 
     # 多帧标定（提高地图原点精度，避免单帧标定的随机误差）
     calib_sample_count: 10             # 标定采集帧数（越多越准，但首次收敛等待时间更长）
+    gps_calib_min_motion: 2.0          # 只有GPS无航向时，至少移动该距离后估计UTM→map方向
+    gps_calib_max_samples: 80          # GPS无航向标定最多保留样本数
     calib_max_std_position: 0.5        # 标定位置标准差上限（m），超限告警但不拒绝
     calib_max_std_heading: 2.0         # 标定朝向标准差上限（°），超限告警但不拒绝
 

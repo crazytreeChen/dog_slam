@@ -3,12 +3,13 @@
 RTK 位姿监控与自动纠偏 launch 文件
 
 启动 rtk_pose_monitor 节点：
-  - 首次收到外部 /initialpose → 自动标定 RTK 原点（经纬度+朝向）
-  - 之后持续对比 RTK 与当前位姿（tf map→base_footprint），超阈值时纠偏
+  - 首次收到外部 /initialpose → 自动建立 GPS/RTK 到 map 的位置关系
+  - RTK 双天线可用时使用 RTK 位置+航向，1m 级阈值纠偏
+  - RTK 不可用时降级为 GPS 位置监控，只纠位置不纠 yaw，5-10m 阈值纠偏
   - 无需预标定文件，无需单独的 gps_preprocessor
 
 参数配置：config/rtk_monitor.yaml 为单一真相源
-运行时覆盖：--ros-args -p drift_threshold:=3.0
+运行时覆盖：--ros-args -p rtk_drift_threshold:=1.0 -p gps_drift_threshold:=8.0
 
 用法:
     # 导航时启动（与 nav2_dog_slam lio_nav2_unified.launch.py 并行）
@@ -16,7 +17,7 @@ RTK 位姿监控与自动纠偏 launch 文件
 
     # 运行时覆盖 YAML 参数
     ros2 launch gps_fusion rtk_nav_bridge.launch.py \\
-        ns:=rkbot --ros-args -p drift_threshold:=3.0 -p use_rtk_heading:=false
+        ns:=rkbot --ros-args -p rtk_drift_threshold:=1.0 -p gps_drift_threshold:=8.0
 """
 
 import os
@@ -36,6 +37,7 @@ def generate_launch_description():
     # ======== 启动参数 ========
     ns = LaunchConfiguration('ns', default='')
     rtk_topic = LaunchConfiguration('rtk_topic', default='/rtk_pvh')
+    gps_topic = LaunchConfiguration('gps_topic', default='/fix')
     use_sim_time = LaunchConfiguration('use_sim_time', default='false')
     utm_zone = LaunchConfiguration('utm_zone', default='50')
     # 以下参数由 rtk_monitor.yaml 统一管理，此处仅声明供 CLI --help 展示
@@ -63,11 +65,12 @@ def generate_launch_description():
             monitor_config,
             {
                 # 仅传递 YAML 中不存在的动态/运行时参数
-                # （drift_threshold / min_correction_interval / monitor_rate / use_rtk_heading
+                # （rtk_drift_threshold / gps_drift_threshold / min_correction_interval / monitor_rate / use_rtk_heading
                 #  均在 rtk_monitor.yaml 中定义，此处不覆盖）
                 'use_sim_time': use_sim_time,
                 'utm_zone': utm_zone,
                 'rtk_topic': rtk_topic,
+                'gps_topic': gps_topic,
                 'lio_odom_topic': lio_odom_topic,  # LIO 里程计（轨迹推算用）
                 'ns': ns,
                 'map_frame': ns_map_frame,
@@ -134,11 +137,13 @@ def generate_launch_description():
                               description='命名空间（例如 rkbot），TF帧自动加前缀'),
         DeclareLaunchArgument('rtk_topic', default_value='/rtk_pvh',
                               description='RTK原始数据话题（位置+航向来源）'),
+        DeclareLaunchArgument('gps_topic', default_value='/fix',
+                              description='普通GPS fallback话题（RTK不可用时仅用于位置纠偏）'),
         DeclareLaunchArgument('use_sim_time', default_value='false',
                               description='使用仿真时间'),
         DeclareLaunchArgument('utm_zone', default_value='50',
                               description='UTM区域编号'),
-        # drift_threshold / min_correction_interval / monitor_rate / use_rtk_heading
+        # rtk_drift_threshold / gps_drift_threshold / min_correction_interval / monitor_rate / use_rtk_heading
         # 由 rtk_monitor.yaml 统一管理，通过 --ros-args -p <key>:=<value> 覆盖
         DeclareLaunchArgument('web_port', default_value='8084',
                               description='Web静态服务端口'),

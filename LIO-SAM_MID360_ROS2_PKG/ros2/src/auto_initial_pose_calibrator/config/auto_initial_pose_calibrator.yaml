@@ -4,13 +4,15 @@
 # 室外: RTK(GPS+双天线航向)+校准→/initialpose
 # 快速模式: 开机静止采集数帧→全局粒子匹配→直接发布最佳位姿给AMCL
 #
-# 通过 launch 参数 ns 自动切换机器人配置:
-#   ns 为空 → 小狗（LIO/scan 话题在 namespace 下，如 /rkbot/scan）
-#   ns=rkbot → 中狗（LIO/scan 话题为全局，如 /laser_scan）
+# 节点默认使用 namespace=rkbot，话题为相对路径，自动拼接为 /rkbot/<topic>
 # =============================================================================
 /**:
   ros__parameters:
-    # ────── 话题 ──────
+    # ────── 话题（相对路径，自动拼接 namespace 前缀 /rkbot/）──────
+    map_topic: "map"
+    scan_topic: "scan"
+    odom_topic: "lio/odom"
+    amcl_pose_topic: "amcl_pose"
     rtk_topic: "/rtk_pvh"
     rtk_topic_type: "robots_dog_msgs.msg.UniRtkPvh"
     gps_topic: "/fix"
@@ -20,23 +22,8 @@
     # ────── 坐标系 ──────
     map_frame: "map"
 
-    # ────── 机器人差异化配置（根据 ns 自动选择）──────
-    # 小狗 (ns 为空): 话题在 namespace 下，如 scan → /ns/scan
-    # 中狗 (ns=rkbot): LIO 话题为全局，如 /laser_scan, /odom/slam_odom
-    robot_configs:
-      default:   # 小狗
-        map_topic: "map"
-        scan_topic: "scan"
-        odom_topic: "lio/robo/odom"
-        amcl_pose_topic: "amcl_pose"
-      rkbot:     # 中狗 ZG
-        map_topic: "/rkbot/map"
-        scan_topic: "/rkbot/scan"
-        odom_topic: "/rkbot/lio/odom"
-        amcl_pose_topic: "/rkbot/amcl_pose"
-
     # ────── 模式 ──────
-    outdoor_mode: true
+    outdoor_mode: false
     indoor_mode: true
 
     # ────── 日志 ──────

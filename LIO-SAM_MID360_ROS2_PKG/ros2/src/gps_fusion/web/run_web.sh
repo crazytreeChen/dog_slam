@@ -11,8 +11,8 @@
 WEB_DIR="$(cd "$(dirname "$0")" && pwd)"
 PORT="${WEB_PORT:-8084}"
 
-if [ ! -f "$WEB_DIR/map_viewer.html" ]; then
-    echo "[web] 警告: $WEB_DIR 中未找到 map_viewer.html，HTTP 仍可启动用于浏览其他文件"
+if [ ! -f "$WEB_DIR/map_viewer.html" ] && [ ! -f "$WEB_DIR/map_tracking_view.html" ]; then
+    echo "[web] 警告: $WEB_DIR 中未找到 map_viewer.html 或 map_tracking_view.html，HTTP 仍可启动用于浏览其他文件"
 fi
 
 # ============================================================

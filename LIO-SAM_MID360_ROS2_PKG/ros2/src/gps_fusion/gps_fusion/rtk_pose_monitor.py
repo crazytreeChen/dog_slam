@@ -2,21 +2,26 @@
 """
 RTK 位姿监控与自动纠偏节点
 
-首次收到外部 /initialpose 时自动标定 RTK 原点（经纬度+朝向），
-此后持续对比 RTK 推算位姿与当前位姿（tf map→base_footprint），
-偏差超过阈值时自动补发 /initialpose 纠偏。
+首次收到外部 /initialpose 时自动建立 GPS/RTK 到 map 的坐标关系，
+此后持续对比 GPS/RTK 推算位置与当前位姿（tf map→base_footprint），
+偏差超过对应数据源阈值时自动补发 /initialpose 纠偏。
 
 零侵入原理:
     AMCL/定位节点订阅 /initialpose（PoseWithCovarianceStamped, frame_id=map），
     收到后重置位姿。本节点只发布该话题，不修改其他节点配置。
 
 坐标转换链（复用 gps_transform.rtk_to_map）:
-    RTK lat/lon → UTM (E, N) → 减原点 (E₀,N₀) → 旋转 θ₀ → map (x, y)
+    GPS/RTK lat/lon → UTM (E, N) → 减原点 (E₀,N₀) → 旋转 θ₀ → map (x, y)
 
 标定方式（二选一）:
-    1. 自动：收到第一条外部 /initialpose → 记录当前 RTK 经纬度+航向 → 开始监控纠偏
+    1. 自动：收到第一条外部 /initialpose → 记录当前 GPS/RTK 位置关系 → 开始监控纠偏
     2. 主动：ros2 service call /start_gps_origin_calibration std_srvs/srv/Trigger
        → 以当前 AMCL+GPS 同步数据多帧标定地图原点 (E₀, N₀, θ₀)
+
+航向策略:
+    RTK 双天线可提供可信 heading，用于 RTK 模式 yaw 纠偏。
+    普通 GPS fallback 不纠 yaw，只沿用当前 AMCL yaw；GPS 无航向时若需建立
+    GPS→map 旋转关系，会等待机器人移动一段距离后用 GPS 位移方向与 map 位移方向估计。
 
 容错状态机:
     MONITORING → (GPS连续N帧无效) → GPS_LOST → (GPS连续M帧有效) → MONITORING
@@ -32,7 +37,8 @@ RTK 位姿监控与自动纠偏节点
 
     # 手动启动节点
     ros2 run gps_fusion rtk_pose_monitor.py --ros-args \
-        -p ns:=rkbot -p rtk_topic:=/rtk_pvh -p drift_threshold:=1.0
+        -p ns:=rkbot -p rtk_topic:=/rtk_pvh \
+        -p rtk_drift_threshold:=1.0 -p gps_drift_threshold:=8.0
 """
 
 import math
@@ -81,6 +87,9 @@ def _quat_to_yaw(q: Quaternion) -> float:
 class RtkPoseMonitor(Node):
     """RTK 位姿监控与自动纠偏：首次 /initialpose 自动标定原点，持续监控纠偏"""
 
+    SOURCE_RTK = 'rtk'
+    SOURCE_GPS = 'gps'
+
     # 状态机
     MONITORING = 'MONITORING'
     GPS_LOST = 'GPS_LOST'
@@ -93,22 +102,28 @@ class RtkPoseMonitor(Node):
         # ---- 参数 ----
         self.declare_parameter('utm_zone', 50)
         self.declare_parameter('rtk_topic', '/rtk_pvh')
+        self.declare_parameter('gps_topic', '/fix')
+        self.declare_parameter('enable_gps_fallback', True)
         self.declare_parameter('use_rtk_heading', True)
         self.declare_parameter('ns', '')                          # 命名空间
         self.declare_parameter('map_frame', '')                   # 空则自动推导
         self.declare_parameter('base_frame', '')                  # 空则自动推导
-        self.declare_parameter('drift_threshold', 1.0)            # 漂移阈值（m）
+        self.declare_parameter('drift_threshold', float('nan'))   # 旧参数兼容：映射到RTK阈值
+        self.declare_parameter('rtk_drift_threshold', 1.0)        # RTK 纠偏阈值（m）
+        self.declare_parameter('gps_drift_threshold', 8.0)        # GPS fallback 纠偏阈值（m）
         self.declare_parameter('min_correction_interval', 15.0)   # 最小纠偏间隔（s）
         self.declare_parameter('monitor_rate', 2.0)               # 监控频率（Hz）
         self.declare_parameter('gps_loss_threshold', 5)           # 连续N帧无效→GPS_LOST
         self.declare_parameter('gps_recovery_threshold', 3)       # 连续M帧有效→恢复
         self.declare_parameter('gps_stale_timeout', 3.0)          # RTK 数据超时（s），超时视为室内/无信号
         self.declare_parameter('min_accuracy', 5.0)               # RTK 最低精度（m）
+        self.declare_parameter('gps_min_accuracy', 10.0)          # GPS fallback 最低精度（m）
         self.declare_parameter('status_report_interval', 30.0)    # 周期性状态汇报间隔（秒）
         self.declare_parameter('gps_jump_threshold', 5.0)         # GPS 位置跳变速度阈值（m/s），超过则视为抖动
         self.declare_parameter('cov_rtk_fix', 0.01)
         self.declare_parameter('cov_rtk_float', 0.1)
         self.declare_parameter('cov_dgps', 1.0)
+        self.declare_parameter('cov_gps', 25.0)                   # GPS fallback 位置协方差（m²）
         self.declare_parameter('cov_no_heading', 0.5)             # 无航向时 yaw 协方差
 
         # ---- RTK 数据质量门禁 ----
@@ -130,6 +145,8 @@ class RtkPoseMonitor(Node):
 
         # ---- 多帧标定（提高地图原点精度，避免单帧标定的随机误差） ----
         self.declare_parameter('calib_sample_count', 10)           # 标定采集帧数
+        self.declare_parameter('gps_calib_min_motion', 2.0)        # GPS无航向标定所需最小位移（m）
+        self.declare_parameter('gps_calib_max_samples', 80)        # GPS无航向标定最多保留样本数
         self.declare_parameter('calib_max_std_position', 0.5)      # 标定位置标准差上限（m），超限告警
         self.declare_parameter('calib_max_std_heading', 2.0)       # 标定朝向标准差上限（°），超限告警
 
@@ -139,15 +156,25 @@ class RtkPoseMonitor(Node):
         self.declare_parameter('correction_cov_base', 0.25)      # 纠偏协方差下限（m²）
 
         self._utm_zone = self.get_parameter('utm_zone').value
+        self._enable_gps_fallback = self.get_parameter('enable_gps_fallback').value
         self._use_rtk_heading = self.get_parameter('use_rtk_heading').value
-        self._drift_threshold = self.get_parameter('drift_threshold').value
+        legacy_drift_threshold = self.get_parameter('drift_threshold').value
+        self._rtk_drift_threshold = self.get_parameter('rtk_drift_threshold').value
+        if not math.isnan(legacy_drift_threshold):
+            self._rtk_drift_threshold = legacy_drift_threshold
+            self.get_logger().warn(
+                '参数 drift_threshold 已废弃，请改用 rtk_drift_threshold；'
+                '本次已按旧参数覆盖 RTK 纠偏阈值')
+        self._gps_drift_threshold = self.get_parameter('gps_drift_threshold').value
         self._min_interval = self.get_parameter('min_correction_interval').value
         self._monitor_rate = self.get_parameter('monitor_rate').value
         self._gps_loss_threshold = self.get_parameter('gps_loss_threshold').value
         self._gps_recovery_threshold = self.get_parameter('gps_recovery_threshold').value
         self._gps_stale_timeout = self.get_parameter('gps_stale_timeout').value
         self._min_accuracy = self.get_parameter('min_accuracy').value
+        self._gps_min_accuracy = self.get_parameter('gps_min_accuracy').value
         self._gps_jump_threshold = self.get_parameter('gps_jump_threshold').value
+        self._cov_gps = self.get_parameter('cov_gps').value
         self._cov_no_heading = self.get_parameter('cov_no_heading').value
 
         # ---- RTK 质量门禁 ----
@@ -167,6 +194,8 @@ class RtkPoseMonitor(Node):
 
         # ---- 多帧标定参数 ----
         self._calib_sample_count = self.get_parameter('calib_sample_count').value
+        self._gps_calib_min_motion = self.get_parameter('gps_calib_min_motion').value
+        self._gps_calib_max_samples = self.get_parameter('gps_calib_max_samples').value
         self._calib_max_std_position = self.get_parameter('calib_max_std_position').value
         self._calib_max_std_heading = self.get_parameter('calib_max_std_heading').value
         self._correction_cov_base = self.get_parameter('correction_cov_base').value
@@ -189,7 +218,8 @@ class RtkPoseMonitor(Node):
         self._calibrated = False
 
         # ---- 多帧标定状态（提高原点精度） ----
-        self._calib_samples = []           # 采集的同步帧: [(amcl_x,amcl_y,amcl_yaw,utm_e,utm_n,heading_deg), ...]
+        self._calib_samples = []           # 采集的同步帧: [(amcl_x,amcl_y,amcl_yaw,utm_e,utm_n,heading_deg,source), ...]
+        self._calib_source = None
         self._calib_position_std = 0.0     # 标定位置标准差（m），用于纠偏协方差膨胀
         self._calib_heading_std = 0.0      # 标定朝向标准差（°）
 
@@ -201,14 +231,19 @@ class RtkPoseMonitor(Node):
         self._state = self.WAIT_ORIGIN
         self._gps_fail_count = 0
         self._gps_recover_count = 0
-        self._latest_fix = None           # NavSatFix（从 RTK 消息构造）
+        self._latest_fix = None           # 当前选中的 NavSatFix（RTK 优先，GPS fallback）
+        self._latest_fix_source = None
+        self._latest_rtk_fix = None
+        self._latest_gps_fix = None
         self._latest_rtk_heading = None   # RTK 真北航向（度）
-        self._last_fix_time = self.get_clock().now()  # 最后收到有效 RTK 数据的时间
+        self._last_fix_time = None        # 最后收到当前有效定位数据的时间
+        self._last_rtk_time = None
+        self._last_gps_time = None
         self._last_correction_time = self.get_clock().now() - Duration(seconds=self._min_interval + 1)
 
         # ---- GPS 跳变检测 ----
-        self._last_gps_map_xy = None          # (x, y) 上一次通过跳变检测的 GPS 地图坐标
-        self._last_gps_map_time = None         # 对应时间戳
+        self._last_map_xy_by_source = {}       # source -> (x, y) 上一次有效地图坐标
+        self._last_map_time_by_source = {}     # source -> 对应时间戳
         self._gps_jump_count = 0               # 累计跳变次数
 
         # ---- 累积偏差追踪（sliding window） ----
@@ -238,6 +273,7 @@ class RtkPoseMonitor(Node):
         self._pred_base_amcl_x = None            # 基准时刻 AMCL X
         self._pred_base_amcl_y = None            # 基准时刻 AMCL Y
         self._pred_base_time = None              # 基准时间戳
+        self._pred_lio_to_map_yaw = None         # 基准时刻 LIO odom 到 map 的旋转
 
         # 历史记录（保留用于调试）
         self._pred_history = deque()
@@ -263,6 +299,16 @@ class RtkPoseMonitor(Node):
                 'robots_dog_msgs 未安装或 rtk_topic 为空，RTK 输入不可用！')
             self._use_rtk_heading = False
 
+        # ---- GPS fallback：RTK 不可用时使用普通 GPS 继续做低精度漂移监控 ----
+        gps_topic = self.get_parameter('gps_topic').value
+        self._gps_sub = None
+        if self._enable_gps_fallback and gps_topic:
+            self._gps_sub = self.create_subscription(
+                NavSatFix, gps_topic, self._gps_callback, 10)
+            self.get_logger().info(
+                f'GPS fallback 数据源: {gps_topic} '
+                f'(threshold={self._gps_drift_threshold}m, accuracy<={self._gps_min_accuracy}m)')
+
         # ---- 发布 /<ns>/initialpose（纠偏输出） ----
         # 使用相对路径让 ROS2 自动添加命名空间前缀:
         #   ns=""     → /initialpose
@@ -271,9 +317,13 @@ class RtkPoseMonitor(Node):
         self._initialpose_pub = self.create_publisher(
             PoseWithCovarianceStamped, 'initialpose', 10)
 
-        # ---- 订阅 /<ns>/initialpose（标定输入：首次收到即标定原点） ----
+        # ---- 订阅 /initialpose（标定输入：首次收到即标定原点） ----
+        # 使用绝对话题 /initialpose，因为 nav2_web_control 始终发布到全局话题：
+        #   ns=""     → nav2_web_control 发 /initialpose，此处也收 /initialpose
+        #   ns="rkbot" → nav2_web_control 仍发 /initialpose（全局），此处也收 /initialpose
+        # 纠偏输出（_initialpose_pub）仍用相对话题，确保 ns 前缀自动匹配 AMCL
         self._initialpose_sub = self.create_subscription(
-            PoseWithCovarianceStamped, 'initialpose',
+            PoseWithCovarianceStamped, '/initialpose',
             self._on_initialpose_callback, 10,
         )
 
@@ -306,12 +356,12 @@ class RtkPoseMonitor(Node):
         self._status_timer = self.create_timer(1.0, self._status_report)
 
         self.get_logger().info(
-            f'RTK 位姿监控节点已启动 | 等待首次 /initialpose 自动标定原点\n'
+            f'RTK/GPS 位姿监控节点已启动 | 等待首次 /initialpose 自动标定原点\n'
             f'  主动标定: ros2 service call /start_gps_origin_calibration std_srvs/srv/Trigger\n'
             f'  标定策略: 多帧采集 ({self._calib_sample_count}帧) → 平均值+标准差评估\n'
             f'  标定门限: position_std<{self._calib_max_std_position}m, heading_std<{self._calib_max_std_heading}°\n'
             f'  纠偏协方差: max(GPS精度, 标定误差², {self._correction_cov_base}m²下限)\n'
-            f'  纠偏触发: instant>{self._drift_threshold}m | '
+            f'  纠偏触发: RTK>{self._rtk_drift_threshold}m | GPS>{self._gps_drift_threshold}m | '
             f'amcl_cov>{self._amcl_cov_threshold} | '
             f'pred_drift>{self._predict_drift_threshold}m/{self._predict_window}s | '
             f'stationary(drift>{self._stationary_drift_threshold}m @ speed<{self._stationary_speed}m/s) | '
@@ -397,6 +447,78 @@ class RtkPoseMonitor(Node):
                 f'RTK 数据被过滤 [{self._rtk_reject_count}次]: {reason} — {detail}'
             )
 
+    def _gps_fix_valid(self, msg: NavSatFix) -> bool:
+        """检查普通 GPS fallback 数据是否可用于低精度纠偏。"""
+        if msg.status.status < 0:
+            return False
+        if math.isnan(msg.latitude) or math.isnan(msg.longitude):
+            return False
+        if not (-90.0 <= msg.latitude <= 90.0):
+            return False
+        if not (-180.0 <= msg.longitude <= 180.0):
+            return False
+        h_acc = compute_horizontal_accuracy(msg)
+        if h_acc != float('inf') and h_acc > self._gps_min_accuracy:
+            return False
+        return True
+
+    def _gps_callback(self, msg: NavSatFix):
+        """普通 GPS fallback 输入：仅在 RTK 不新鲜时参与标定和纠偏。"""
+        if not self._gps_fix_valid(msg):
+            return
+        self._latest_gps_fix = msg
+        self._last_gps_time = self.get_clock().now()
+        if self._latest_fix is None:
+            self.get_logger().info(
+                f'收到首帧有效 GPS fallback: '
+                f'lat={msg.latitude:.8f}, lon={msg.longitude:.8f}, '
+                f'h_acc={compute_horizontal_accuracy(msg):.2f}m')
+
+    def _select_active_fix(self):
+        """选择当前定位输入：RTK 新鲜则优先 RTK，否则降级到 GPS。"""
+        now = self.get_clock().now()
+        rtk_fresh = (
+            self._latest_rtk_fix is not None and
+            self._last_rtk_time is not None and
+            (now - self._last_rtk_time).nanoseconds * 1e-9 <= self._gps_stale_timeout
+        )
+        if rtk_fresh:
+            return self._latest_rtk_fix, self.SOURCE_RTK, self._last_rtk_time
+
+        gps_fresh = (
+            self._enable_gps_fallback and
+            self._latest_gps_fix is not None and
+            self._last_gps_time is not None and
+            (now - self._last_gps_time).nanoseconds * 1e-9 <= self._gps_stale_timeout
+        )
+        if gps_fresh:
+            return self._latest_gps_fix, self.SOURCE_GPS, self._last_gps_time
+        return None, None, None
+
+    def _refresh_active_fix(self) -> bool:
+        """刷新 _latest_fix，返回是否存在可用定位输入。"""
+        fix, source, stamp = self._select_active_fix()
+        if fix is None:
+            if self._latest_fix is not None:
+                self.get_logger().warn('RTK/GPS 数据均超时或无效，进入无定位输入状态')
+            self._latest_fix = None
+            self._latest_fix_source = None
+            self._last_fix_time = None
+            return False
+        source_changed = self._latest_fix_source != source
+        self._latest_fix = fix
+        self._latest_fix_source = source
+        self._last_fix_time = stamp
+        if source_changed:
+            threshold = self._threshold_for_source(source)
+            self.get_logger().info(
+                f'定位输入切换为 {source.upper()}，纠偏阈值={threshold:.1f}m')
+        return True
+
+    def _threshold_for_source(self, source: str) -> float:
+        return (self._rtk_drift_threshold
+                if source == self.SOURCE_RTK else self._gps_drift_threshold)
+
     def _rtk_callback(self, msg):
         """从 RTK 原始消息提取位置（转 NavSatFix）和航向。
 
@@ -462,7 +584,7 @@ class RtkPoseMonitor(Node):
             return
 
         # ---- 首次收到有效 RTK 数据时输出日志 ----
-        if self._latest_fix is None:
+        if self._latest_rtk_fix is None:
             self.get_logger().info(
                 f'收到首帧有效 RTK 数据: pos_type={bestnav.pos_type}, '
                 f'heading_type={heading.heading_type}, '
@@ -472,8 +594,8 @@ class RtkPoseMonitor(Node):
             self._rtk_reject_count = 0
             self._rtk_reject_reason = None
 
-        self._latest_fix = navsat
-        self._last_fix_time = self.get_clock().now()
+        self._latest_rtk_fix = navsat
+        self._last_rtk_time = self.get_clock().now()
 
         # ---- 航向提取 ----
         try:
@@ -506,18 +628,19 @@ class RtkPoseMonitor(Node):
         if self._state == self.COLLECTING:
             return   # 正在采集中，忽略重复的 /initialpose
 
-        if self._latest_fix is None:
+        if not self._refresh_active_fix():
             self.get_logger().info(
-                '收到 /initialpose 但尚未收到 RTK GPS 数据，'
-                '无法标定，等待 GPS 信号...')
+                '收到 /initialpose 但尚未收到有效 RTK/GPS 数据，'
+                '等待定位输入后再标定...')
             return
 
         # 进入多帧采集模式（在 _monitor_loop 中逐步采集）
         self._calib_samples = []
+        self._calib_source = self._latest_fix_source
         self._state = self.COLLECTING
         self.get_logger().info(
             f'收到 /initialpose，启动多帧标定采集 '
-            f'(目标 {self._calib_sample_count} 帧)')
+            f'(source={self._calib_source}, 目标 {self._calib_sample_count} 帧)')
 
     def _on_active_calibration(self, request, response):
         """服务回调：启动多帧标定采集，以当前 AMCL+GPS 数据计算地图原点。
@@ -529,17 +652,19 @@ class RtkPoseMonitor(Node):
         采用多帧采集（而非单帧），避免单帧 GPS/AMCL 随机误差导致原点标定偏差。
         可重复标定——每次服务调用都会重新采集并计算原点。
         """
-        if self._latest_fix is None:
+        if not self._refresh_active_fix():
             response.success = False
-            response.message = '无有效 RTK GPS 数据，无法标定。请确认 GPS 已收敛'
+            response.message = '无有效 RTK/GPS 数据，无法标定。请确认定位输入已收敛'
             self.get_logger().warn(f'主动标定失败: {response.message}')
             return response
 
         # 进入多帧采集模式（在 _monitor_loop 中逐步采集）
         self._calib_samples = []
+        self._calib_source = self._latest_fix_source
         self._state = self.COLLECTING
         self.get_logger().info(
-            f'主动标定：启动多帧采集 (目标 {self._calib_sample_count} 帧)')
+            f'主动标定：启动多帧采集 '
+            f'(source={self._calib_source}, 目标 {self._calib_sample_count} 帧)')
 
         response.success = True
         response.message = (
@@ -571,18 +696,51 @@ class RtkPoseMonitor(Node):
         if self._latest_fix is None:
             return False
 
+        if self._calib_source is None:
+            self._calib_source = self._latest_fix_source
+        elif self._latest_fix_source != self._calib_source:
+            self.get_logger().warn(
+                f'标定数据源从 {self._calib_source} 切换到 {self._latest_fix_source}，'
+                '清空旧采样并重新标定')
+            self._calib_samples = []
+            self._calib_source = self._latest_fix_source
+
         fix = self._latest_fix
         try:
             e, n = latlon_to_utm(self._to_utm, fix.longitude, fix.latitude)
         except Exception:
             return False
 
-        hdg = self._latest_rtk_heading if (
-            self._use_rtk_heading and self._latest_rtk_heading is not None
-        ) else 0.0
+        has_rtk_heading = (
+            self._latest_fix_source == self.SOURCE_RTK and
+            self._use_rtk_heading and
+            self._latest_rtk_heading is not None
+        )
+        hdg = self._latest_rtk_heading if has_rtk_heading else None
 
-        self._calib_samples.append((amcl_x, amcl_y, amcl_yaw, e, n, hdg))
+        self._calib_samples.append(
+            (amcl_x, amcl_y, amcl_yaw, e, n, hdg, self._latest_fix_source))
+        while len(self._calib_samples) > self._gps_calib_max_samples:
+            self._calib_samples.pop(0)
         return True
+
+    def _estimate_theta0_without_heading(self):
+        """GPS 无航向时，用机器人移动方向估计地图与 UTM 的旋转关系。"""
+        if len(self._calib_samples) < 2:
+            return None
+        ax0, ay0, ayaw0, e0, n0, _, _ = self._calib_samples[0]
+        ax1, ay1, ayaw1, e1, n1, _, _ = self._calib_samples[-1]
+        amcl_dx = ax1 - ax0
+        amcl_dy = ay1 - ay0
+        utm_dx = e1 - e0
+        utm_dy = n1 - n0
+        amcl_dist = math.hypot(amcl_dx, amcl_dy)
+        utm_dist = math.hypot(utm_dx, utm_dy)
+        if min(amcl_dist, utm_dist) < self._gps_calib_min_motion:
+            return None
+
+        # rtk_to_map 使用 R(-theta0) 把 UTM 位移转到 map，故 theta0=utm_angle-map_angle。
+        return math.atan2(utm_dy, utm_dx) - math.atan2(amcl_dy, amcl_dx)
 
     def _finalize_calibration(self) -> bool:
         """从采集的 N 帧同步数据计算地图原点 (E₀, N₀, θ₀) + 标准差评估。
@@ -602,11 +760,22 @@ class RtkPoseMonitor(Node):
             self._state = self.WAIT_ORIGIN
             return False
 
+        use_heading = any(sample[5] is not None for sample in self._calib_samples)
+        fallback_theta0 = None
+        if not use_heading:
+            fallback_theta0 = self._estimate_theta0_without_heading()
+            if fallback_theta0 is None:
+                self.get_logger().info(
+                    f'GPS fallback 标定等待足够位移: '
+                    f'{len(self._calib_samples)}帧，'
+                    f'需要机器人移动约 {self._gps_calib_min_motion:.1f}m')
+                return False
+
         # 每帧独立计算 (E₀, N₀, θ₀)
         e0_list, n0_list, h0_list = [], [], []
 
-        for ax, ay, ayaw, utm_e, utm_n, hdg_deg in self._calib_samples:
-            theta0 = math.radians(hdg_deg) - ayaw
+        for ax, ay, ayaw, utm_e, utm_n, hdg_deg, _source in self._calib_samples:
+            theta0 = math.radians(hdg_deg) - ayaw if hdg_deg is not None else fallback_theta0
             cos_t0 = math.cos(theta0)
             sin_t0 = math.sin(theta0)
             e0 = utm_e - ax * cos_t0 + ay * sin_t0
@@ -666,6 +835,7 @@ class RtkPoseMonitor(Node):
         quality = detect_rtk_quality(self._latest_fix) if self._latest_fix else 'N/A'
         hdg_str = (f'{self._latest_rtk_heading:.1f}°'
                    if self._latest_rtk_heading else 'N/A')
+        source = self._calib_source or self._latest_fix_source or 'unknown'
 
         self.get_logger().info(
             f'========== 多帧标定完成 ({n}帧) ==========\n'
@@ -675,12 +845,14 @@ class RtkPoseMonitor(Node):
             f'(±{self._calib_position_std * 2:.1f}m @ 2σ)\n'
             f'  朝向标准差: {self._calib_heading_std:.3f}° '
             f'(±{self._calib_heading_std * 2:.1f}° @ 2σ)\n'
-            f'  RTK 质量: {quality} | heading={hdg_str}\n'
+            f'  数据源: {source.upper()} | 质量: {quality} | heading={hdg_str}\n'
             f'  纠偏协方差基准: {self._correction_cov_base}m²\n'
-            f'  开始纠偏监控 (threshold={self._drift_threshold}m)\n'
+            f'  开始纠偏监控 (RTK>{self._rtk_drift_threshold}m, '
+            f'GPS>{self._gps_drift_threshold}m)\n'
             f'===================================')
 
         self._calib_samples = []
+        self._calib_source = None
         return True
 
     def _lio_odom_callback(self, msg: Odometry):
@@ -736,12 +908,13 @@ class RtkPoseMonitor(Node):
     # ==================================================================
 
     def _should_correct(self, drift: float, amcl_x: float, amcl_y: float,
-                        gps_x: float, gps_y: float) -> (bool, str):
+                        amcl_yaw: float, gps_x: float, gps_y: float,
+                        source: str) -> (bool, str):
         """多条件纠偏决策：返回 (是否纠偏, 触发原因)。
 
         五个触发维度，按优先级排序：
 
-        1. 瞬时大偏差：drift > drift_threshold → 紧急纠正
+        1. 瞬时大偏差：drift > 当前数据源阈值 → 紧急纠正
         2. AMCL 协方差膨胀：AMCL 自己都不确定位置了 → 用 GPS 注入确定性
         3. 前向预测偏差：LIO odom 推算的"应到位置"与 AMCL 实际位置偏差过大
            → AMCL 在移动过程中跟丢了（最重要的"移动中契机"）
@@ -753,39 +926,47 @@ class RtkPoseMonitor(Node):
         if elapsed < self._min_interval:
             return False, f'interval({elapsed:.1f}s<{self._min_interval}s)'
 
+        source_threshold = self._threshold_for_source(source)
+
         # ---- 1. 瞬时大偏差 ----
-        if drift > self._drift_threshold:
-            return True, f'instant_drift({drift:.2f}m>{self._drift_threshold}m)'
+        if drift > source_threshold:
+            return True, f'instant_drift({source}:{drift:.2f}m>{source_threshold}m)'
 
         # ---- 2. AMCL 协方差膨胀 ----
-        if self._amcl_cov_xy is not None and self._amcl_cov_xy > self._amcl_cov_threshold:
+        if (self._amcl_cov_xy is not None and
+                self._amcl_cov_xy > self._amcl_cov_threshold and
+                drift > source_threshold):
             return True, f'amcl_cov({self._amcl_cov_xy:.2f}>{self._amcl_cov_threshold})'
 
         # ---- 3. 前向预测偏差：LIO odom 推算位置 vs AMCL 实际位置 ----
-        pred_drift = self._compute_prediction_drift(amcl_x, amcl_y)
-        if pred_drift > self._predict_drift_threshold:
+        pred_drift = self._compute_prediction_drift(amcl_x, amcl_y, amcl_yaw)
+        pred_threshold = max(self._predict_drift_threshold, source_threshold)
+        if pred_drift > pred_threshold and drift > source_threshold:
             return True, f'pred_drift({pred_drift:.2f}m>{self._predict_drift_threshold}m, AMCL偏离预测轨迹)'
 
         # ---- 4. 静止窗口 ----
-        if self._robot_speed < self._stationary_speed and drift > self._stationary_drift_threshold:
+        stationary_threshold = max(self._stationary_drift_threshold, source_threshold)
+        if self._robot_speed < self._stationary_speed and drift > stationary_threshold:
             return True, (
                 f'stationary(speed={self._robot_speed:.2f}m/s<{self._stationary_speed}, '
-                f'drift={drift:.2f}m>{self._stationary_drift_threshold}m)')
+                f'drift={drift:.2f}m>{stationary_threshold}m)')
 
         # ---- 5. 累积位移偏差 ----
         cum_drift = self._compute_cumulative_drift()
-        if cum_drift > self._cumulative_threshold:
-            return True, f'cumulative({cum_drift:.2f}m>{self._cumulative_threshold}m over {self._cumulative_window}s)'
+        cumulative_threshold = max(self._cumulative_threshold, source_threshold)
+        if cum_drift > cumulative_threshold and drift > source_threshold:
+            return True, f'cumulative({cum_drift:.2f}m>{cumulative_threshold}m over {self._cumulative_window}s)'
 
         return False, ''
 
-    def _compute_prediction_drift(self, amcl_x: float, amcl_y: float) -> float:
+    def _compute_prediction_drift(self, amcl_x: float, amcl_y: float,
+                                  amcl_yaw: float = None) -> float:
         """前向预测偏差：比较 LIO odom 积分位移 与 AMCL 报告位移。
 
         原理：
           - LIO odom 在短时间窗口内局部精度极高（cm级，无全局漂移）
           - 以最近一次纠偏点为基准，同时记录 LIO 积分位置和 AMCL 位置
-          - LIO 积分位移 = 当前 LIO 积分位置 - 基准 LIO 积分位置
+          - LIO 积分位移 = 当前 LIO 积分位置 - 基准 LIO 积分位置，并旋转到 map 坐标系
           - AMCL 报告位移 = 当前 AMCL 位置 - 基准 AMCL 位置
           - 两者偏差大 → AMCL 在运动过程中匹配失败/跟丢了
 
@@ -807,6 +988,10 @@ class RtkPoseMonitor(Node):
             self._pred_base_lio_x = self._lio_integrated_x
             self._pred_base_lio_y = self._lio_integrated_y
             self._pred_base_time = now_s
+            if amcl_yaw is not None:
+                self._pred_lio_to_map_yaw = amcl_yaw - self._lio_heading
+            else:
+                self._pred_lio_to_map_yaw = 0.0
             return 0.0
 
         dt = now_s - self._pred_base_time
@@ -817,12 +1002,21 @@ class RtkPoseMonitor(Node):
         lio_dx = self._lio_integrated_x - self._pred_base_lio_x
         lio_dy = self._lio_integrated_y - self._pred_base_lio_y
 
+        # 将 LIO odom 位移旋转到 map 坐标系，再与 AMCL map 位移比较。
+        # 若 odom/map 轴本来一致，该角度为 0；若初始位姿带 yaw，这一步避免误判。
+        if self._pred_lio_to_map_yaw is None:
+            self._pred_lio_to_map_yaw = 0.0
+        cos_t = math.cos(self._pred_lio_to_map_yaw)
+        sin_t = math.sin(self._pred_lio_to_map_yaw)
+        lio_map_dx = lio_dx * cos_t - lio_dy * sin_t
+        lio_map_dy = lio_dx * sin_t + lio_dy * cos_t
+
         # AMCL 报告位移（地图坐标系下 AMCL 认为机器人移动了多少）
         amcl_dx = amcl_x - self._pred_base_amcl_x
         amcl_dy = amcl_y - self._pred_base_amcl_y
 
         # 位移向量差异（m），LIO 和 AMCL 报告的移动量应该一致
-        drift = math.sqrt((lio_dx - amcl_dx) ** 2 + (lio_dy - amcl_dy) ** 2)
+        drift = math.sqrt((lio_map_dx - amcl_dx) ** 2 + (lio_map_dy - amcl_dy) ** 2)
 
         # 同时检查绝对偏差（AMCL 可能停在原地，而机器人实际在移动）
         abs_drift = math.sqrt((amcl_x - self._pred_base_amcl_x) ** 2
@@ -836,7 +1030,8 @@ class RtkPoseMonitor(Node):
 
         return drift
 
-    def _update_prediction_baseline(self, amcl_x: float, amcl_y: float):
+    def _update_prediction_baseline(self, amcl_x: float, amcl_y: float,
+                                    amcl_yaw: float = None):
         """纠偏后重置预测基准点（同时记录 LIO 积分位置和 AMCL 位置）。
 
         AMCL 已被 GPS 纠正到正确位置，从这里重新开始追踪位移。
@@ -847,6 +1042,8 @@ class RtkPoseMonitor(Node):
         self._pred_base_lio_x = self._lio_integrated_x
         self._pred_base_lio_y = self._lio_integrated_y
         self._pred_base_time = now_s
+        if amcl_yaw is not None and self._lio_heading is not None:
+            self._pred_lio_to_map_yaw = amcl_yaw - self._lio_heading
         self._pred_history.clear()
 
     def _compute_cumulative_drift(self) -> float:
@@ -909,9 +1106,9 @@ class RtkPoseMonitor(Node):
             amcl_y = tf_msg.transform.translation.y
             amcl_yaw = _quat_to_yaw(tf_msg.transform.rotation)
 
-            # GPS 有效性检查
-            if self._latest_fix is None:
-                return  # 等 GPS
+            # 定位输入有效性检查：RTK 优先，RTK 不可用则 GPS fallback
+            if not self._refresh_active_fix():
+                return
 
             # 采集一帧
             if self._collect_calibration_sample(amcl_x, amcl_y, amcl_yaw):
@@ -920,23 +1117,15 @@ class RtkPoseMonitor(Node):
                     quality = detect_rtk_quality(self._latest_fix)
                     self.get_logger().info(
                         f'标定采集中... {n}/{self._calib_sample_count} '
-                        f'(AMCL=({amcl_x:.1f},{amcl_y:.1f}) Q={quality})')
+                        f'(source={self._latest_fix_source} '
+                        f'AMCL=({amcl_x:.1f},{amcl_y:.1f}) Q={quality})')
 
                 if n >= self._calib_sample_count:
                     self._finalize_calibration()
 
             return  # 采集中不做纠偏
 
-        # ---- RTK 数据超时检测：超过 N 秒无新数据 → 视为室内/无信号 ----
-        now = self.get_clock().now()
-        stale_duration = (now - self._last_fix_time).nanoseconds * 1e-9
-        if self._latest_fix is not None and stale_duration > self._gps_stale_timeout:
-            self._latest_fix = None
-            self.get_logger().warn(
-                f'RTK 数据超时 {stale_duration:.1f}s > {self._gps_stale_timeout}s，'
-                f'视为室内/无信号，进入 GPS_LOST')
-
-        gps_valid = self._latest_fix is not None
+        gps_valid = self._refresh_active_fix()
 
         # ---- 状态机转换 ----
         if self._state == self.MONITORING:
@@ -946,7 +1135,7 @@ class RtkPoseMonitor(Node):
                     self._state = self.GPS_LOST
                     self._gps_recover_count = 0
                     self.get_logger().warn(
-                        f'GPS 连续 {self._gps_fail_count} 帧无效，'
+                        f'RTK/GPS 连续 {self._gps_fail_count} 帧无效，'
                         f'切换到 GPS_LOST 状态，停止纠偏')
             else:
                 self._gps_fail_count = 0
@@ -957,7 +1146,7 @@ class RtkPoseMonitor(Node):
                     self._state = self.MONITORING
                     self._gps_fail_count = 0
                     self.get_logger().info(
-                        f'GPS 恢复（连续 {self._gps_recover_count} 帧有效），'
+                        f'RTK/GPS 恢复（连续 {self._gps_recover_count} 帧有效），'
                         f'回到 MONITORING 状态')
             else:
                 self._gps_recover_count = 0
@@ -1003,40 +1192,45 @@ class RtkPoseMonitor(Node):
             self.get_logger().warn('GPS map 坐标包含 NaN/Inf，跳过')
             return
 
-        # ---- GPS 位置跳变检测 ----
+        source = self._latest_fix_source or self.SOURCE_GPS
+
+        # ---- GPS/RTK 位置跳变检测 ----
         # 比较当前 GPS 地图坐标与上一帧有效坐标的变化速度。
         # 若超过物理极限（默认 5m/s），视为 GPS 抖动，跳过本帧纠偏。
         now_monitor = self.get_clock().now()
-        if self._last_gps_map_xy is not None and self._last_gps_map_time is not None:
-            dx = gps_x - self._last_gps_map_xy[0]
-            dy = gps_y - self._last_gps_map_xy[1]
-            dt = (now_monitor - self._last_gps_map_time).nanoseconds * 1e-9
+        last_xy = self._last_map_xy_by_source.get(source)
+        last_time = self._last_map_time_by_source.get(source)
+        if last_xy is not None and last_time is not None:
+            dx = gps_x - last_xy[0]
+            dy = gps_y - last_xy[1]
+            dt = (now_monitor - last_time).nanoseconds * 1e-9
             if dt > 0.1:  # 时间间隔足够才做速度判断
                 velocity = math.sqrt(dx * dx + dy * dy) / dt
                 if velocity > self._gps_jump_threshold:
                     self._gps_jump_count += 1
                     quality = detect_rtk_quality(fix)
                     self.get_logger().warn(
-                        f'GPS 跳变 #{self._gps_jump_count}: '
+                        f'{source.upper()} 跳变 #{self._gps_jump_count}: '
                         f'vel={velocity:.1f}m/s > {self._gps_jump_threshold}m/s | '
                         f'GPS=({gps_x:.1f},{gps_y:.1f}) '
-                        f'prev=({self._last_gps_map_xy[0]:.1f},{self._last_gps_map_xy[1]:.1f}) '
+                        f'prev=({last_xy[0]:.1f},{last_xy[1]:.1f}) '
                         f'dt={dt:.1f}s Q={quality} | 跳过纠偏')
-                    return  # 不纠偏，也不更新 _last_gps_map_xy
+                    return  # 不纠偏，也不更新当前数据源的上一帧有效位置
 
-        # 通过跳变检测 → 记录为有效 GPS 位置
-        self._last_gps_map_xy = (gps_x, gps_y)
-        self._last_gps_map_time = now_monitor
+        # 通过跳变检测 → 按数据源记录有效位置，避免 RTK/GPS 切换时互相误判
+        self._last_map_xy_by_source[source] = (gps_x, gps_y)
+        self._last_map_time_by_source[source] = now_monitor
 
         # ---- 偏差计算 ----
         drift = math.sqrt((gps_x - amcl_x) ** 2 + (gps_y - amcl_y) ** 2)
 
         # ---- 多条件纠偏决策 ----
-        should_correct, reason = self._should_correct(drift, amcl_x, amcl_y, gps_x, gps_y)
+        should_correct, reason = self._should_correct(
+            drift, amcl_x, amcl_y, amcl_yaw, gps_x, gps_y, source)
         if not should_correct:
             # 非纠偏帧也更新累积窗口（用于累积偏差检测）
             self._update_trajectory_history(gps_x, gps_y, amcl_x, amcl_y)
-            self.get_logger().debug(f'drift={drift:.3f}m, speed={self._robot_speed:.2f}m/s, '
+            self.get_logger().debug(f'source={source}, drift={drift:.3f}m, speed={self._robot_speed:.2f}m/s, '
                                     f'amcl_cov={self._amcl_cov_xy}, cum_drift={self._compute_cumulative_drift():.2f}m, '
                                     f'skip({reason})')
             return
@@ -1046,20 +1240,25 @@ class RtkPoseMonitor(Node):
         quality = detect_rtk_quality(fix)
 
         # 纠偏协方差策略（三级保护，避免过度信任 GPS 推算位置）：
-        #   1. GPS 自身精度协方差（RKT_FIX=0.01, RTK_FLOAT=0.1, DGPS=1.0）
+        #   1. GPS 自身精度协方差（RTK_FIX=0.01, RTK_FLOAT=0.1, DGPS=1.0）
         #   2. 标定误差方差（calib_position_std²）
         #   3. 下限保护（correction_cov_base=0.25m²）
         # 取三者最大值 → AMCL 粒子云有一定散布空间，可通过 scan matching 自我精化
-        gps_cov = covariance_for_quality(
-            quality,
-            cov_rtk_fix=self.get_parameter('cov_rtk_fix').value,
-            cov_rtk_float=self.get_parameter('cov_rtk_float').value,
-            cov_dgps=self.get_parameter('cov_dgps').value)
+        if source == self.SOURCE_GPS:
+            gps_cov = self._cov_gps
+        else:
+            gps_cov = covariance_for_quality(
+                quality,
+                cov_rtk_fix=self.get_parameter('cov_rtk_fix').value,
+                cov_rtk_float=self.get_parameter('cov_rtk_float').value,
+                cov_dgps=self.get_parameter('cov_dgps').value,
+                cov_gps=self._cov_gps)
         calib_var = self._calib_position_std ** 2
         pos_cov = max(gps_cov, calib_var, self._correction_cov_base)
 
         # 航向处理
-        if self._use_rtk_heading and self._latest_rtk_heading is not None:
+        if (source == self.SOURCE_RTK and
+                self._use_rtk_heading and self._latest_rtk_heading is not None):
             map_yaw = rtk_heading_to_map_yaw(
                 self._latest_rtk_heading, self._theta0_rad)
             yaw_cov = pos_cov  # 有航向，小协方差
@@ -1074,10 +1273,10 @@ class RtkPoseMonitor(Node):
 
         # 纠偏后重置累积窗口 + 预测基准（以 GPS 纠偏后的位置为新起点）
         self._traj_history.clear()
-        self._update_prediction_baseline(gps_x, gps_y)
+        self._update_prediction_baseline(gps_x, gps_y, map_yaw)
 
         self.get_logger().info(
-            f'纠偏 [{reason}]: drift={drift:.3f}m | '
+            f'纠偏 [{reason}]: source={source} drift={drift:.3f}m | '
             f'GPS map=({gps_x:.2f},{gps_y:.2f}) AMCL=({amcl_x:.2f},{amcl_y:.2f}) | '
             f'speed={self._robot_speed:.2f}m/s cov={pos_cov} '
             f'yaw_src={hdg_src} quality={quality}')
@@ -1117,7 +1316,7 @@ class RtkPoseMonitor(Node):
 
         if self._latest_fix is None:
             self.get_logger().info(
-                f'[状态] GPS=无信号 | AMCL=-- | state={self._state} '
+                f'[状态] 定位输入=无信号 | AMCL=-- | state={self._state} '
                 f'origin={origin_status} indoor={self._state == self.GPS_LOST}')
             return
 
@@ -1147,7 +1346,7 @@ class RtkPoseMonitor(Node):
         drift = math.sqrt((gps_x - amcl_x) ** 2 + (gps_y - amcl_y) ** 2) if not math.isnan(amcl_x) else float('nan')
 
         self.get_logger().info(
-            f'[状态] GPS=({gps_x:.2f},{gps_y:.2f}) | '
+            f'[状态] source={self._latest_fix_source} map=({gps_x:.2f},{gps_y:.2f}) | '
             f'AMCL=({amcl_x:.2f},{amcl_y:.2f}) | '
             f'drift={drift:.2f}m | '
             f'Q={quality} | state={self._state} | origin={origin_status}'

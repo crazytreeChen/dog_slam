@@ -10,7 +10,7 @@
 
 set -e
 
-export ROS_DOMAIN_ID=24
+export ROS_DOMAIN_ID=27
 
 WORKSPACE_DIR="/home/ztl/cql"
 GPS_FUSION_DIR="$WORKSPACE_DIR/gps_fusion"

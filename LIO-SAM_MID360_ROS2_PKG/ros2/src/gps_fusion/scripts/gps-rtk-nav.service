@@ -12,9 +12,7 @@ User=ztl
 Group=ztl
 WorkingDirectory=/home/ztl/cql/gps_fusion
 
-Environment=ROS_DOMAIN_ID=0
-Environment=HOME=/home/ztl
-Environment=RCUTILS_COLORIZED_OUTPUT=1
+PassEnvironment=ROS_DOMAIN_ID RMW_IMPLEMENTATION HOME
 
 ExecStartPre=/bin/sleep 5
 ExecStart=/home/ztl/cql/gps_fusion/scripts/gps_rtk_nav_service.sh

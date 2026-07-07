@@ -248,3 +248,6 @@ nul
 
 # AtomCode local-scope configs (machine-specific)
 .atomcode/*
+
+# AtomCode local-scope configs (machine-specific)
+.atomcode/local/
