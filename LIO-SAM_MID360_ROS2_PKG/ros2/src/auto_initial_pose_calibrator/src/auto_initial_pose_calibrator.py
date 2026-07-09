@@ -504,7 +504,7 @@ class AutoInitialPoseCalibrator(Node):
         self.initialpose_sub = self.create_subscription(PoseWithCovarianceStamped, 'initialpose', self._initialpose_cb, 10)
 
         # ────── 发布器 ──────
-        self.initialpose_pub = self.create_publisher(PoseWithCovarianceStamped, 'initialpose', 10)
+        self.initialpose_pub = self.create_publisher(PoseWithCovarianceStamped, '/initialpose', 10)
         self.cmd_vel_pub = self.create_publisher(Twist, self.cmd_vel_topic, 10)
         
         # 调试/可视化发布器
