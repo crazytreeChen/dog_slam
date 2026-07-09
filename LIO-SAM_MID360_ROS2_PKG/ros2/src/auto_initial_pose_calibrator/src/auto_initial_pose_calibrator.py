@@ -184,8 +184,9 @@ class AutoInitialPoseCalibrator(Node):
         self.declare_parameter('motion_angular_threshold', 0.05)         # 角速度阈值 (rad/s)
         self.declare_parameter('motion_settle_time', 1.0)                # 停止后等待稳定时间 (秒)
         self.declare_parameter('motion_stop_cooldown', 10.0)             # 停止事件触发后冷却时间 (秒)
-        # odom→map 推算偏差触发阈值 (静止中 odom 累积漂移超过此值触发重匹配)
-        self.declare_parameter('passive_odom_deviation_threshold', 0.3)  # (m)
+        # odom→map 推算偏差分层阈值
+        self.declare_parameter('passive_odom_fusion_trigger', 0.5)       # odom fusion 触发阈值 (m)
+        self.declare_parameter('passive_odom_matching_trigger', 2.0)     # 完整扫描匹配触发阈值 (m)
         # AMCL 交叉验证偏差阈值 (计算结果与 AMCL 偏差 > 此值才更新位姿)
         self.declare_parameter('passive_amcl_deviation_trigger', 1.0)    # (m)
 
@@ -367,7 +368,8 @@ class AutoInitialPoseCalibrator(Node):
         self._motion_angular_threshold = self.get_parameter('motion_angular_threshold').value
         self._motion_settle_time = self.get_parameter('motion_settle_time').value
         self._motion_stop_cooldown = self.get_parameter('motion_stop_cooldown').value
-        self.passive_odom_deviation_threshold = self.get_parameter('passive_odom_deviation_threshold').value
+        self.passive_odom_fusion_trigger = self.get_parameter('passive_odom_fusion_trigger').value
+        self.passive_odom_matching_trigger = self.get_parameter('passive_odom_matching_trigger').value
         self.passive_amcl_deviation_trigger = self.get_parameter('passive_amcl_deviation_trigger').value
 
         # ─── 距离场全局匹配 ───
@@ -436,6 +438,7 @@ class AutoInitialPoseCalibrator(Node):
         self.indoor_phase = IndoorPhase.IDLE
         self.boot_start_time = None
         self.active_retry_count = 0
+        self._boot_retry_count = 0      # 连续 BOOT_DELAY 重试计数 (防止死循环)
         self.candidates = []            # [(normalized_prob, x, y, yaw), ...]
         
         # 子图合并缓冲区（不依赖 odom，只用扫描消息 + 时间戳）
@@ -827,6 +830,7 @@ class AutoInitialPoseCalibrator(Node):
         self.submap_ready = False
         self.candidates.clear()
         self.active_retry_count = 0
+        self._boot_retry_count = 0
 
     # ================================================================
     #  快速模式：跳过旋转和运动探索，单帧采集+全局匹配+发布
@@ -1296,6 +1300,16 @@ class AutoInitialPoseCalibrator(Node):
         elif self.indoor_phase == IndoorPhase.BOOT_DELAY:
             # 静止 2 秒确保传感器和驱动队列填充完毕
             if (self.get_clock().now() - self.boot_start_time).nanoseconds > 2.0 * 1e9:
+                # ── 防止死循环：连续启动重试超过上限则放弃 ──
+                MAX_BOOT_RETRY = 10
+                self._boot_retry_count += 1
+                if self._boot_retry_count > MAX_BOOT_RETRY:
+                    self._logger.error(
+                        f'[状态机] 连续启动 {MAX_BOOT_RETRY} 次均失败（旋转受阻/匹配无数据），'
+                        f'放弃本次校准。请确认周围无障碍物遮挡 LiDAR。')
+                    self._reset_indoor()
+                    return
+
                 self._logger.info('[状态机] 静止就绪。')
                 if self.quick_mode:
                     self._enter_quick_mode_collection()
@@ -1841,7 +1855,10 @@ class AutoInitialPoseCalibrator(Node):
                 return
 
         # ── odom→map 推算偏差检测（独立于运动状态）──
-        # 只要有 last_calibrated_pose 和 odom 就检查，不依赖运动/静止状态
+        # 分层策略：
+        #   < fusion_trigger          → 跳过，正常范围内
+        #   fusion_trigger ~ matching_trigger → 走轻量 odom fusion 验证
+        #   >= matching_trigger       → 触发完整扫描匹配 PASSIVE_MATCHING
         if self.last_calibrated_pose is not None and self.current_odom is not None \
                 and self.passive_last_odom is not None:
             last_ox, last_oy, last_oyaw = self.passive_last_odom
@@ -1849,16 +1866,21 @@ class AutoInitialPoseCalibrator(Node):
             dx_o = curr_pos.x - last_ox
             dy_o = curr_pos.y - last_oy
             odom_displacement = math.sqrt(dx_o**2 + dy_o**2)
-            if odom_displacement > self.passive_odom_deviation_threshold:
+            if odom_displacement >= self.passive_odom_matching_trigger:
                 self._logger.warn(
                     f'[被动定时] ⚠ odom累计位移 {odom_displacement:.2f}m '
-                    f'> {self.passive_odom_deviation_threshold:.2f}m，触发重匹配')
+                    f'>= {self.passive_odom_matching_trigger:.2f}m，触发完整扫描匹配')
                 self.indoor_phase = IndoorPhase.PASSIVE_MATCHING
                 return
+            elif odom_displacement >= self.passive_odom_fusion_trigger:
+                self._logger.debug(
+                    f'[被动定时] odom位移 {odom_displacement:.2f}m '
+                    f'>= {self.passive_odom_fusion_trigger:.2f}m，尝试 odom fusion')
+                # 不 return，继续走到下面的 try_odom_fusion_verify()
             else:
                 self._logger.debug(
                     f'[被动定时] odom位移 {odom_displacement:.3f}m '
-                    f'<= {self.passive_odom_deviation_threshold:.2f}m')
+                    f'< {self.passive_odom_fusion_trigger:.2f}m，正常')
         else:
             self._logger.debug(
                 f'[被动定时] drift检查跳过: calibrated={self.last_calibrated_pose is not None} '
@@ -1881,8 +1903,10 @@ class AutoInitialPoseCalibrator(Node):
                 return
 
             # ── 核心逻辑: odom→map 推算偏差检测 ──
-            # 用 last_calibrated_pose + LIO odom 位移推算当前位置，
-            # 与 last_calibrated_pose 比较偏差，超阈值触发重匹配
+            # 分层策略（与第一重检查一致）：
+            #   < fusion_trigger          → 正常，跳过
+            #   fusion_trigger ~ matching_trigger → 走 odom fusion
+            #   >= matching_trigger       → 完整扫描匹配
             odom_drift = None
             if self.last_calibrated_pose is not None and self.current_odom is not None:
                 if self.passive_last_odom is not None:
@@ -1900,17 +1924,22 @@ class AutoInitialPoseCalibrator(Node):
                     # 偏差 = 推算位置与上次校准位置的距离
                     odom_drift = math.sqrt((pred_x - px)**2 + (pred_y - py)**2)
 
-                    if odom_drift > self.passive_odom_deviation_threshold:
+                    if odom_drift >= self.passive_odom_matching_trigger:
                         self._passive_last_trigger_time = now_sec
                         self._logger.warn(
                             f'[被动定时] ⚠ odom→map 推算偏差 {odom_drift:.2f}m '
-                            f'> {self.passive_odom_deviation_threshold:.2f}m，触发重匹配')
+                            f'>= {self.passive_odom_matching_trigger:.2f}m，触发完整扫描匹配')
                         self.indoor_phase = IndoorPhase.PASSIVE_MATCHING
                         return
+                    elif odom_drift >= self.passive_odom_fusion_trigger:
+                        self._logger.debug(
+                            f'[被动定时] odom→map 推算偏差 {odom_drift:.2f}m '
+                            f'>= {self.passive_odom_fusion_trigger:.2f}m，尝试 odom fusion')
+                        # 不 return，继续走到 try_odom_fusion_verify()
                     else:
                         self._logger.debug(
                             f'[被动定时] odom→map 推算偏差 {odom_drift:.3f}m '
-                            f'<= {self.passive_odom_deviation_threshold:.2f}m，正常')
+                            f'< {self.passive_odom_fusion_trigger:.2f}m，正常')
 
             # ── 偏差正常: 尝试里程计融合轻量验证 ──
             ok, pred_pose, reason = self._try_odom_fusion_verify()
@@ -2245,9 +2274,14 @@ class AutoInitialPoseCalibrator(Node):
                     self.passive_odom_accum_dist = 0.0  # 重置累计位移
                 set_reference = True
             elif confidence >= th_pub:
-                # 中置信度: 更新 map 位姿但不更新 odom 基准 (保留主动校准的 odom 基准)
-                # 这样后续 odom fusion 可以用被动匹配的最新冠位姿做 wall coverage 验证
+                # 中置信度: 更新 map 位姿，同时更新 odom 基准
+                #（避免 passive_last_odom 长期不更新导致 odom fusion 被拦截）
                 self.last_calibrated_pose = (pose_to_publish[0], pose_to_publish[1], pose_to_publish[2])
+                if self.current_odom is not None:
+                    curr_pos = self.current_odom.pose.pose.position
+                    curr_yaw = self._quat_to_yaw(self.current_odom.pose.pose.orientation)
+                    self.passive_last_odom = (curr_pos.x, curr_pos.y, curr_yaw)
+                    self.passive_odom_accum_dist = 0.0  # 重置累计位移
                 set_reference = False
             else:
                 set_reference = False
@@ -3129,6 +3163,7 @@ class AutoInitialPoseCalibrator(Node):
         self.submap_ready = False
         self.candidates.clear()
         self.active_retry_count = 0
+        self._boot_retry_count = 0
         
         resp.success = True
         resp.message = '自动定位流程已成功触发启动，请保持机器人狗静止 2 秒。'
@@ -3220,6 +3255,7 @@ class AutoInitialPoseCalibrator(Node):
         self.submap_ready = False
         self.candidates.clear()
         self.active_retry_count = 0
+        self._boot_retry_count = 0
         self.cmd_vel_pub.publish(Twist())
         self._logger.info('[重置] 室内自动位姿状态机已被重置并置为空闲。')
 
@@ -3362,6 +3398,7 @@ class AutoInitialPoseCalibrator(Node):
             # 切换双模板匹配参数到对应模式
             if current_mode in ('INDOOR', 'OUTDOOR'):
                 self._apply_dt_params(current_mode)
+            else:
                 self._logger.warn("[模式自动识别] 室内与室外模式均已关闭！")
 
 

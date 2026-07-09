@@ -1,23 +1,18 @@
 #!/usr/bin/env python3
 """
-RTK 位姿监控与自动纠偏 launch 文件
+RTK/GPS 导航纠偏 launch 文件
 
-启动 rtk_pose_monitor 节点：
-  - 首次收到外部 /initialpose → 自动建立 GPS/RTK 到 map 的位置关系
-  - RTK 双天线可用时使用 RTK 位置+航向，1m 级阈值纠偏
-  - RTK 不可用时降级为 GPS 位置监控，只纠位置不纠 yaw，5-10m 阈值纠偏
-  - 无需预标定文件，无需单独的 gps_preprocessor
-
-参数配置：config/rtk_monitor.yaml 为单一真相源
-运行时覆盖：--ros-args -p rtk_drift_threshold:=1.0 -p gps_drift_threshold:=8.0
+提供两种纠偏模式（correction_mode 参数切换，默认 continuous）：
+  - continuous : rtk_continuous_injector（推荐）
+        用首次 /initialpose 锚定 map 位姿，RTK 为绝对权威，LIO 仅辅助，
+        连续平滑注入 /initialpose，丝滑降级，不读 AMCL、不依赖建图原点文件。
+  - threshold  : rtk_pose_monitor（旧回退）
+        阈值跳变纠偏，深度耦合 AMCL，仅作回退保留。
 
 用法:
     # 导航时启动（与 nav2_dog_slam lio_nav2_unified.launch.py 并行）
     ros2 launch gps_fusion rtk_nav_bridge.launch.py ns:=rkbot
-
-    # 运行时覆盖 YAML 参数
-    ros2 launch gps_fusion rtk_nav_bridge.launch.py \\
-        ns:=rkbot --ros-args -p rtk_drift_threshold:=1.0 -p gps_drift_threshold:=8.0
+    ros2 launch gps_fusion rtk_nav_bridge.launch.py ns:=rkbot correction_mode:=threshold
 """
 
 import os
@@ -33,6 +28,7 @@ from launch_ros.actions import Node
 def generate_launch_description():
     pkg_dir = get_package_share_directory('gps_fusion')
     monitor_config = os.path.join(pkg_dir, 'config', 'rtk_monitor.yaml')
+    injector_config = os.path.join(pkg_dir, 'config', 'rtk_continuous_injector.yaml')
 
     # ======== 启动参数 ========
     ns = LaunchConfiguration('ns', default='')
@@ -40,14 +36,13 @@ def generate_launch_description():
     gps_topic = LaunchConfiguration('gps_topic', default='/fix')
     use_sim_time = LaunchConfiguration('use_sim_time', default='false')
     utm_zone = LaunchConfiguration('utm_zone', default='50')
-    # 以下参数由 rtk_monitor.yaml 统一管理，此处仅声明供 CLI --help 展示
-    # 运行时通过 --ros-args -p <key>:=<value> 覆盖
+    correction_mode = LaunchConfiguration('correction_mode', default='continuous')
     web_port = LaunchConfiguration('web_port', default='8084')
     ws_trajectory_port = LaunchConfiguration('ws_trajectory_port', default='8765')
     enable_web = LaunchConfiguration('enable_web', default='true')
     lio_odom_topic = LaunchConfiguration('lio_odom_topic', default='/Odometry')
 
-    # 命名空间感知的 frame 名（参照 gps_fusion.launch.py 模式）
+    # 命名空间感知的 frame 名
     ns_map_frame = PythonExpression(
         ["'map' if '", ns, "' == '' else str('", ns, "/map')"])
     ns_base_footprint_frame = PythonExpression(
@@ -55,23 +50,45 @@ def generate_launch_description():
     ns_odom_frame = PythonExpression(
         ["'odom' if '", ns, "' == '' else str('", ns, "/odom')"])
 
-    # ======== RTK 位姿监控节点（位置+航向均从 RTK 直接提取） ========
+    # ======== 连续注入节点（continuous 模式，默认） ========
+    rtk_continuous_injector_node = Node(
+        package='gps_fusion',
+        executable='rtk_continuous_injector.py',
+        name='rtk_continuous_injector',
+        namespace=ns,
+        output='screen',
+        condition=IfCondition(
+            PythonExpression(["'", correction_mode, "' == 'continuous'"])),
+        parameters=[
+            injector_config,
+            {
+                'use_sim_time': use_sim_time,
+                'utm_zone': utm_zone,
+                'rtk_topic': rtk_topic,
+                'gps_topic': gps_topic,
+                'lio_odom_topic': lio_odom_topic,
+                'map_frame': ns_map_frame,
+                'base_frame': ns_base_footprint_frame,
+            },
+        ],
+    )
+
+    # ======== 旧阈值纠偏节点（threshold 模式回退） ========
     rtk_pose_monitor_node = Node(
         package='gps_fusion',
         executable='rtk_pose_monitor.py',
         name='rtk_pose_monitor',
         output='screen',
+        condition=IfCondition(
+            PythonExpression(["'", correction_mode, "' == 'threshold'"])),
         parameters=[
             monitor_config,
             {
-                # 仅传递 YAML 中不存在的动态/运行时参数
-                # （rtk_drift_threshold / gps_drift_threshold / min_correction_interval / monitor_rate / use_rtk_heading
-                #  均在 rtk_monitor.yaml 中定义，此处不覆盖）
                 'use_sim_time': use_sim_time,
                 'utm_zone': utm_zone,
                 'rtk_topic': rtk_topic,
                 'gps_topic': gps_topic,
-                'lio_odom_topic': lio_odom_topic,  # LIO 里程计（轨迹推算用）
+                'lio_odom_topic': lio_odom_topic,
                 'ns': ns,
                 'map_frame': ns_map_frame,
                 'base_frame': ns_base_footprint_frame,
@@ -80,7 +97,6 @@ def generate_launch_description():
     )
 
     # ======== Web 可视化（轨迹推送 + 静态页面） ========
-
     trajectory_broadcaster_node = Node(
         package='gps_fusion',
         executable='trajectory_server.py',
@@ -138,13 +154,13 @@ def generate_launch_description():
         DeclareLaunchArgument('rtk_topic', default_value='/rtk_pvh',
                               description='RTK原始数据话题（位置+航向来源）'),
         DeclareLaunchArgument('gps_topic', default_value='/fix',
-                              description='普通GPS fallback话题（RTK不可用时仅用于位置纠偏）'),
+                              description='普通GPS fallback话题'),
         DeclareLaunchArgument('use_sim_time', default_value='false',
                               description='使用仿真时间'),
         DeclareLaunchArgument('utm_zone', default_value='50',
                               description='UTM区域编号'),
-        # rtk_drift_threshold / gps_drift_threshold / min_correction_interval / monitor_rate / use_rtk_heading
-        # 由 rtk_monitor.yaml 统一管理，通过 --ros-args -p <key>:=<value> 覆盖
+        DeclareLaunchArgument('correction_mode', default_value='continuous',
+                              description='纠偏模式: continuous(默认) | threshold(旧回退)'),
         DeclareLaunchArgument('web_port', default_value='8084',
                               description='Web静态服务端口'),
         DeclareLaunchArgument('ws_trajectory_port', default_value='8765',
@@ -152,8 +168,9 @@ def generate_launch_description():
         DeclareLaunchArgument('enable_web', default_value='true',
                               description='启用Web轨迹可视化'),
         DeclareLaunchArgument('lio_odom_topic', default_value='/Odometry',
-                              description='LIO里程计话题（轨迹采集用）'),
+                              description='LIO里程计话题（轨迹采集/死推算用）'),
 
+        rtk_continuous_injector_node,
         rtk_pose_monitor_node,
         delayed_web,
     ])

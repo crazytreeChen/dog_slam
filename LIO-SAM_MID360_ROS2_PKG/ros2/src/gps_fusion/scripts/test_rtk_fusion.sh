@@ -10,7 +10,7 @@
 #   # Phase 1: 单元测试（macOS/Ubuntu 均可）
 #   cd ros2/src/gps_fusion && ./scripts/test_rtk_fusion.sh unit
 #
-#   # Phase 2a: 建图记录室内模拟
+#   # Phase 2a: 写入地图原点（室内模拟，生成器已移除）
 #   ./scripts/test_rtk_fusion.sh sim-record
 #
 #   # Phase 2b: 导航纠偏室内模拟（需 Phase 2a 先生成 YAML）
@@ -119,7 +119,7 @@ phase_unit() {
     log_step "Phase 1: Python 单元测试（纯函数，不依赖 ROS2）"
 
     cd "$PKG_DIR"
-    if python3 -m pytest tests/test_gps_transform.py -v 2>&1; then
+    if python3 -m pytest tests/test_gps_transform.py tests/test_rtk_continuous_injector.py -v 2>&1; then
         log_pass "所有单元测试通过"
     else
         log_fail "单元测试失败"
@@ -135,44 +135,21 @@ phase_sim_record() {
     mkdir -p "$TEST_OUTPUT_DIR"
     echo "  输出文件: $test_yaml"
 
-    # 1. 启动 rtk_simulator（RTK_FIX 模式，静止在圆心）
-    log_step "启动 rtk_simulator (pos_type=50, 静止)"
-    ros2 run gps_fusion rtk_simulator.py --ros-args \
-        -p rate:=5.0 -p pos_type:=50 -p speed:=0.0 -p topic:=/test/rtk_pvh \
-        > "$TEST_OUTPUT_DIR/rtk_sim.log" 2>&1 &
-    PIDS+=($!)
-    wait_or_timeout 2
+    # 建图生成器 (map_origin_recorder / calibrate_map_origin) 已移除，
+    # 室内模拟直接写入一份合法的 map_gps_origin.yaml 供 threshold 纠偏模式读取。
+    cat > "$test_yaml" <<'EOF'
+map_origin:
+  latitude: 24.61000000
+  longitude: 118.03000000
+  altitude: 42.52
+  heading_deg: 0.0
+  utm_easting: 604684.19
+  utm_northing: 2722418.28
+  utm_zone: 50
+note: "室内模拟预置原点 (生成器已移除，手动维护)"
+EOF
 
-    # 2. 启动 gps_preprocessor + map_origin_recorder
-    log_step "启动 map_origin_record.launch.py"
-    ros2 launch gps_fusion map_origin_record.launch.py \
-        rtk_topic:=/test/rtk_pvh \
-        sample_count:=5 \
-        min_accuracy:=10.0 \
-        rtk_min_accuracy:=10.0 \
-        output_file:="$test_yaml" \
-        > "$TEST_OUTPUT_DIR/record.log" 2>&1 &
-    PIDS+=($!)
-    wait_or_timeout 2
-
-    # 验证话题
-    assert_topic_active "/fix_filtered" 5 "GPS 预处理器输出 /fix_filtered"
-
-    # 3. 等待自动记录完成（5帧采样 + buffering）
-    echo -e "  ... 等待自动记录（约 15 秒）..."
-    wait_or_timeout 15
-
-    # 4. 手动触发也会记录（测试 service）
-    log_step "手动触发 /gps_origin/record service"
-    if ros2 service call /gps_origin/record std_srvs/srv/Trigger 2>/dev/null; then
-        log_pass "手动记录 service 调用成功"
-    else
-        log_fail "手动记录 service 调用失败"
-    fi
-
-    wait_or_timeout 2
-
-    # 5. 验证 YAML 文件
+    # 验证 YAML 文件
     log_step "验证 map_gps_origin.yaml"
     assert_file_exists "$test_yaml" "map_gps_origin.yaml 已生成"
 
@@ -201,14 +178,7 @@ phase_sim_record() {
                 log_fail "航向 heading_deg=$hdg 超出 [0, 360)"
             fi
         fi
-
-        local source=$(grep 'source:' "$test_yaml" | head -1)
-        if echo "$source" | grep -q 'manual\|auto'; then
-            log_pass "记录来源: $source"
-        fi
     fi
-
-    cleanup_procs
 }
 
 # ======== Phase 2b: 导航纠偏室内模拟 ========
@@ -350,13 +320,12 @@ phase_real_record() {
     echo "  验证 RTK 状态:"
     echo "    ros2 topic echo /rtk_pvh --once | grep -E 'pos_type|heading_type|latitude'"
     echo ""
-    echo "  启动记录（自动模式，RTK 收敛后自动采集）:"
-    echo "    ros2 launch gps_fusion map_origin_record.launch.py \\"
-    echo "        rtk_topic:=/rtk_pvh output_file:=/home/ztl/dog_slam/config/map_gps_origin.yaml"
-    echo ""
-    echo "  或手动触发（建图员确认 RTK 收敛后）:"
-    echo "    启动后等待 RTK 收敛，然后:"
-    echo "    ros2 service call /gps_origin/record std_srvs/srv/Trigger"
+    echo "  写入地图原点（建图生成器已移除，请手动编辑 config/map_gps_origin.yaml）:"
+    echo "    参考 config/map_gps_origin.yaml 的字段说明，填入："
+    echo "      - latitude / longitude：机器狗站在地图原点 (0,0,0) 时的 RTK 经纬度"
+    echo "      - heading_deg：建图启动时机器人朝向的真北方位角 (0=正北, 90=正东)"
+    echo "      - utm_zone：所在 UTM 区域（默认 50）"
+    echo "    保存后 threshold 纠偏模式 (rtk_pose_monitor) 会读取该 datum。"
     echo ""
     echo "  验证检查点:"
     echo "    ✓ heading_deg 在 [0, 360) 范围"

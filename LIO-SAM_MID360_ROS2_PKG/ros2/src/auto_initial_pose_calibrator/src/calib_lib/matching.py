@@ -45,6 +45,7 @@ class ScanMatcher:
         if node.likelihood_field is None or node.map_data is None:
             self._logger.error('地图似然场尚未加载，重新等待...')
             node.indoor_phase = IndoorPhase.BOOT_DELAY
+            node.boot_start_time = node.get_clock().now()
             return
 
         t0 = time.time()
@@ -58,6 +59,7 @@ class ScanMatcher:
         if len(submap_pts) < 10:
             self._logger.error('Submap1 点云为空')
             node.indoor_phase = IndoorPhase.BOOT_DELAY
+            node.boot_start_time = node.get_clock().now()
             return
 
         ds = max(1, len(submap_pts) // 800)
@@ -181,6 +183,7 @@ class ScanMatcher:
         if node.map_data is None or node._map_ctx is None:
             self._logger.error('[距离场匹配] 地图数据未加载')
             node.indoor_phase = IndoorPhase.BOOT_DELAY
+            node.boot_start_time = node.get_clock().now()
             return
 
         map_ctx = node._map_ctx
@@ -193,6 +196,7 @@ class ScanMatcher:
         if map_ctx.dist_field is None:
             self._logger.error('[距离场匹配] 距离场构建失败')
             node.indoor_phase = IndoorPhase.BOOT_DELAY
+            node.boot_start_time = node.get_clock().now()
             return
 
         t0 = time.time()
@@ -207,6 +211,7 @@ class ScanMatcher:
         if len(submap_pts) < 10:
             self._logger.error('[距离场匹配] Submap1 点云为空')
             node.indoor_phase = IndoorPhase.BOOT_DELAY
+            node.boot_start_time = node.get_clock().now()
             return
 
         # 降采样扫描点 (最多 500 个点)
@@ -228,6 +233,7 @@ class ScanMatcher:
         if n_samples < 10:
             self._logger.error('[距离场匹配] 自由空间不足')
             node.indoor_phase = IndoorPhase.BOOT_DELAY
+            node.boot_start_time = node.get_clock().now()
             return
 
         # 随机采样自由空间候选位置
@@ -257,6 +263,7 @@ class ScanMatcher:
         if not all_candidates:
             self._logger.error('[距离场匹配] 无有效候选位姿')
             node.indoor_phase = IndoorPhase.BOOT_DELAY
+            node.boot_start_time = node.get_clock().now()
             return
 
         # 排序: 距离越小越好
@@ -462,6 +469,7 @@ class ScanMatcher:
         if node.map_data is None or node._map_ctx is None:
             self._logger.error('[双模板匹配] 地图数据未加载')
             node.indoor_phase = IndoorPhase.BOOT_DELAY
+            node.boot_start_time = node.get_clock().now()
             return
 
         map_ctx = node._map_ctx
@@ -474,6 +482,7 @@ class ScanMatcher:
         if map_ctx.dt_likelihood_map is None:
             self._logger.error('[双模板匹配] 地图构建失败')
             node.indoor_phase = IndoorPhase.BOOT_DELAY
+            node.boot_start_time = node.get_clock().now()
             return
 
         # 获取扫描点云
@@ -481,6 +490,7 @@ class ScanMatcher:
         if len(submap_pts) < 10:
             self._logger.error('[双模板匹配] Submap1 点云为空')
             node.indoor_phase = IndoorPhase.BOOT_DELAY
+            node.boot_start_time = node.get_clock().now()
             return
 
         scan_max = getattr(node, 'dt_scan_max_points', 500)
@@ -505,6 +515,7 @@ class ScanMatcher:
         if best_pose is None:
             self._logger.error('[双模板匹配] 全局匹配失败')
             node.indoor_phase = IndoorPhase.BOOT_DELAY
+            node.boot_start_time = node.get_clock().now()
             return
 
         # 写入候选 (单结果时占位概率 1.0)
@@ -595,6 +606,7 @@ class ScanMatcher:
         """
         if node.likelihood_field is None or node.map_data is None:
             node.indoor_phase = IndoorPhase.BOOT_DELAY
+            node.boot_start_time = node.get_clock().now()
             return
 
         scans = [item[0] for item in node.scan_buffer]

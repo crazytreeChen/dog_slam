@@ -143,6 +143,40 @@ python3 gps_fusion/gps_test_steps.py --step all
 - [ ] `/odometry/gps_fused` 能跟踪机器人运动
 - [ ] 对比原始LIO odom，融合后漂移减小
 
+## RTK 导航纠偏（rtk_nav_bridge.launch.py）
+
+导航阶段用 GPS/RTK 纠正机器人在 `/map` 下的偏离位姿，独立于建图逻辑。
+通过 `correction_mode` 参数切换两种纠偏模式：
+
+| 模式 | 节点 | 说明 |
+|------|------|------|
+| `continuous`（默认） | `rtk_continuous_injector` | 首次 `/initialpose` 锚定 map 位姿，RTK 为绝对权威，LIO 仅辅助，连续平滑注入 `/<ns>/initialpose`，丝滑降级，不读 AMCL、不依赖 `map_gps_origin.yaml` |
+| `threshold` | `rtk_pose_monitor` | 旧阈值跳变纠偏，深度耦合 AMCL，仅作回退保留 |
+
+### 连续注入模式（推荐）
+
+- **锚定**：首次收到绝对话题 `/initialpose`（室外默认初始点位）即记录地图位姿
+  `(mx0,my0,maw0)`，多帧平均首个有效 RTK fix 反算 UTM 锚点 `(e0,n0)` 与
+  `θ0 = maw0 + radians(h0)`，建立 `map↔经纬度↔yaw` 坐标体系。
+- **连续注入**：按 `inject_rate`（默认 0.5Hz）将后续 RTK/GPS fix 推算为 map 位姿，
+  叠加 initialpose 偏移发布；仅当 LIO 累计位移超 `reinject_motion_margin`（0.3m）
+  或 yaw 超 `reinject_yaw_margin_deg`（5°）或定位质量显著改善时才重发，避免反复重置 AMCL。
+- **LIO 融合**：订阅 `/Odometry` 积分相对位移，用于触发纠偏时机、RTK 丢失短时桥接、
+  无航向时 yaw 平滑；`use_lio_deadreckon=false` 退回纯 RTK 模式。
+- **丝滑降级**：逐帧按"当前帧有无可用航向"决定发布值；源切换（RTK↔GPS）只改位置协方差/
+  阈值、**绝不改 yaw**；无航向时仅发位置、yaw 协方差放大交 AMCL 自收敛。
+
+启动：
+
+```bash
+# 默认 continuous 模式
+ros2 launch gps_fusion rtk_nav_bridge.launch.py ns:=rkbot
+# 回退到旧阈值模式
+ros2 launch gps_fusion rtk_nav_bridge.launch.py ns:=rkbot correction_mode:=threshold
+```
+
+关键参数见 `config/rtk_continuous_injector.yaml`。
+
 ## 后续计划
 
 测试验证通过后，将 `gps_fusion` 包的核心逻辑合并回 `nav2_dog_slam`。

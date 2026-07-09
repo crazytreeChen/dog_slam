@@ -11,6 +11,7 @@ Type=simple
 User=ztl
 Group=ztl
 WorkingDirectory=/home/ztl/cql/gps_fusion
+CPUAffinity=0 1 2 3
 
 PassEnvironment=ROS_DOMAIN_ID RMW_IMPLEMENTATION HOME
 

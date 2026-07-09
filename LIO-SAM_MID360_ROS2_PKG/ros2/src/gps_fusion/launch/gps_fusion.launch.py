@@ -35,7 +35,7 @@ from launch_ros.actions import Node
 
 def _load_map_origin(pkg_dir):
     """从 map_gps_origin.yaml 读取地图原点 datum。
-    
+
     返回 [latitude, longitude, altitude, heading_deg] 或 None。
     """
     origin_path = os.path.join(pkg_dir, 'config', 'map_gps_origin.yaml')
@@ -63,7 +63,7 @@ def generate_launch_description():
     gps_ekf_config = os.path.join(pkg_dir, 'config', 'gps_ekf.yaml')
     navsat_config = os.path.join(pkg_dir, 'config', 'navsat_transform.yaml')
     web_script = os.path.join(pkg_dir, 'web', 'run_web.sh')
-    
+
     # 尝试加载地图原点（预先标定的 datum）
     map_origin = _load_map_origin(pkg_dir)
 
@@ -75,12 +75,11 @@ def generate_launch_description():
     ns_map_frame = PythonExpression(["'map' if '", ns, "' == '' else str('", ns, "/map')"])
     ns_odom_frame = PythonExpression(["'odom' if '", ns, "' == '' else str('", ns, "/odom')"])
     ns_base_link_frame = PythonExpression(["'base_link' if '", ns, "' == '' else str('", ns, "/base_link')"])
-    ns_base_footprint_frame = PythonExpression(["'base_footprint' if '", ns, "' == '' else str('", ns, "/base_footprint')"])
-    ns_world_frame = PythonExpression(["'world' if '", ns, "' == '' else str('", ns, "/world')"])
+    ns_base_footprint_frame = PythonExpression(
+        ["'base_footprint' if '", ns, "' == '' else str('", ns, "/base_footprint')"])
     ns_imu_frame = PythonExpression(["'imu' if '", ns, "' == '' else str('", ns, "/imu')"])
 
     lio_odom_topic = LaunchConfiguration('lio_odom_topic', default='/Odometry')
-    gps_topic = LaunchConfiguration('gps_topic', default='/fix')
     imu_topic = LaunchConfiguration('imu_topic', default='/livox/imu')
     use_sim_time = LaunchConfiguration('use_sim_time', default='false')
     utm_zone = LaunchConfiguration('utm_zone', default='50')
@@ -91,7 +90,6 @@ def generate_launch_description():
     enable_web = LaunchConfiguration('enable_web', default='true')
     enable_correction = LaunchConfiguration('enable_correction', default='true')
     enable_ekf = LaunchConfiguration('enable_ekf', default='true')
-    enable_recording = LaunchConfiguration('enable_recording', default='false')
     map_origin_file = LaunchConfiguration('map_origin_file', default='')
     rtk_min_accuracy = LaunchConfiguration('rtk_min_accuracy', default='0.02')
     rtk_timeout = LaunchConfiguration('rtk_timeout', default='5.0')
@@ -144,7 +142,7 @@ def generate_launch_description():
     else:
         print('[gps_fusion] map_gps_origin.yaml 不存在或无效，'
               'navsat_transform 将从首次 GPS fix 自动检测 datum')
-    
+
     navsat_transform_node = Node(
         package='robot_localization',
         executable='navsat_transform_node',
@@ -231,24 +229,6 @@ def generate_launch_description():
         prefix=['taskset -c 0,1,2,3'],
     )
 
-    map_origin_recorder_node = Node(
-        package='gps_fusion',
-        executable='map_origin_recorder.py',
-        name='map_origin_recorder',
-        output='screen',
-        condition=IfCondition(enable_recording),
-        parameters=[{
-            'use_sim_time': use_sim_time,
-            'fix_topic': '/fix_filtered',
-            'rtk_topic': '/rtk_pvh',
-            'use_rtk_heading': True,
-            'auto_record': True,
-            'sample_count': 10,
-            'min_accuracy': 5.0,
-            'odom_topic': lio_odom_topic,
-        }],
-    )
-
     # ======== Web 可视化（对齐 nav2_dog_slam 模式） ========
 
     # 4. 轨迹数据发布节点（纯 ROS2，不内嵌 HTTP 服务）
@@ -333,8 +313,6 @@ def generate_launch_description():
                               description='启用 RTK AMCL 漂移纠偏 (rtk_pose_monitor)'),
         DeclareLaunchArgument('enable_ekf', default_value='true',
                               description='启用 EKF+navsat GPS融合（导航时建议关闭，避免与AMCL冲突）'),
-        DeclareLaunchArgument('enable_recording', default_value='false',
-                              description='启用建图原点记录 (map_origin_recorder)。首次建图时设为true，记录完成后关闭'),
         DeclareLaunchArgument('rtk_min_accuracy', default_value='0.02',
                               description='RTK模式精度门槛（m），厘米级精度，室内/真实GPS建议0.02，仿真测试建议10.0'),
         DeclareLaunchArgument('rtk_timeout', default_value='5.0',
@@ -347,7 +325,6 @@ def generate_launch_description():
         map_odom_tf_node,
         ekf_filter_node,
         rtk_pose_monitor_node,
-        map_origin_recorder_node,
 
         # Web 组件（延迟 3 秒启动，run_web.sh 已内置端口冲突清理）
         delayed_web,

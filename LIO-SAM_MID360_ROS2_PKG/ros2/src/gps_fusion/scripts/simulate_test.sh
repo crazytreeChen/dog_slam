@@ -13,7 +13,7 @@ ORIGIN_FILE="$TEST_DIR/map_gps_origin.yaml"
 cleanup() {
     echo ""
     echo "清理模拟进程..."
-    kill $SIM_PID $RECORD_PID $SIM2_PID $MOCK_PID $LIO_PID $LAUNCH_PID 2>/dev/null || true
+    kill $SIM_PID $SIM2_PID $MOCK_PID $LIO_PID $LAUNCH_PID 2>/dev/null || true
     pkill -f "rtk_simulator" 2>/dev/null || true
 pkill -f "mock_tf_broadcaster" 2>/dev/null || true
     pkill -f "lio_simulator" 2>/dev/null || true
@@ -32,7 +32,6 @@ mkdir -p "$TEST_DIR"
 
 pkill -f "gps_preprocessor" 2>/dev/null || true
 pkill -f "rtk_simulator" 2>/dev/null || true
-pkill -f "map_origin_recorder" 2>/dev/null || true
 pkill -f "rtk_pose_monitor" 2>/dev/null || true
 pkill -f "mock_tf_broadcaster" 2>/dev/null || true
 sleep 2
@@ -44,49 +43,26 @@ echo "=========================================="
 echo ""
 
 # ======== Phase 1: 生成模拟地图原点 ========
-echo "[Phase 1] 生成模拟地图原点 ..."
-rm -f "$TEST_DIR/rtk_sim.log" "$TEST_DIR/record.log"
+echo "[Phase 1] 写入模拟地图原点 (map_gps_origin.yaml) ..."
+rm -f "$TEST_DIR/rtk_sim.log"
 
-ros2 run gps_fusion rtk_simulator.py --ros-args \
-    -p rate:=5.0 -p pos_type:=50 -p speed:=0.0 \
-    -p topic:=/test/rtk_pvh > "$TEST_DIR/rtk_sim.log" 2>&1 &
-SIM_PID=$!
-sleep 2
-
-ros2 launch gps_fusion map_origin_record.launch.py \
-    rtk_topic:=/test/rtk_pvh \
-    sample_count:=5 \
-    min_accuracy:=10.0 \
-    rtk_min_accuracy:=10.0 \
-    require_origin_odom:=false \
-    output_file:="$ORIGIN_FILE" > "$TEST_DIR/record.log" 2>&1 &
-RECORD_PID=$!
-
-echo "  等待 GPS 预处理器数据流..."
-for i in $(seq 1 10); do
-    if timeout 2 ros2 topic echo /fix_filtered --once > /dev/null 2>&1; then
-        echo "  /fix_filtered 数据就绪 (等待 ${i}0秒)"
-        break
-    fi
-    sleep 2
-done
-
-echo "  等待采集完成 (共 15 秒)..."
-sleep 15
-
-kill $SIM_PID $RECORD_PID 2>/dev/null || true
-pkill -f rtk_simulator 2>/dev/null || true
-pkill -f map_origin_recorder 2>/dev/null || true
-sleep 2
+# 建图生成器 (map_origin_recorder) 已移除，直接写入合法原点供 threshold 纠偏模式读取
+cat > "$ORIGIN_FILE" <<'EOF'
+map_origin:
+  latitude: 24.61000000
+  longitude: 118.03000000
+  altitude: 42.52
+  heading_deg: 0.0
+  utm_easting: 604684.19
+  utm_northing: 2722418.28
+  utm_zone: 50
+note: "室内模拟预置原点 (生成器已移除，手动维护)"
+EOF
 
 if [ -f "$ORIGIN_FILE" ]; then
-    echo "  [OK] 原点文件已生成"
+    echo "  [OK] 原点文件已写入: $ORIGIN_FILE"
 else
-    echo "  [FAIL] 原点文件生成失败"
-    echo "  --- rtk_sim.log (最后 5 行) ---"
-    tail -5 "$TEST_DIR/rtk_sim.log" 2>/dev/null || echo "  (空)"
-    echo "  --- record.log (最后 10 行) ---"
-    tail -10 "$TEST_DIR/record.log" 2>/dev/null || echo "  (空)"
+    echo "  [FAIL] 原点文件写入失败"
     exit 1
 fi
 
@@ -125,7 +101,6 @@ ros2 launch gps_fusion gps_fusion.launch.py \
     gps_source:=/fix \
     enable_web:=true \
     enable_correction:=true \
-    enable_recording:=false \
     enable_ekf:=false \
     rtk_min_accuracy:=10.0 \
     map_origin_file:="$ORIGIN_FILE" &

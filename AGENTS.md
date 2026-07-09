@@ -95,7 +95,7 @@ Custom Nav2 costmap plugin (`traversability_layer::TraversabilityLayer`) for 3D 
 
 - `LIO-SAM_MID360_ROS2_DOG`, `FAST_LIO_ROS2_edit`, `point_lio_ros2`, `Super-LIO` (submodule) — the four LIO implementations.
 - `nav2_dog_slam` — 统一 launch 系统（`lio_nav2_unified.launch.py`）、LIO 主题映射表 `LIO_TOPIC_CONFIGS`、Nav2 集成、traversability_layer 注册、Web 可视化。
-- `gps_fusion` — **独立 GPS/RTK 融合包**，不依赖 nav2_dog_slam。建图阶段通过 `map_origin_recorder` 采集 RTK 原点写入 `map_gps_origin.yaml`；导航阶段通过 `rtk_pose_monitor` 对比 GPS vs AMCL 位姿，超阈值时发布 `/initialpose` 纠偏。带 `MONITORING↔GPS_LOST` 容错状态机、协方差自适应。依赖 `robot_localization` 的 navsat_transform + EKF。独立启动：`ros2 launch gps_fusion map_origin_record.launch.py`（建图）/ `rtk_nav_bridge.launch.py`（导航）。见 [[gps_fusion]]。
+- `gps_fusion` — **独立 GPS/RTK 融合包**，不依赖 nav2_dog_slam。建图原点 (`map_gps_origin.yaml`) 改为手动维护（建图生成器 `map_origin_recorder`/`calibrate_map_origin`/`rtk_initial_pose` 已移除）；导航阶段通过 `rtk_pose_monitor`（threshold 回退，对比 GPS vs AMCL）或 `rtk_continuous_injector`（continuous 默认，RTK 为绝对权威、LIO 辅助、连续平滑注入 `/initialpose`）纠偏。带 `MONITORING↔GPS_LOST` 容错状态机、协方差自适应。依赖 `robot_localization` 的 navsat_transform + EKF。独立启动：`ros2 launch gps_fusion rtk_nav_bridge.launch.py`（导航，默认 continuous 模式）。见 [[gps_fusion]]。
 - `global_config` — **配置单点真理**，`global_config/__init__.py` 根据 `platform.node()` 主机名自动切换路径、LiDAR 参数、Nav2 yaml 路径；import 时副作用重写 `nav2_params.yaml`、`mid360.yaml`、`livox_360.yaml`。要新加机器只需在 `config_by_machine` 加条目。见 [[global_config]]。
 - `traversability_layer` — 自定义 Nav2 costmap 插件（`traversability_layer::TraversabilityLayer`），从原始点云计算坡度、台阶高度、楼梯检测，配置于 `local_costmap.plugins`。默认读 `/cloud_registered_body`。
 - `auto_initial_pose_calibrator` — automatic initial pose calibration using scan matching + AMCL convergence. Depends on `global_config` and `robots_dog_msgs`.

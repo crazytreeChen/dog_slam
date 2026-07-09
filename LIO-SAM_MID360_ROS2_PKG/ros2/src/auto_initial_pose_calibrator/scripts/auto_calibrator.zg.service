@@ -1,5 +1,5 @@
 [Unit]
-Description=Auto Initial Pose Calibrator (ZG - Passive Localization)
+Description=Auto Initial Pose Calibrator (ZG - 开机初始位姿标定, CPU 绑定小核)
 After=network.target
 
 [Service]
@@ -8,6 +8,7 @@ User=ztl
 Group=ztl
 WorkingDirectory=/home/ztl/cql
 PassEnvironment=ROS_DOMAIN_ID RMW_IMPLEMENTATION
+CPUAffinity=0 1 2 3
 ExecStart=/home/ztl/cql/auto_initial_pose_calibrator/scripts/run_auto_calibrator_zg.sh
 Restart=always
 RestartSec=10

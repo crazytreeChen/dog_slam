@@ -19,10 +19,8 @@ install(
     gps_fusion/gps_test_steps.py
     gps_fusion/trajectory_server.py
     gps_fusion/trajectory_ws_server.py
-    gps_fusion/rtk_initial_pose.py
-    gps_fusion/calibrate_map_origin.py
-    gps_fusion/map_origin_recorder.py
     gps_fusion/rtk_pose_monitor.py
+    gps_fusion/rtk_continuous_injector.py
     scripts/simulate_trajectory.py
     scripts/rtk_simulator.py
     scripts/mock_tf_broadcaster.py

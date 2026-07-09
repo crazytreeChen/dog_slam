@@ -620,7 +620,7 @@ class RtkPoseMonitor(Node):
         改为采集 N 帧同步数据，每帧独立计算 (E₀, N₀, θ₀)，取平均 + 标准差评估。
 
         后续再收到的 /initialpose（非本节点发布）会被忽略——原点只标定一次。
-        标定公式与 rtk_initial_pose.py / calibrate_map_origin.py 一致。
+        标定公式与 gps_transform 的 RTK→map 约定一致。
         """
         if self._calibrated:
             return   # 已标定，忽略后续 /initialpose
@@ -745,7 +745,7 @@ class RtkPoseMonitor(Node):
     def _finalize_calibration(self) -> bool:
         """从采集的 N 帧同步数据计算地图原点 (E₀, N₀, θ₀) + 标准差评估。
 
-        标定公式（与 calibrate_map_origin.py 一致）：
+        标定公式（与 gps_transform 的 RTK→map 约定一致）：
             对每帧 (ax, ay, ayaw, utm_e, utm_n, hdg_deg):
               θ₀ = hdg_rad - ayaw
               E₀ = utm_e - ax*cos(θ₀) + ay*sin(θ₀)

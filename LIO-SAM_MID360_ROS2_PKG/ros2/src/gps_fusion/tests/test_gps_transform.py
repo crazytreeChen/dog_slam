@@ -174,8 +174,8 @@ class TestRtkToMap(unittest.TestCase):
         self.assertAlmostEqual(x, 0.0, delta=1e-6)
         self.assertAlmostEqual(y, -10.0, delta=1e-6)
 
-    def test_consistency_with_rtk_initial_pose(self):
-        """验证公式与 rtk_initial_pose.py:263-273 一致"""
+    def test_consistency_with_origin_convention(self):
+        """验证公式与 map_gps_origin.yaml 的 RTK→map 约定一致"""
         t = make_utm_transformer(50)
         theta0 = math.radians(45.0)
 

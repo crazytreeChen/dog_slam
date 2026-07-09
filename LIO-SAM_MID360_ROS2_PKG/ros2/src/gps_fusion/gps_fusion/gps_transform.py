@@ -2,11 +2,10 @@
 """
 共享 GPS 坐标转换模块
 
-提供 RTK ↔ UTM ↔ Map 坐标系的转换工具，供 map_origin_recorder 和
-rtk_pose_monitor 复用，保证转换逻辑与现有 rtk_initial_pose.py / calibrate_map_origin.py
-完全一致。
+提供 RTK ↔ UTM ↔ Map 坐标系的转换工具，供 rtk_pose_monitor 和
+rtk_continuous_injector 复用，保证转换逻辑与 map_gps_origin.yaml 约定一致。
 
-坐标系约定（与 rtk_initial_pose.py:263-286 保持一致）:
+坐标系约定（与 map_gps_origin.yaml 约定一致）:
     RTK lat/lon → pyproj → UTM (E=东, N=北)
     地图原点: UTM (E₀, N₀) + 朝向 θ₀ (rad, θ₀ = rtk_heading₀ - amcl_yaw₀)
     dx = E - E₀,  dy = N - N₀
@@ -14,11 +13,11 @@ rtk_pose_monitor 复用，保证转换逻辑与现有 rtk_initial_pose.py / cali
     map_y   = -dx * sin(θ₀) + dy * cos(θ₀)
     map_yaw = θ₀ - θ_rtk_rad   (取反号：RTK heading 顺时针正，ROS yaw 逆时针正)
 
-⚠️ 待验证确认点:
-    map_yaw = θ_rtk - θ₀ 隐含假设 RTK heading_deg 的角度方向与 ROS yaw 一致。
+⚠️ 约定说明:
+    map_yaw = θ₀ - θ_rtk 隐含假设 RTK heading_deg 的角度方向与 ROS yaw 一致。
     标准真北航向是 0°=北、顺时针正；ROS yaw 是 0°=东(X轴)、逆时针正。
-    现有 rtk_initial_pose.py 和 calibrate_map_origin.py 都用此假设且生产验证通过，
-    本模块保持一致。若实测发现方向相反，需同时修正所有三处。
+    该约定已在生产环境验证，本模块作为统一实现。若实测发现方向相反，
+    需同时修正本模块所有相关函数。
 """
 
 import math
@@ -65,7 +64,7 @@ def rtk_to_map(transformer: Transformer, lon: float, lat: float,
     """RTK 经纬度 → 地图坐标 (map_x, map_y)。
 
     转换链: lat/lon → UTM → 减原点 → 旋转 θ₀
-    复用 rtk_initial_pose.py:263-273 的逻辑。
+    与 rtk_to_map_anchored / rtk_to_map 统一实现。
 
     Args:
         transformer: WGS84→UTM 转换器
@@ -98,9 +97,14 @@ def rtk_heading_to_map_yaw(heading_deg: float, theta0_rad: float) -> float:
         heading_deg: RTK 真北航向（度，0=正北，顺时针正）
         theta0_rad: 地图原点朝向（弧度，θ₀ = rtk_heading₀ - amcl_yaw₀）
     Returns:
-        map_yaw (弧度)
+        map_yaw (弧度，已归一化到 [-π, π])
     """
-    return theta0_rad - math.radians(heading_deg)
+    yaw = theta0_rad - math.radians(heading_deg)
+    while yaw > math.pi:
+        yaw -= 2.0 * math.pi
+    while yaw < -math.pi:
+        yaw += 2.0 * math.pi
+    return yaw
 
 
 def detect_rtk_quality(msg) -> str:
@@ -171,8 +175,7 @@ def circular_mean_heading(headings_deg) -> float:
 def load_map_origin(yaml_path: str):
     """加载 map_gps_origin.yaml → (origin_utm, heading_rad)。
 
-    与 gps_fusion.launch.py:_load_map_origin() 和
-    rtk_initial_pose.py:_resolve_map_origin() 兼容。
+    与 gps_fusion.launch.py:_load_map_origin() 兼容。
 
     Args:
         yaml_path: YAML 文件路径
@@ -209,7 +212,7 @@ def write_map_origin_yaml(yaml_path: str, lat: float, lon: float,
                           extra_note: str = ''):
     """写入 map_gps_origin.yaml（手动格式化字符串保精度）。
 
-    沿用 calibrate_map_origin.py:336-346 的格式，避免 yaml.dump 精度丢失。
+    沿用 map_gps_origin.yaml 的格式约定，避免 yaml.dump 精度丢失。
     新增 record_info 字段，但保持 map_origin 结构不变，确保现有读取代码兼容。
 
     Args:
@@ -227,7 +230,7 @@ def write_map_origin_yaml(yaml_path: str, lat: float, lon: float,
     import datetime
     now_str = datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
 
-    note = f'由 map_origin_recorder.py 生成 (source={source}, samples={sample_count})'
+    note = f'由 gps_transform 生成 (source={source}, samples={sample_count})'
     if extra_note:
         note += f' | {extra_note}'
 
@@ -251,3 +254,81 @@ def write_map_origin_yaml(yaml_path: str, lat: float, lon: float,
     os.makedirs(os.path.dirname(yaml_path), exist_ok=True)
     with open(yaml_path, 'w') as f:
         f.write(yaml_content)
+
+
+def rtk_to_map_anchored(transformer, lon: float, lat: float, anchor: tuple,
+                        heading_deg=None):
+    """RTK fix → map 位姿（已叠加 initialpose 锚点偏移）。
+
+    anchor = (e0, n0, mx0, my0, theta0_rad)
+    返回 (map_x, map_y, map_yaw_rad)；无 heading_deg 时 map_yaw 返回 None。
+    锚点处 (lon0,lat0,heading0) 应返回 (mx0, my0, maw0)，保证 θ0 内部自洽。
+    """
+    e0, n0, mx0, my0, theta0 = anchor
+    bx, by = rtk_to_map(transformer, lon, lat, (e0, n0, 0.0), theta0)
+    map_x = mx0 + bx
+    map_y = my0 + by
+    map_yaw = rtk_heading_to_map_yaw(heading_deg, theta0) if heading_deg is not None else None
+    return map_x, map_y, map_yaw
+
+
+def odom_pose_delta(prev, cur):
+    """两帧 Odometry 位姿差（世界系位移 + 朝向差）。
+
+    prev, cur: (x, y, yaw_rad)。返回 (dx, dy, dyaw)，dyaw 归一化到 [-π, π]。
+    用于 LIO 累计位移驱动纠偏触发，与全局 frame 无关。
+    """
+    dx = cur[0] - prev[0]
+    dy = cur[1] - prev[1]
+    dyaw = cur[2] - prev[2]
+    while dyaw > math.pi:
+        dyaw -= 2.0 * math.pi
+    while dyaw < -math.pi:
+        dyaw += 2.0 * math.pi
+    return dx, dy, dyaw
+
+
+def decide_reinject(moved_dist: float, turned_rad: float,
+                    motion_margin: float, yaw_margin_rad: float) -> bool:
+    """平滑注入触发判定：LIO 累计位移或 yaw 超阈则重发 /initialpose。"""
+    return moved_dist > motion_margin or turned_rad > yaw_margin_rad
+
+
+def is_rtk_heading_valid(heading_type, sol_status, heading_std,
+                         max_heading_std: float) -> bool:
+    """RTK 航向可用性（独立于 pos_type）。
+
+    heading_type∈{16,17,34,50} 且 sol_status∈{0,2} 且 std≤阈值 时有效。
+    即 pos_type=50 无基线、或 pos_type=34/16 双天线基线收敛时仍可有航向。
+    """
+    if heading_type not in (16, 17, 34, 50):
+        return False
+    if sol_status not in (0, 2):
+        return False
+    if heading_std is not None and heading_std > max_heading_std:
+        return False
+    return True
+
+
+def pos_type_to_quality(pos_type: int) -> str:
+    """pos_type → RTK 质量等级（与 rtk_pose_monitor._rtk_callback 映射一致）。
+
+    50→RTK_FIX, 34→RTK_FLOAT, 16/17→DGPS, 其它→GPS。
+    """
+    if pos_type == 50:
+        return 'RTK_FIX'
+    if pos_type == 34:
+        return 'RTK_FLOAT'
+    if pos_type in (16, 17):
+        return 'DGPS'
+    return 'GPS'
+
+
+def select_anchor_theta0(maw0_rad: float, heading_deg=None):
+    """锚点 θ0 选择：有 RTK 航向→maw0+rad(heading)；无→maw0（best-effort）。
+
+    与 rtk_to_map_anchored 配合：锚点处 map_yaw = θ0 - rad(heading) = maw0。
+    """
+    if heading_deg is None:
+        return maw0_rad
+    return maw0_rad + math.radians(heading_deg)

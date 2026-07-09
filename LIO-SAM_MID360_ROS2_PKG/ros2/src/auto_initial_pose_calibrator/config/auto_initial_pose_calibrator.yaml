@@ -188,10 +188,15 @@
     deviation_alert_window: 180.0    # 开机告警窗口 (秒, 前3分钟严格)
 
     # ────── 运动状态跟踪 (运动停止触发 & odom→map 偏差检测) ──────
-    motion_tracking_enabled: true        # 启用运动状态跟踪
+    motion_tracking_enabled: false       # 关闭运动状态跟踪（降低后台开销）
     motion_speed_threshold: 0.05         # 线速度阈值 (m/s)，超过判定为运动
     motion_angular_threshold: 0.05       # 角速度阈值 (rad/s)，超过判定为运动
     motion_settle_time: 1.0              # 停止后等待稳定时间 (秒)
     motion_stop_cooldown: 10.0           # 停止事件触发后冷却时间 (秒)
-    passive_odom_deviation_threshold: 0.3   # odom→map 推算偏差触发阈值 (m)，超过触发重匹配
-    passive_amcl_deviation_trigger: 1.0     # AMCL 交叉验证阈值 (m)，计算结果与 AMCL 偏差超过此值才更新位姿
+    # odom→map 推算偏差分层阈值：
+    #   位移 < fusion_trigger → 跳过检查（正常范围内）
+    #   fusion_trigger ≤ 位移 < matching_trigger → 走轻量 odom fusion 验证
+    #   位移 ≥ matching_trigger → 触发完整扫描匹配（PASSIVE_MATCHING）
+    passive_odom_fusion_trigger: 0.5       # odom fusion 触发阈值 (m)，超过尝试轻量融合验证
+    passive_odom_matching_trigger: 2.0     # 完整扫描匹配触发阈值 (m)，超过走完整重匹配
+    passive_amcl_deviation_trigger: 1.0    # AMCL 交叉验证阈值 (m)，计算结果与 AMCL 偏差超过此值才更新位姿

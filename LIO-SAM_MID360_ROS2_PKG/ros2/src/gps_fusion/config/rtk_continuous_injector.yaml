@@ -1,0 +1,46 @@
+# 连续平滑注入节点参数配置
+#
+# rtk_continuous_injector 的默认参数。launch 可通过命令行 --ros-args -p <key>:=<value> 覆盖。
+# 与 rtk_pose_monitor 的区别：用首次 /initialpose 锚定（不读 AMCL、不读 map_gps_origin.yaml），
+# RTK 为绝对位姿权威，LIO 仅做运动触发/断信号桥接/yaw 平滑，连续平滑注入而非阈值跳变。
+
+rtk_continuous_injector:
+  ros__parameters:
+    # 话题
+    rtk_topic: /rtk_pvh              # RTK 原始数据（位置+航向）
+    gps_topic: /fix                  # 普通 GPS fallback（仅位置，无航向）
+    lio_odom_topic: /Odometry        # LIO 里程计（线/角速度，仅辅助）
+    utm_zone: 50                     # UTM 区域编号
+
+    # 注入节奏
+    inject_rate: 0.5                 # 注入频率（Hz）
+    calib_sample_count: 5            # 锚点多帧采集数
+    max_collect_time: 30.0           # 锚点采集超时（s），超时 best-effort 收尾
+    reinject_motion_margin: 0.3      # 自上次发布 LIO 位移超此值（m）重发
+    reinject_yaw_margin_deg: 5.0     # 自上次发布 yaw 超此值（°）重发
+
+    # 源与航向开关
+    enable_gps_fallback: true        # RTK 不可用时降级 GPS 位置
+    use_rtk_heading: true            # 使用 RTK 航向纠偏（false 则仅位置）
+    use_lio_deadreckon: true         # 订阅 LIO 做触发/桥接；false 退回纯 RTK 模式
+
+    # 质量门禁
+    gps_stale_timeout: 3.0           # 定位输入超时（s），超时任为失效
+    min_accuracy: 1.0                # RTK 最低水平精度（m）
+    gps_min_accuracy: 10.0           # GPS fallback 最低水平精度（m）
+    gps_jump_threshold: 5.0          # GPS 位置跳变速度阈值（m/s），超高跳过
+    max_diff_age: 5.0                # 最大差分龄期（s）
+    max_heading_std: 5.0             # 最大航向标准差（°），超丢弃 RTK 航向
+
+    # 协方差自适应（位置协方差 = max(质量协方差, correction_cov_base)）
+    cov_rtk_fix: 0.01                # RTK 整数解 → 高信任
+    cov_rtk_float: 0.1               # RTK 浮点解 → 中信任
+    cov_dgps: 1.0                    # DGPS 亚米 → 低信任
+    cov_gps: 25.0                    # 普通 GPS → 约 5m 标准差
+    cov_no_heading: 0.5              # 无 RTK 航向时 yaw 协方差（交 AMCL 自收敛）
+    cov_yaw_rtk: 0.05                # 有 RTK 航向时 yaw 协方差（参与精化）
+    correction_cov_base: 0.25        # 纠偏协方差下限（m²），给 AMCL scan matching 留空间
+
+    # LIO 断信号桥接限幅
+    lio_bridge_max_time: 5.0         # RTK 丢失后 LIO 桥接最长（s）
+    lio_bridge_max_dist: 10.0        # RTK 丢失后 LIO 桥接最长位移（m）
