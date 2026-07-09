@@ -35,7 +35,7 @@ NAVIGATION_MODE = os.environ.get('NAVIGATION_MODE', 'standalone').lower()  # sta
 config_by_machine = {
     'RK3588': {
         # RK3588主机配置 - 全局配置
-        'DEFAULT_NAMESPACE': '',
+        'DEFAULT_NAMESPACE': 'rkbot',
         'DEFAULT_USE_SIM_TIME': False,
         'ONLINE_LIDAR': True,
 
@@ -58,12 +58,11 @@ config_by_machine = {
         'FAST_LIO_MAP_FILE_PATH': '/home/ztl/slam_data/pcd/test.pcd',  # 添加的地图文件路径
         
         # RK3588主机配置 - Livox MID360
-        'LIVOX_MID360_CONFIG': '/home/ztl/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/livox_ros_driver2/config/MID360_config_tilt.json',
-        'LIVOX_MID360_CONFIG_NO_TILT': '/home/ztl/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/livox_ros_driver2/config/MID360_config.json',
+        'LIVOX_MID360_CONFIG': '/home/ztl/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/livox_ros_driver2/config/MID360_config_smalldog.json',
         
         # RK3588主机配置 - Super-LIO
         'SUPER_LIO_BASE_CODE_PATH': '/home/ztl/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/Super-LIO/',
-        'SUPER_LIO_SAVE_MAP': True,  # 在线机器人需要保存地图
+        'SUPER_LIO_SAVE_MAP': False,  # 在线机器人需要保存地图
         'SUPER_LIO_SAVE_MAP_DIR': '/home/ztl/slam_data/pcd',
         'SUPER_LIO_LIDAR_X': -0.15,  # 雷达x轴偏移量
         'SUPER_LIO_LIDAR_Z': -0.1,  # 雷达z轴偏移量
@@ -72,9 +71,10 @@ config_by_machine = {
         #SC-PGO
         'SC_PGO_SAVE_DIRECTORY': '/home/ztl/save_data/',
         
-        # 3D LiDAR 重定位
-        'ENABLE_3D_RELOCALIZATION': True,
-        'PCD_MAP_DIRECTORY': '/home/ztl/slam_data/pcd/',
+        # RK3588主机配置 - OctoPlanner3D
+        'OCTOPLANNER_BASE_CODE_PATH': '/home/ztl/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/OctoPlanner3D-ROS2/',
+        'OCTOPLANNER_PCD_FILE_PATH': '/home/ztl/slam_data/pcd/octomap.pcd',
+        'OCTOPLANNER_PARAMS_FILE': '/home/ztl/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/OctoPlanner3D-ROS2/config/params.yaml',
     },
     'RK3588ZG': {
         # RK3588主机配置 - 全局配置
@@ -103,7 +103,6 @@ config_by_machine = {
         
         # RK3588主机配置 - Livox MID360
         'LIVOX_MID360_CONFIG': '/home/ztl/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/livox_ros_driver2/config/MID360_config_zg.json',
-        'LIVOX_MID360_CONFIG_NO_TILT': '/home/ztl/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/livox_ros_driver2/config/MID360_config_zg.json',
         
         # RK3588主机配置 - Super-LIO
         'SUPER_LIO_BASE_CODE_PATH': '/home/ztl/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/Super-LIO/',
@@ -115,6 +114,11 @@ config_by_machine = {
 
         #SC-PGO
         'SC_PGO_SAVE_DIRECTORY': '/home/ztl/save_data/',
+        
+        # RK3588ZG主机配置 - OctoPlanner3D
+        'OCTOPLANNER_BASE_CODE_PATH': '/home/ztl/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/OctoPlanner3D-ROS2/',
+        'OCTOPLANNER_PCD_FILE_PATH': '/home/ztl/slam_data/pcd/octomap_zg.pcd',
+        'OCTOPLANNER_PARAMS_FILE': '/home/ztl/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/OctoPlanner3D-ROS2/config/params.yaml',
     },
     'DESKTOP-4LS1SSN': {
         # DESKTOP-4LS1SSN主机配置 - 全局配置
@@ -142,7 +146,6 @@ config_by_machine = {
         
         # DESKTOP-4LS1SSN主机配置 - Livox MID360
         'LIVOX_MID360_CONFIG': '/home/ywj/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/livox_ros_driver2/config/MID360_config_gazebo.json',
-        'LIVOX_MID360_CONFIG_NO_TILT': '/home/ywj/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/livox_ros_driver2/config/MID360_config_gazebo.json',
         
         # DESKTOP-4LS1SSN主机配置 - Super-LIO
         'SUPER_LIO_BASE_CODE_PATH': '/home/ywj/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/Super-LIO/',
@@ -154,6 +157,11 @@ config_by_machine = {
         
         #SC-PGO
         'SC_PGO_SAVE_DIRECTORY': '/home/ywj/save_data/',
+        
+        # DESKTOP-ypat主机配置 - OctoPlanner3D
+        'OCTOPLANNER_BASE_CODE_PATH': '/home/ywj/git/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/OctoPlanner3D-ROS2/',
+        'OCTOPLANNER_PCD_FILE_PATH': '/home/ywj/slam_data/pcd/octomap.pcd',
+        'OCTOPLANNER_PARAMS_FILE': '/home/ywj/git/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/OctoPlanner3D-ROS2/config/params.yaml',
     },
     'DESKTOP-ypat': {
         # DESKTOP-ypat主机配置 - 全局配置
@@ -182,27 +190,30 @@ config_by_machine = {
         
         # DESKTOP-ypat主机配置 - Livox MID360
         'LIVOX_MID360_CONFIG': '/home/ywj/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/livox_ros_driver2/config/MID360_config_gazebo.json',
-        'LIVOX_MID360_CONFIG_NO_TILT': '/home/ywj/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/livox_ros_driver2/config/MID360_config_gazebo.json',
         
         # DESKTOP-ypat主机配置 - Super-LIO
         'SUPER_LIO_BASE_CODE_PATH': '/home/ywj/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/Super-LIO/',
-        'SUPER_LIO_SAVE_MAP': False,  # 离线开发可能需要保存地图
+        'SUPER_LIO_SAVE_MAP': True,  # 离线开发可能需要保存地图
         'SUPER_LIO_SAVE_MAP_DIR': '/home/ywj/slam_data/pcd',
-        'SUPER_LIO_LIDAR_X': -0.07,  # 雷达x轴偏移量
+        'SUPER_LIO_LIDAR_X': -0.15,  # 雷达x轴偏移量
         'SUPER_LIO_LIDAR_Z': -0.1,  # 雷达z轴偏移量
-        'SUPER_LIO_LIDAR_TILT_ANGLE': -0.0,  # 雷达倾斜角度
+        'SUPER_LIO_LIDAR_TILT_ANGLE': -30.0,  # 雷达倾斜角度
         
         #SC-PGO
         'SC_PGO_SAVE_DIRECTORY': '/home/ywj/save_data/',
+        
+        # DESKTOP-ypat主机配置 - OctoPlanner3D
+        'OCTOPLANNER_BASE_CODE_PATH': '/home/ywj/git/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/OctoPlanner3D-ROS2/',
+        'OCTOPLANNER_PCD_FILE_PATH': '/home/ywj/slam_data/pcd/octomap.pcd',
+        'OCTOPLANNER_PARAMS_FILE': '/home/ywj/git/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/OctoPlanner3D-ROS2/config/params.yaml',
     },
     'ywj-B250-D3A': {
         # ywj-B250-D3A主机配置 - 全局配置
-        'DEFAULT_NAMESPACE': '',
+        'DEFAULT_NAMESPACE': 'rkbot',
         'DEFAULT_USE_SIM_TIME': True,
         'ONLINE_LIDAR': False,
 
         # ywj-B250-D3A主机配置 - LIO-SAM
-        'ONLINE_LIDAR': False,
         'LIO_SAM_BASE_CODE_PATH': '/home/ywj/git/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/LIO-SAM_MID360_ROS2_DOG/',
         'DEFAULT_BAG_PATH': '/home/ywj/git/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/LIO-SAM_MID360_ROS2_DOG/',
         'DEFAULT_RELIABILITY_OVERRIDE': '/home/ywj/git/dog_slam/LIO-SAM_MID360_ROS2_PKG/scripts/reliability_override.yaml',
@@ -213,22 +224,21 @@ config_by_machine = {
         'NAV2_DEFAULT_MAP_FILE': "/home/ywj/slam_data/grid_map/map.yaml",
         'NAV2_DEFAULT_WEB_SCRIPT_PATH': '/home/ywj/git/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/nav2_dog_slam/web/run_web.sh',
         'NAV2_DEFAULT_BT_XML_PATH': '/home/ywj/git/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/nav2_dog_slam/config/navigate_to_pose_w_replanning_and_recovery.xml',
-        'NAV2_DEFAULT_PARAMS_FILE': '/home/ywj/git/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/nav2_dog_slam/config/nav2_params_sim.yaml',
+        'NAV2_DEFAULT_PARAMS_FILE': '/home/ywj/git/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/nav2_dog_slam/config/nav2_params.yaml',
         
         # ywj-B250-D3A主机配置 - FAST-LIO
         'FAST_LIO_BASE_CODE_PATH': '/home/ywj/git/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/FAST_LIO_ROS2_edit/',
-        'FAST_LIO_LIDAR_TYPE': 5,  # 其他主机lidar_type为1
+        'FAST_LIO_LIDAR_TYPE': 1,  # 其他主机lidar_type为1
         'FAST_LIO_MAP_FILE_PATH': '/home/ywj/slam_data/pcd/test.pcd',  # 添加的地图文件路径
         'DEFAULT_RELIABILITY_OVERRIDE': '/home/ywj/git/dog_slam/LIO-SAM_MID360_ROS2_PKG/scripts/reliability_override.yaml',
         'DEFAULT_USE_SIM_TIME': True,
         
         # ywj-B250-D3A主机配置 - Livox MID360
         'LIVOX_MID360_CONFIG': '/home/ywj/git/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/livox_ros_driver2/config/MID360_config_gazebo.json',
-        'LIVOX_MID360_CONFIG_NO_TILT': '/home/ywj/git/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/livox_ros_driver2/config/MID360_config_gazebo.json',
         
         # ywj-B250-D3A主机配置 - Super-LIO
         'SUPER_LIO_BASE_CODE_PATH': '/home/ywj/git/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/Super-LIO/',
-        'SUPER_LIO_SAVE_MAP': False,  # 台式机离线开发，不保存地图
+        'SUPER_LIO_SAVE_MAP': True,  # 台式机离线开发，不保存地图
         'SUPER_LIO_SAVE_MAP_DIR': '/home/ywj/slam_data/pcd',
         'SUPER_LIO_LIDAR_X': -0.07,  # 雷达x轴偏移量
         'SUPER_LIO_LIDAR_Z': -0.1,  # 雷达z轴偏移量
@@ -236,6 +246,11 @@ config_by_machine = {
         
         #SC-PGO
         'SC_PGO_SAVE_DIRECTORY': '/home/ywj/save_data/',
+        
+        # DESKTOP-ypat主机配置 - OctoPlanner3D
+        'OCTOPLANNER_BASE_CODE_PATH': '/home/ywj/git/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/OctoPlanner3D-ROS2/',
+        'OCTOPLANNER_PCD_FILE_PATH': '/home/ywj/slam_data/pcd/octomap.pcd',
+        'OCTOPLANNER_PARAMS_FILE': '/home/ywj/git/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/OctoPlanner3D-ROS2/config/params.yaml',
     },
     'orin-nx': {
         # orin-nx主机配置 - 全局配置
@@ -262,8 +277,7 @@ config_by_machine = {
         'FAST_LIO_MAP_FILE_PATH': '/home/ztl/slam_data/pcd/test.pcd',  # 添加的地图文件路径
         
         # orin-nx主机配置 - Livox MID360
-        'LIVOX_MID360_CONFIG': '/home/ztl/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/livox_ros_driver2/config/MID360_config_tilt.json',
-        'LIVOX_MID360_CONFIG_NO_TILT': '/home/ztl/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/livox_ros_driver2/config/MID360_config.json',
+        'LIVOX_MID360_CONFIG': '/home/ztl/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/livox_ros_driver2/config/MID360_config.json',
         
         # orin-nx主机配置 - Super-LIO
         'SUPER_LIO_BASE_CODE_PATH': '/home/ztl/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/Super-LIO/',
@@ -275,45 +289,11 @@ config_by_machine = {
 
         #SC-PGO
         'SC_PGO_SAVE_DIRECTORY': '/home/ztl/save_data/',
-    },
-    'CrazyTreeChen': {
-        # CrazyTreeChen主机配置 - 全局配置
-        'DEFAULT_NAMESPACE': '',
-        'DEFAULT_USE_SIM_TIME': False,
-        'ONLINE_LIDAR': True,
         
-        # CrazyTreeChen主机配置 - LIO-SAM
-        'LIO_SAM_BASE_CODE_PATH': '/home/crazytree/ros_ws/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/LIO-SAM_MID360_ROS2_DOG/',
-        'DEFAULT_BAG_PATH': '/home/crazytree/slam_data/livox_record_new/',
-        'DEFAULT_RELIABILITY_OVERRIDE': '/home/crazytree/slam_data/reliability_override.yaml',
-        'LIO_SAM_DEFAULT_LOAM_SAVE_DIR': '/home/crazytree/slam_data/loam/',
-        
-        # CrazyTreeChen主机配置 - Nav2
-        'NAV2_BASE_CODE_PATH': '/home/crazytree/ros_ws/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/nav2_dog_slam/',
-        'NAV2_DEFAULT_MAP_FILE': "/home/crazytree/slam_data/grid_map/map.yaml",
-        'NAV2_DEFAULT_WEB_SCRIPT_PATH': '/home/crazytree/ros_ws/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/nav2_dog_slam/web/run_web.sh',
-        'NAV2_DEFAULT_BT_XML_PATH': '/home/crazytree/ros_ws/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/nav2_dog_slam/config/navigate_to_pose_w_replanning_and_recovery.xml',
-        'NAV2_DEFAULT_PARAMS_FILE': '/home/crazytree/ros_ws/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/nav2_dog_slam/config/nav2_params.yaml',
-        
-        # CrazyTreeChen主机配置 - FAST-LIO
-        'FAST_LIO_BASE_CODE_PATH': '/home/crazytree/ros_ws/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/FAST_LIO_ROS2_edit/',
-        'FAST_LIO_LIDAR_TYPE': 1,  # 默认lidar_type为1
-        'FAST_LIO_MAP_FILE_PATH': '/home/crazytree/slam_data/pcd/test.pcd',  # 默认地图文件路径
-        
-        # CrazyTreeChen主机配置 - Livox MID360
-        'LIVOX_MID360_CONFIG': '/home/crazytree/ros_ws/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/livox_ros_driver2/config/MID360_config.json',
-        'LIVOX_MID360_CONFIG_NO_TILT': '/home/crazytree/ros_ws/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/livox_ros_driver2/config/MID360_config.json',
-        
-        # CrazyTreeChen主机配置 - Super-LIO
-        'SUPER_LIO_BASE_CODE_PATH': '/home/crazytree/ros_ws/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/Super-LIO/',
-        'SUPER_LIO_SAVE_MAP': True,  # 默认保存地图
-        'SUPER_LIO_SAVE_MAP_DIR': '/home/crazytree/slam_data/pcd',
-        'SUPER_LIO_LIDAR_X': -0.07,  # 雷达x轴偏移量
-        'SUPER_LIO_LIDAR_Z': -0.1,  # 雷达z轴偏移量
-        'SUPER_LIO_LIDAR_TILT_ANGLE': -0.0,  # 雷达倾斜角度
-        
-        #SC-PGO
-        'SC_PGO_SAVE_DIRECTORY': '/home/crazytree/save_data/',
+        # orin-nx主机配置 - OctoPlanner3D
+        'OCTOPLANNER_BASE_CODE_PATH': '/home/ztl/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/OctoPlanner3D-ROS2/',
+        'OCTOPLANNER_PCD_FILE_PATH': '/home/ztl/slam_data/pcd/octomap.pcd',
+        'OCTOPLANNER_PARAMS_FILE': '/home/ztl/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/OctoPlanner3D-ROS2/config/params.yaml',
     }
 }
 
@@ -346,7 +326,6 @@ default_config = {
     
     # Livox MID360 默认配置
     'LIVOX_MID360_CONFIG': '/home/ztl/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/livox_ros_driver2/config/MID360_config.json',
-    'LIVOX_MID360_CONFIG_NO_TILT': '/home/ztl/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/livox_ros_driver2/config/MID360_config.json',
     
     # Super-LIO 默认配置
     'SUPER_LIO_BASE_CODE_PATH': '/home/ztl/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/Super-LIO/',
@@ -359,9 +338,10 @@ default_config = {
     #SC-PGO
     'SC_PGO_SAVE_DIRECTORY': '/home/ztl/save_data/',
     
-    # 3D LiDAR 重定位
-    'ENABLE_3D_RELOCALIZATION': False,
-    'PCD_MAP_DIRECTORY': '/home/ztl/slam_data/pcd/',
+    # OctoPlanner3D 默认配置
+    'OCTOPLANNER_BASE_CODE_PATH': '/home/ztl/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/OctoPlanner3D-ROS2/',
+    'OCTOPLANNER_PCD_FILE_PATH': '/home/ztl/slam_data/pcd/octomap.pcd',
+    'OCTOPLANNER_PARAMS_FILE': '/home/ztl/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/OctoPlanner3D-ROS2/config/params.yaml',
 }
 
 # 根据当前主机名选择配置
@@ -383,7 +363,6 @@ if not DEFAULT_USE_SIM_TIME:
 
 # 导出 Livox MID360 配置参数
 LIVOX_MID360_CONFIG = selected_config['LIVOX_MID360_CONFIG']
-LIVOX_MID360_CONFIG_NO_TILT = selected_config['LIVOX_MID360_CONFIG_NO_TILT']
 
 
 
@@ -414,9 +393,10 @@ SUPER_LIO_LIDAR_TILT_ANGLE = selected_config['SUPER_LIO_LIDAR_TILT_ANGLE']
 # ========== 导出SC-PGO配置参数 ==========
 SC_PGO_SAVE_DIRECTORY = selected_config['SC_PGO_SAVE_DIRECTORY']
 
-# ========== 导出3D LiDAR重定位配置参数 ==========
-ENABLE_3D_RELOCALIZATION = selected_config.get('ENABLE_3D_RELOCALIZATION', False)
-PCD_MAP_DIRECTORY = selected_config.get('PCD_MAP_DIRECTORY', '/home/ztl/slam_data/pcd/')
+# ========== 导出OctoPlanner配置参数 ==========
+OCTOPLANNER_BASE_CODE_PATH = selected_config['OCTOPLANNER_BASE_CODE_PATH']
+OCTOPLANNER_PCD_FILE_PATH = selected_config['OCTOPLANNER_PCD_FILE_PATH']
+OCTOPLANNER_PARAMS_FILE = selected_config['OCTOPLANNER_PARAMS_FILE']
 
 # ========== 坐标系名称配置 ==========
 MAP_FRAME = 'map'

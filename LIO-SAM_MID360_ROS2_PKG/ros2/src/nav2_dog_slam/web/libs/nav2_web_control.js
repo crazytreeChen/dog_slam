@@ -36,9 +36,8 @@
     // 根据命名空间动态计算的话题/服务名称
     let MAP_TOPIC = ns('/map');
     let ROBOT_FRAME = nsFrame('base_link');
-    let SUPER_LIO_ODOM_TOPIC = ns('/lio/odom'); // super_lio发布的里程计话题
-    let SUPER_LIO_FRONT_ODOM_TOPIC = ns('/lio/odom'); // super_lio_front发布的里程计话题
     let AMCL_POSE_TOPIC = ns('/amcl_pose'); // AMCL发布的定位话题
+    let PCL_POSE_TOPIC = ns('/pcl_pose'); // 3D定位(PCL)发布的定位话题
     let CMD_TOPIC = '/cmd_vel';
     let GOAL_TOPIC = '/goal_pose';
     let INITIAL_POSE_TOPIC = '/initialpose';
@@ -46,8 +45,6 @@
     let TF_TOPIC = '/tf'; // TF话题始终在全局命名空间
     let PLAN_TOPIC = ns('/plan');
     let FOOTPRINT_TOPIC = ns('/global_costmap/published_footprint');
-    let PREEMPT_TELEOP_TOPIC = ns('/preempt_teleop');
-    let SPEED_LIMIT_TOPIC = ns('/speed_limit');
     let LOCAL_COSTMAP_TOPIC = ns('/local_costmap/costmap');
   // 位置源选择：'super_lio' 或 'amcl'
   let positionSource = 'amcl'; // 默认使用AMCL定位信息
@@ -73,8 +70,10 @@
     let goalPosition = null;
     let initialPosePosition = null;
     let laserScanData = null; // 激光扫描数据
-    let showLaserScan = false; // 是否显示激光扫描数据（默认关闭）
-    let showLocalCostmap = true; // 是否显示 local_costmap（默认开启）
+    let showLaserScan = true;  // 是否显示激光扫描数据（默认开启）
+    let showLocalCostmap = false; // 是否显示 local_costmap（默认关闭）
+    let scanTopicObj = null;    // scan订阅句柄，toggle时用于unsubscribe
+    let costmapTopicObj = null; // costmap订阅句柄，toggle时用于unsubscribe
     let lastLocalCostmap = null; // 最新的 local_costmap 数据
     let scale = 1.0; // 缩放比例
     let offsetX = 0; // 偏移量X
@@ -98,6 +97,11 @@
     let isProcessingMap = false; // 是否正在处理地图数据
     let pendingMapData = null; // 待处理的最新地图数据
     let pendingMapReceiveTime = 0; // 待处理地图数据的接收时间
+    
+    // 地图接收超时检测
+    let mapWaitStartTime = 0;       // 开始等待地图的时间戳
+    let mapWaitTimedOut = false;    // 是否已超时
+    const MAP_WAIT_TIMEOUT_MS = 120000; // 120秒超时（6000x2000大图JSON序列化需30-50秒）
     
     // 独立渲染：地图和激光点云使用不同的渲染循环
     let mapRenderPending = false; // 地图渲染待处理
@@ -221,17 +225,14 @@
     function refreshTopicNames() {
       MAP_TOPIC = ns('/map');
       ROBOT_FRAME = nsFrame('base_footprint');
-      SUPER_LIO_ODOM_TOPIC = ns('/lio/odom');
-      SUPER_LIO_FRONT_ODOM_TOPIC = ns('/lio/odom');
       AMCL_POSE_TOPIC = ns('/amcl_pose');
+      PCL_POSE_TOPIC = ns('/pcl_pose');
       CMD_TOPIC = '/cmd_vel';
       GOAL_TOPIC = '/goal_pose';
       INITIAL_POSE_TOPIC = '/initialpose';
       SCAN_TOPIC = ns('/scan');
       PLAN_TOPIC = ns('/plan');
       FOOTPRINT_TOPIC = ns('/global_costmap/published_footprint');
-      PREEMPT_TELEOP_TOPIC = ns('/preempt_teleop');
-      SPEED_LIMIT_TOPIC = ns('/speed_limit');
       LOCAL_COSTMAP_TOPIC = ns('/local_costmap/costmap');
     }
     
@@ -287,12 +288,16 @@
       const worldX = (mouseX - offsetX) / scale + originX;
       const worldY = (offsetY - mouseY) / scale + originY;
       
-      // 检查坐标是否在有效范围内
+      // 检查坐标是否在有效范围内（origin可能为负数）
       if (currentMap) {
         const mapWidth = currentMap.info.width * currentMap.info.resolution;
         const mapHeight = currentMap.info.height * currentMap.info.resolution;
+        const minX = originX;
+        const maxX = originX + mapWidth;
+        const minY = originY;
+        const maxY = originY + mapHeight;
         
-        if (worldX < 0 || worldX > mapWidth || worldY < 0 || worldY > mapHeight) {
+        if (worldX < minX || worldX > maxX || worldY < minY || worldY > maxY) {
           return; // 点击在地图范围外，忽略
         }
       }
@@ -480,7 +485,7 @@
       const data = currentMap.data;
       
       // 计算目标缓存尺寸（如果地图太大则预缩放）
-      const MAX_CACHE_SIZE = 720;
+      const MAX_CACHE_SIZE = 8192;
       const maxDimension = Math.max(info.width, info.height);
       let targetWidth = info.width;
       let targetHeight = info.height;
@@ -681,9 +686,11 @@
       const endRow = Math.min(info.height, Math.ceil(offsetY / cellSize));
 
       // 逐行扫描，合并同色连续像素
+      // 注：row 递增方向 = 世界坐标Y递增方向 = 画布从下到上，
+      // 而 ROS OccupancyGrid 数据 data[row * width + col] 中 row=0 = 地图底部(最小Y)，
+      // 所以直接用 row 索引数据，不需要翻转。
       for (let row = startRow; row < endRow; row++) {
-        const flippedRow = info.height - 1 - row; // 地图数据Y轴翻转
-        const dataRowBase = flippedRow * info.width;
+        const dataRowBase = row * info.width;
         // canvasY 是当前行 cell 的左上角Y坐标（fillRect 从左上角绘制）
         const wy = originY + row * info.resolution; // 当前行底部在世界坐标系的Y值
         const cy = offsetY - (wy - originY) * scale - cellSize;
@@ -730,22 +737,27 @@
         ctx.font = '16px Arial';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText('等待地图数据...', canvas.width / 2, canvas.height / 2);
+        
+        if (mapWaitTimedOut) {
+          // 超时提示
+          ctx.fillStyle = '#ff4444';
+          ctx.font = 'bold 18px Arial';
+          ctx.fillText('[超时] 地图接收超时', canvas.width / 2, canvas.height / 2 - 60);
+          ctx.font = '14px Arial';
+          ctx.fillStyle = '#ff8888';
+          ctx.fillText('可能原因及排查步骤：', canvas.width / 2, canvas.height / 2 - 25);
+          ctx.fillStyle = '#ffaa66';
+          ctx.fillText('1. rosbridge fragment_timeout(10s) 对大图传输不够，已自动重试中', canvas.width / 2, canvas.height / 2);
+          ctx.fillText('2. map_server/octomap_server 生成大图耗时过长', canvas.width / 2, canvas.height / 2 + 22);
+          ctx.fillText('3. 在终端执行 ros2 topic echo /map --once | wc -c 检查地图大小', canvas.width / 2, canvas.height / 2 + 44);
+        } else {
+          const elapsed = Math.floor((performance.now() - mapWaitStartTime) / 1000);
+          ctx.fillText(`等待地图数据... (${elapsed}s)`, canvas.width / 2, canvas.height / 2);
+        }
         return { cacheRebuildTime: 0 };
       }
       
       const info = currentMap.info;
-      
-      // 检查缓存是否需要重建
-      const cacheRebuildStart = performance.now();
-      const needsRebuild = checkMapCacheNeedsRebuild(info);
-      
-      if (needsRebuild) {
-        // 同步重建缓存（为了准确计时，不使用Web Worker）
-        rebuildMapCacheSync(info, currentMap.data);
-      }
-      
-      const cacheRebuildTime = performance.now() - cacheRebuildStart;
       
       // 计算地图在Canvas上的绘制参数
       const mapWidthPixels = info.width * info.resolution * scale;
@@ -754,18 +766,53 @@
       const startX = offsetX;
       const startY = offsetY - mapHeightPixels;
       
-      // 判断是否需要直接从原始数据渲染（缩放较大时缓存分辨率不足）
-      // 条件：当地图在画布上的像素尺寸超过缓存图像尺寸的1.2倍时，直渲染以获得清晰细节
-      const cacheTooSmall = mapCacheCanvas && mapCacheValid && (
-        mapWidthPixels > mapCacheCanvas.width * 1.2 ||
-        mapHeightPixels > mapCacheCanvas.height * 1.2
+      // 检查缓存是否需要重建（只检查，不同步重建以避免大图卡死主线程）
+      const cacheRebuildStart = performance.now();
+      const needsRebuild = checkMapCacheNeedsRebuild(info);
+      
+      if (needsRebuild) {
+        // 触发异步重建（使用 Web Worker，不阻塞主线程）
+        // 注意：只更新 mapCacheCanvas 尺寸，实际数据由 Worker 异步填充
+        updateMapCache();
+      }
+      
+      const cacheRebuildTime = performance.now() - cacheRebuildStart;
+      
+      // 根据缓存状态决定渲染方式
+      const useDirectRender = !mapCacheValid || (
+        mapWidthPixels > mapCacheCanvas.width * 2.0 ||
+        mapHeightPixels > mapCacheCanvas.height * 2.0
       );
-
-      if (cacheTooSmall) {
-        // 直接从原始地图数据渲染可见区域，避免缓存拉伸导致的模糊
-        drawMapDirectFromData(ctx, currentMap, scale, offsetX, offsetY, canvas.width, canvas.height);
-      } else if (mapCacheCanvas && mapCacheValid) {
-        // 使用drawImage直接绘制缓存的地图
+      
+      if (useDirectRender) {
+        // 计算可见区域的地图格子数量，避免大图时主线程卡死
+        const cellSize = info.resolution * scale;
+        const visibleCols = Math.min(info.width, Math.ceil(canvas.width / cellSize));
+        const visibleRows = Math.min(info.height, Math.ceil(canvas.height / cellSize));
+        const visibleCells = visibleCols * visibleRows;
+        const MAX_VISIBLE_CELLS = 200000; // 最多处理20万格
+        
+        if (visibleCells <= MAX_VISIBLE_CELLS) {
+          // 可见格数可控，直接渲染原始数据
+          drawMapDirectFromData(ctx, currentMap, scale, offsetX, offsetY, canvas.width, canvas.height);
+          if (!mapCacheValid && mapWidthPixels > canvas.width) {
+            console.log(`[渲染] 缓存重建中，可见格数${visibleCells}，使用直接渲染`);
+          }
+        } else if (mapCacheCanvas && mapCacheValid) {
+          // 可见格数过多（大图缩小查看），缓存可用则用它
+          console.log(`[渲染优化] 可见格数${visibleCells}超过${MAX_VISIBLE_CELLS}，使用缓存渲染（可能有轻微模糊）`);
+          ctx.imageSmoothingEnabled = true;
+          ctx.drawImage(mapCacheCanvas, startX, startY, mapWidthPixels, mapHeightPixels);
+        } else {
+          // 缓存不可用，只显示提示
+          ctx.fillStyle = '#999';
+          ctx.font = '16px Arial';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText('地图加载中...', canvas.width / 2, canvas.height / 2);
+        }
+      } else {
+        // 缓存有效且尺寸合适，直接使用缓存
         ctx.imageSmoothingEnabled = true;
         ctx.drawImage(mapCacheCanvas, startX, startY, mapWidthPixels, mapHeightPixels);
       }
@@ -817,7 +864,7 @@
       const data = currentMap.data;
       
       // 计算目标缓存尺寸
-      const MAX_CACHE_SIZE = 720;
+      const MAX_CACHE_SIZE = 8192;
       const maxDimension = Math.max(info.width, info.height);
       let targetWidth = info.width;
       let targetHeight = info.height;
@@ -846,7 +893,7 @@
       const startTime = performance.now();
       
       // 计算是否需要预缩放
-      const MAX_CACHE_SIZE = 720;
+      const MAX_CACHE_SIZE = 8192;
       const maxDimension = Math.max(info.width, info.height);
       let targetWidth = info.width;
       let targetHeight = info.height;
@@ -1274,7 +1321,7 @@
         console.log('ROS Bridge连接已关闭');
       });
       
-      // 订阅地图主题
+      // 订阅地图主题（保存引用以便重试）
       var mapTopic = new ROSLIB.Topic({
         ros: ros,
         name: MAP_TOPIC,
@@ -1291,7 +1338,44 @@
       let lastMapProcessCompleteTime = 0; // 上一次处理完成的时间
       let mapUpdateCount = 0;
       
-      mapTopic.subscribe(function(mapMsg) {
+      // 地图重试订阅相关
+      let mapRetryCount = 0;
+      const MAP_MAX_RETRIES = 3;
+      
+      // 启动地图接收超时检测
+      function startMapTimeoutCheck() {
+        mapWaitStartTime = performance.now();
+        mapWaitTimedOut = false;
+        setTimeout(function checkMapTimeout() {
+          if (!currentMap && mapWaitStartTime > 0) {
+            mapRetryCount++;
+            if (mapRetryCount <= MAP_MAX_RETRIES) {
+              mapWaitTimedOut = true;
+              console.warn(`[地图超时] 第${mapRetryCount}次超时，正在重新订阅地图话题...`);
+              // 退避重试：指数退避 2s, 4s, 8s
+              const backoffMs = Math.min(2000 * Math.pow(2, mapRetryCount - 1), 10000);
+              document.getElementById('map-info').innerHTML = `⏳ 地图接收超时(第${mapRetryCount}次)，${backoffMs/1000}s后重试... 地图尺寸可能过大`;
+              // 取消旧订阅，重新订阅
+              mapTopic.unsubscribe();
+              setTimeout(() => {
+                mapWaitStartTime = performance.now();
+                mapWaitTimedOut = false;
+                mapTopic.subscribe(mapCallback);
+                console.log(`[地图重试] 已重新订阅 ${MAP_TOPIC}，重试次数:${mapRetryCount}`);
+                // 重新启动超时检测
+                setTimeout(checkMapTimeout, MAP_WAIT_TIMEOUT_MS);
+              }, backoffMs);
+            } else {
+              mapWaitTimedOut = true;
+              console.error(`[地图超时] 已重试${MAP_MAX_RETRIES}次仍未收到地图数据`);
+            }
+          }
+        }, MAP_WAIT_TIMEOUT_MS);
+      }
+      
+      // 地图消息回调（命名以便重用时引用）
+      function mapCallback(mapMsg) {
+        mapRetryCount = 0; // 收到数据后重置重试计数
         const receiveTime = performance.now();
         mapUpdateCount++;
         
@@ -1307,10 +1391,18 @@
         
         // 开始处理地图数据
         processMapData(mapMsg, receiveTime);
-      });
+      }
+      
+      // 首次订阅地图并启动超时检测
+      mapTopic.subscribe(mapCallback);
+      startMapTimeoutCheck();
       
       // 处理地图数据的函数
       function processMapData(mapMsg, originalReceiveTime) {
+        // 收到地图数据，清除超时状态
+        mapWaitTimedOut = false;
+        mapWaitStartTime = 0;
+        
         isProcessingMap = true;
         pendingMapData = null;
         
@@ -1443,67 +1535,125 @@
         
         return yaw;
       }
+
+      function quaternionFromYaw(yaw) {
+        return { x: 0, y: 0, z: Math.sin(yaw / 2), w: Math.cos(yaw / 2) };
+      }
       
-      // 启动map->odom TF查询定时器
+      // 启动TF查询，跟踪全部帧链：map→odom→world→base_footprint
       function startMapToOdomTFQuery(ros) {
-        console.log('启动map->odom TF查询定时器，每5秒查询一次');
+        console.log('启动TF查询，跟踪map→odom→world→base_footprint链');
         
-        // 订阅/tf话题来获取map->odom变换
-        const tfTopic = new ROSLIB.Topic({
-          ros: ros,
-          name: TF_TOPIC,
-          messageType: 'tf2_msgs/TFMessage'
-        });
-        
-        tfTopic.subscribe(function(tfMsg) {
-          // 遍历所有变换，查找map->odom
-          if (tfMsg.transforms) {
-            for (let transform of tfMsg.transforms) {
-              if (transform.header.frame_id === nsFrame('map')) {
-                if (transform.child_frame_id === nsFrame('odom')) {
-                mapToOdomTransform = {
-                  translation: {
-                    x: transform.transform.translation.x,
-                    y: transform.transform.translation.y,
-                    z: transform.transform.translation.z
-                  },
-                  rotation: {
-                    x: transform.transform.rotation.x,
-                    y: transform.transform.rotation.y,
-                    z: transform.transform.rotation.z,
-                    w: transform.transform.rotation.w
-                  },
-                  timestamp: Date.now()
-                };
-                lastMapToOdomUpdate = Date.now();
-                console.log('更新map->odom变换:', 
-                  'x=', mapToOdomTransform.translation.x.toFixed(3),
-                  'y=', mapToOdomTransform.translation.y.toFixed(3),
-                  'yaw=', (quaternionToYaw(mapToOdomTransform.rotation) * 180 / Math.PI).toFixed(1), '度');
-                } else if (transform.child_frame_id === nsFrame('world')) {
-                  window.mapToWorldTransform = {
-                    translation: {
-                      x: transform.transform.translation.x,
-                      y: transform.transform.translation.y,
-                      z: transform.transform.translation.z
-                    },
-                    rotation: {
-                      x: transform.transform.rotation.x,
-                      y: transform.transform.rotation.y,
-                      z: transform.transform.rotation.z,
-                      w: transform.transform.rotation.w
-                    },
-                    timestamp: Date.now()
-                  };
-                  console.log('更新map->world变换:', 
-                    'x=', window.mapToWorldTransform.translation.x.toFixed(3),
-                    'y=', window.mapToWorldTransform.translation.y.toFixed(3),
-                    'yaw=', (quaternionToYaw(window.mapToWorldTransform.rotation) * 180 / Math.PI).toFixed(1), '度');
-                }
-              }
+        // 处理TF消息的通用函数（同时用于/tf和/tf_static）
+        function processTfMessage(tfMsg) {
+          if (!tfMsg.transforms) return;
+          
+          // 先遍历，提取map→odom和odom→world
+          for (let t of tfMsg.transforms) {
+            const parent = t.header.frame_id;
+            const child = t.child_frame_id;
+            
+            // map→odom
+            if (parent === nsFrame('map') && child === nsFrame('odom')) {
+              mapToOdomTransform = extractTransform(t.transform);
+              lastMapToOdomUpdate = Date.now();
+              console.log('[TF-DEBUG] 收到map→odom变换:', 
+                'tx=', mapToOdomTransform.translation.x.toFixed(3), 
+                'ty=', mapToOdomTransform.translation.y.toFixed(3),
+                'from topic:', tfMsg._topic || 'unknown');
+            }
+            
+            // odom→world
+            if (parent === nsFrame('odom') && child === nsFrame('world')) {
+              window.odomToWorldTransform = extractTransform(t.transform);
+            }
+
+            // map→world（如果直连，兼容旧逻辑）
+            if (parent === nsFrame('map') && child === nsFrame('world')) {
+              window.mapToWorldTransform = extractTransform(t.transform);
             }
           }
+          
+          // 从map→odom + odom→world 合成 map→world
+          if (mapToOdomTransform && window.odomToWorldTransform) {
+            window.mapToWorldTransform = composeTransforms(mapToOdomTransform, window.odomToWorldTransform);
+          } else if (mapToOdomTransform && !window.odomToWorldTransform) {
+            // odom→world未发布（恒等变换），直接用map→odom作为map→world
+            window.mapToWorldTransform = mapToOdomTransform;
+          }
+          
+          // 再遍历，从world→base_footprint推算机器人位置
+          for (let t of tfMsg.transforms) {
+            if (t.child_frame_id === nsFrame('base_footprint')) {
+              const parent = t.header.frame_id;
+              const wp = extractTransform(t.transform);
+              
+              let pos = null;
+              let method = '';
+              if (parent === nsFrame('world')) {
+                method = 'applyMapToWorldTransform(world→base)';
+                pos = applyMapToWorldTransform(wp.translation.x, wp.translation.y, quaternionToYaw(wp.rotation));
+              } else if (parent === nsFrame('odom') && mapToOdomTransform) {
+                method = 'applyMapToOdomTransform(odom→base)';
+                pos = applyMapToOdomTransform(wp.translation.x, wp.translation.y, quaternionToYaw(wp.rotation));
+              }
+              
+              if (pos) {
+                if (window.mapToWorldTransform) {
+                  console.log('[TF-DEBUG] 机器人位置计算:', method,
+                    ' | world base:', wp.translation.x.toFixed(3), wp.translation.y.toFixed(3),
+                    ' | map→world:', window.mapToWorldTransform.translation.x.toFixed(3), window.mapToWorldTransform.translation.y.toFixed(3),
+                    ' |最终map位置:', pos.x.toFixed(3), pos.y.toFixed(3));
+                }
+                robotPosition.x = pos.x;
+                robotPosition.y = pos.y;
+                robotPosition.theta = pos.theta;
+                drawMap();
+              }
+              break; // 只需要最新的一个
+            }
+          }
+        }
+        
+        // 订阅 /tf（动态变换）
+        const tfTopic = new ROSLIB.Topic({
+          ros: ros,
+          name: '/tf',
+          messageType: 'tf2_msgs/TFMessage'
         });
+        tfTopic.subscribe(processTfMessage);
+        
+        // 也订阅 /tf_static（静态变换，如map→odom）
+        const tfStaticTopic = new ROSLIB.Topic({
+          ros: ros,
+          name: '/tf_static',
+          messageType: 'tf2_msgs/TFMessage'
+        });
+        tfStaticTopic.subscribe(processTfMessage);
+      }
+      
+      function extractTransform(tf) {
+        return {
+          translation: { x: tf.translation.x, y: tf.translation.y, z: tf.translation.z },
+          rotation:    { x: tf.rotation.x, y: tf.rotation.y, z: tf.rotation.z, w: tf.rotation.w },
+          timestamp: Date.now()
+        };
+      }
+      
+      function composeTransforms(a, b) {
+        // 复合变换：a * b（a后施加b）
+        const aYaw = quaternionToYaw(a.rotation);
+        const bYaw = quaternionToYaw(b.rotation);
+        const cosA = Math.cos(aYaw), sinA = Math.sin(aYaw);
+        return {
+          translation: {
+            x: a.translation.x + b.translation.x * cosA - b.translation.y * sinA,
+            y: a.translation.y + b.translation.x * sinA + b.translation.y * cosA,
+            z: a.translation.z + b.translation.z
+          },
+          rotation: quaternionFromYaw(aYaw + bYaw),
+          timestamp: Date.now()
+        };
       }
       
       // 应用map->odom变换到odom坐标
@@ -1513,21 +1663,18 @@
           return { x: odomX, y: odomY, theta: odomTheta };
         }
         
-        // 获取map->odom的平移和旋转
         const tx = mapToOdomTransform.translation.x;
         const ty = mapToOdomTransform.translation.y;
         const mapToOdomYaw = quaternionToYaw(mapToOdomTransform.rotation);
         
-        // 应用变换：map = map->odom * odom
-        // 先旋转，再平移
         const cosYaw = Math.cos(mapToOdomYaw);
         const sinYaw = Math.sin(mapToOdomYaw);
         
-        const mapX = tx + odomX * cosYaw - odomY * sinYaw;
-        const mapY = ty + odomX * sinYaw + odomY * cosYaw;
-        const mapTheta = odomTheta + mapToOdomYaw;
-        
-        return { x: mapX, y: mapY, theta: mapTheta };
+        return {
+          x: tx + odomX * cosYaw - odomY * sinYaw,
+          y: ty + odomX * sinYaw + odomY * cosYaw,
+          theta: odomTheta + mapToOdomYaw
+        };
       }
       
       function applyMapToWorldTransform(worldX, worldY, worldTheta) {
@@ -1551,116 +1698,9 @@
         return { x: mapX, y: mapY, theta: mapTheta };
       }
 
-      // 订阅里程计（带主备切换）：优先SUPER_LIO_ODOM_TOPIC，超时后尝试SUPER_LIO_FRONT_ODOM_TOPIC
-      let lioOdomReceived = false;
-      let lioFrontOdomTopic = null;
-      let fallbackTimer = null;
+      // 不使用里程计话题，机器人位置完全从TF树中的world→base_footprint获取
       
-      function onLioOdomReceived(odomMsg) {
-        if (positionSource !== 'super_lio') return;
-        
-        if (!lioOdomReceived) {
-          lioOdomReceived = true;
-          console.log('已从', SUPER_LIO_ODOM_TOPIC, '收到里程计数据，取消fallback定时器');
-          if (fallbackTimer) {
-            clearTimeout(fallbackTimer);
-            fallbackTimer = null;
-          }
-        }
-        
-          const odomX = odomMsg.pose.pose.position.x;
-          const odomY = odomMsg.pose.pose.position.y;
-          const odomTheta = quaternionToYaw(odomMsg.pose.pose.orientation);
-          
-          // 应用map->odom变换，得到map坐标系下的位置
-          const mapPosition = applyMapToOdomTransform(odomX, odomY, odomTheta);
-          
-          // 更新机器人位置和朝向
-          robotPosition.x = mapPosition.x;
-          robotPosition.y = mapPosition.y;
-          robotPosition.theta = mapPosition.theta;
-          
-          // 重绘地图以更新机器人位置
-          drawMap();
-        }
-      
-      function onLioFrontOdomReceived(odomMsg) {
-        if (positionSource !== 'super_lio') return;
-
-        if (!lioOdomReceived) {
-          lioOdomReceived = true;
-          console.log('主话题无数据，已切换到', SUPER_LIO_FRONT_ODOM_TOPIC, '接收里程计数据');
-
-          // 自适应检测帧约定：frame_id含有"world"时为z前向帧，否则为标准z天向帧
-          const frameId = (odomMsg.header && odomMsg.header.frame_id) || '';
-          window.frontOdomZForward = /world/i.test(frameId);
-          console.log('前雷达帧检测 frame_id:', frameId, '→ z前向:', window.frontOdomZForward);
-        }
-
-        const rawX = odomMsg.pose.pose.position.x;
-        const rawY = odomMsg.pose.pose.position.y;
-        const rawZ = odomMsg.pose.pose.position.z;
-        const ox = odomMsg.pose.pose.orientation.x;
-        const oy = odomMsg.pose.pose.orientation.y;
-        const oz = odomMsg.pose.pose.orientation.z;
-        const ow = odomMsg.pose.pose.orientation.w;
-
-        let mapX, mapY, mapTheta;
-
-        if (window.frontOdomZForward) {
-          // z前向帧：z=前向, y=侧向, x=高度 → map帧：x=前向, y=侧向
-          mapX = rawZ;
-          mapY = rawY;
-          // heading = 绕x轴(高度轴)的roll角，取反修正方向
-          const roll = Math.atan2(2 * (ow * ox + oy * oz), 1 - 2 * (ox * ox + oy * oy));
-          mapTheta = -roll;
-        } else {
-          // 标准z天向帧：x=前向, y=侧向, z=高度
-          mapX = rawX;
-          mapY = rawY;
-          mapTheta = quaternionToYaw(odomMsg.pose.pose.orientation);
-        }
-
-        const mapPosition = applyMapToWorldTransform(mapX, mapY, mapTheta);
-
-        robotPosition.x = mapPosition.x;
-        robotPosition.y = mapPosition.y;
-        robotPosition.theta = mapPosition.theta;
-
-        drawMap();
-      }
-      
-      // 订阅主话题
-      var superLioOdomTopic = new ROSLIB.Topic({
-        ros: ros,
-        name: SUPER_LIO_ODOM_TOPIC,
-        messageType: 'nav_msgs/Odometry'
-      });
-      superLioOdomTopic.subscribe(onLioOdomReceived);
-      console.log('正在订阅主里程计话题:', SUPER_LIO_ODOM_TOPIC);
-      
-      // 设置fallback定时器：3秒后主话题无数据则尝试备话题
-      fallbackTimer = setTimeout(function() {
-        if (!lioOdomReceived) {
-          console.warn('主话题', SUPER_LIO_ODOM_TOPIC, '在3秒内未收到数据，尝试备话题', SUPER_LIO_FRONT_ODOM_TOPIC);
-          lioFrontOdomTopic = new ROSLIB.Topic({
-            ros: ros,
-            name: SUPER_LIO_FRONT_ODOM_TOPIC,
-            messageType: 'nav_msgs/Odometry'
-          });
-          lioFrontOdomTopic.subscribe(onLioFrontOdomReceived);
-          
-          // 再设置一个超时，如果备话题也无数据则输出警告
-          setTimeout(function() {
-            if (!lioOdomReceived) {
-              console.error('主话题', SUPER_LIO_ODOM_TOPIC, '和备话题', SUPER_LIO_FRONT_ODOM_TOPIC, '均无数据，里程计定位不可用');
-            }
-          }, 5000);
-        }
-        fallbackTimer = null;
-      }, 3000);
-      
-      // 订阅AMCL位置主题（仍然保持）
+      // 订阅AMCL位置主题
       var amclPoseTopic = new ROSLIB.Topic({
         ros: ros,
         name: AMCL_POSE_TOPIC,
@@ -1682,18 +1722,34 @@
         }
       });
       
-      // 订阅激光扫描话题
+      // 订阅3D定位(PCL)位置主题
+      var pclPoseTopic = new ROSLIB.Topic({
+        ros: ros,
+        name: PCL_POSE_TOPIC,
+        messageType: 'geometry_msgs/PoseWithCovarianceStamped'
+      });
+      
+      pclPoseTopic.subscribe(function(poseMsg) {
+        // 只有当位置源设置为pcl_pose时才使用这些数据
+        if (positionSource === 'pcl_pose') {
+          robotPosition.x = poseMsg.pose.pose.position.x;
+          robotPosition.y = poseMsg.pose.pose.position.y;
+          robotPosition.theta = quaternionToYaw(poseMsg.pose.pose.orientation);
+          drawMap();
+        }
+      });
+      
+      // 订阅激光扫描话题（根据显示开关决定是否订阅，默认订阅）
       var scanTopic = new ROSLIB.Topic({
         ros: ros,
         name: SCAN_TOPIC,
         messageType: 'sensor_msgs/LaserScan'
       });
-      
-      console.log('正在订阅激光扫描话题:', SCAN_TOPIC);
-      
+      scanTopicObj = scanTopic;
+
+      // 始终注册回调，再根据初始显示开关决定是否启动订阅（默认为开）
       scanTopic.subscribe(function(scanMsg) {
         try {
-          // 保存激光扫描数据到独立变量
           lastLaserScanData = {
             angle_min: scanMsg.angle_min,
             angle_max: scanMsg.angle_max,
@@ -1703,16 +1759,15 @@
             ranges: scanMsg.ranges,
             intensities: scanMsg.intensities
           };
-          
-          // 同时更新兼容旧代码的变量
           laserScanData = lastLaserScanData;
-          
-          // 标记激光渲染待处理（不触发地图重绘）
           laserRenderPending = true;
         } catch (error) {
           console.error('处理激光扫描数据时出错:', error);
         }
       });
+      if (!showLaserScan) {
+        scanTopic.unsubscribe();
+      }
       
       // 订阅路径规划话题
       var planTopic = new ROSLIB.Topic({
@@ -1759,15 +1814,15 @@
       // 启动独立的激光渲染循环
       startLaserRenderLoop();
 
-      // 订阅 local_costmap 话题
+      // 订阅 local_costmap 话题（仅在显示时才实际订阅）
       var localCostmapTopic = new ROSLIB.Topic({
         ros: ros,
         name: LOCAL_COSTMAP_TOPIC,
         messageType: 'nav_msgs/OccupancyGrid'
       });
-      
-      console.log('正在订阅 local_costmap 话题:', LOCAL_COSTMAP_TOPIC);
-      
+      costmapTopicObj = localCostmapTopic;
+
+      // 始终注册回调，再根据初始显示开关决定是否启动订阅
       localCostmapTopic.subscribe(function(costmapMsg) {
         try {
           lastLocalCostmap = costmapMsg;
@@ -1778,6 +1833,9 @@
           console.error('处理 local_costmap 数据时出错:', error);
         }
       });
+      if (!showLocalCostmap) {
+        localCostmapTopic.unsubscribe();
+      }
       
       return ros;
     }
@@ -2125,15 +2183,28 @@
       laserCtx.globalAlpha = 1.0;
     }
     
-    // 切换激光扫描显示
+    // 切换激光扫描显示（真正取消/恢复订阅，降低rosbridge CPU）
     function toggleLaserScan(show) {
       showLaserScan = show;
+      if (show && scanTopicObj) {
+        scanTopicObj.subscribe(); // 恢复订阅
+      } else if (!show && scanTopicObj) {
+        scanTopicObj.unsubscribe(); // 取消订阅，rosbridge不再序列化scan数据
+        lastLaserScanData = null;
+        laserScanData = null;
+      }
       laserRenderPending = true;
     }
-    
-    // 切换 local_costmap 显示
+
+    // 切换 local_costmap 显示（真正取消/恢复订阅，降低rosbridge CPU）
     function toggleLocalCostmap(show) {
       showLocalCostmap = show;
+      if (show && costmapTopicObj) {
+        costmapTopicObj.subscribe(); // 恢复订阅
+      } else if (!show && costmapTopicObj) {
+        costmapTopicObj.unsubscribe(); // 取消订阅，rosbridge不再序列化costmap数据
+        lastLocalCostmap = null;
+      }
       laserRenderPending = true;
     }
     
@@ -2223,53 +2294,7 @@
         }
         console.log('已发送停止命令到', CMD_TOPIC);
         
-        // 方法2：发布到预抢占话题（如果系统支持）
-        try {
-          if (!window.preemptPublisher) {
-            window.preemptPublisher = new ROSLIB.Topic({
-              ros: window.ros,
-              name: PREEMPT_TELEOP_TOPIC,
-              messageType: "std_msgs/Empty"
-            });
-          }
-          
-          const preemptMsg = new ROSLIB.Message({});
-          window.preemptPublisher.publish(preemptMsg);
-          console.log('已发送预抢占信号');
-        } catch (preemptError) {
-          console.warn('预抢占话题发布失败（这是可选的）:', preemptError);
-        }
-        
-        // 方法3：发布到速度限制话题（让导航栈减速停止）
-        try {
-          if (!window.speedLimitPublisher) {
-            window.speedLimitPublisher = new ROSLIB.Topic({
-              ros: window.ros,
-              name: SPEED_LIMIT_TOPIC,
-              messageType: "nav2_msgs/SpeedLimit"
-            });
-          }
-          
-          const now = Date.now() / 1000.0;
-          const speedLimitMsg = new ROSLIB.Message({
-            header: {
-              stamp: { 
-                sec: Math.floor(now), 
-                nanosec: Math.floor((now % 1) * 1e9)
-              },
-              frame_id: nsFrame('base_link')
-            },
-            speed_limit: 0.0,  // 设置速度限制为0
-            percentage: false  // 使用绝对速度值
-          });
-          
-          window.speedLimitPublisher.publish(speedLimitMsg);
-          console.log('已发送速度限制命令');
-        } catch (speedError) {
-          console.warn('速度限制话题发布失败（这是可选的）:', speedError);
-        }
-        
-        // 方法4：尝试发布空路径让导航栈停止跟随
+        // 方法2：发布空路径让导航栈停止跟随
         try {
           if (!window.planPublisher) {
             window.planPublisher = new ROSLIB.Topic({
@@ -2320,6 +2345,8 @@
         statusElement.textContent = '当前：使用AMCL定位';
       } else if (source === 'super_lio') {
         statusElement.textContent = '当前：使用super_lio里程计';
+      } else if (source === 'pcl_pose') {
+        statusElement.textContent = '当前：使用3D定位(PCL)';
       }
       console.log('位置源已切换为:', source);
       // 切换位置源后，可能需要等待新数据到来才能更新显示
@@ -2328,7 +2355,7 @@
     // 发送控制模式命令
     function sendCtrlMode(modeValue) {
       if (!ros) {
-        alert('ROS未连接，请先连接ROS Bridge');
+        console.error('ROS未连接，请先连接ROS Bridge');
         return;
       }
       
@@ -2345,10 +2372,10 @@
       service.callService(request, function(result) {
         console.log('控制模式设置成功:', result);
         const modeNames = {0: '趴下', 1: '站立', 2: '半蹲', 61: '退出充电', 62: '进入充电'};
-        alert(`已设置为${modeNames[modeValue] || ('模式' + modeValue)}模式`);
+        showMessage(`已设置为${modeNames[modeValue] || ('模式' + modeValue)}模式`);
       }, function(error) {
         console.error('控制模式设置失败:', error);
-        alert('控制模式设置失败，请检查ROS连接');
+        showMessage('控制模式设置失败，请检查ROS连接');
       });
     }
     

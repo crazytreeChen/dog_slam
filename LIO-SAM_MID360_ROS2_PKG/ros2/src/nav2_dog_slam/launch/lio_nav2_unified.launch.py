@@ -5,7 +5,7 @@ from launch.actions import DeclareLaunchArgument, TimerAction, IncludeLaunchDesc
 from launch.conditions import IfCondition
 from launch_ros.actions import PushRosNamespace, Node
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PythonExpression, TextSubstitution
+from launch.substitutions import LaunchConfiguration, PythonExpression, TextSubstitution, PathJoinSubstitution
 from ament_index_python.packages import get_package_share_directory
 from launch_ros.descriptions import ParameterFile
 import os
@@ -37,12 +37,6 @@ try:
         BASE_LINK_FRAME, LIVOX_FRAME, SLAM_ALGORITHM,
         SC_PGO_SAVE_DIRECTORY,DEFAULT_NAMESPACE
     )
-    # 3D 重定位配置（可选，旧版 global_config 可能没有）
-    try:
-        from global_config import ENABLE_3D_RELOCALIZATION, PCD_MAP_DIRECTORY
-    except ImportError:
-        ENABLE_3D_RELOCALIZATION = False
-        PCD_MAP_DIRECTORY = '/home/ztl/slam_data/pcd/'
 except Exception as e:
     print(f"导入global_config失败: {e}")
     # 如果导入失败，使用默认值
@@ -70,8 +64,6 @@ except Exception as e:
     SLAM_ALGORITHM = 'super_lio'  # 默认算法
     SC_PGO_SAVE_DIRECTORY = '/home/ztl/save_data/'
     DEFAULT_NAMESPACE = ''
-    ENABLE_3D_RELOCALIZATION = False
-    PCD_MAP_DIRECTORY = '/home/ztl/slam_data/pcd/'
 
 # 获取当前launch文件所在目录
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -257,7 +249,7 @@ def generate_launch_description():
     
     # Super-LIO
     try:
-        super_lio_launch = IncludeLaunchDescription(
+        super_lio_zg_launch = IncludeLaunchDescription(
             PythonLaunchDescriptionSource([os.path.join(
                 get_package_share_directory('super_lio'), 'launch', 'Livox_mid360_zg.py')]),
             launch_arguments={
@@ -269,7 +261,7 @@ def generate_launch_description():
     except Exception as e:
         print(f"Super-LIO package not found: {e}")
         from launch.actions import LogInfo
-        super_lio_launch = LogInfo(msg="Super-LIO package not found, skipping...")
+        super_lio_zg_launch = LogInfo(msg="Super-LIO package not found, skipping...")
 
     # Super-LIO
     try:
@@ -318,7 +310,7 @@ def generate_launch_description():
     if str(SLAM_ALGORITHM).endswith('gazebo'):
         min_height = 0.2
     else:
-        min_height = -0.5
+        min_height = -0.3
 
     pointcloud_to_laserscan_node = Node(
         package='pointcloud_to_laserscan',
@@ -331,19 +323,19 @@ def generate_launch_description():
             ('/tf_static', '/tf_static')
         ],
         parameters=[{
-            'transform_tolerance': 0.2,
+            'transform_tolerance': 0.5,
             'min_height': min_height,
             'max_height': 1.0,
-            'angle_min': -3.1,
-            'angle_max': 3.1,
-            'angle_increment': 0.00869347338,
+            'angle_min': -2.8,
+            'angle_max': 2.8,
+            'angle_increment': 0.0174532925166667,
             'scan_time': 0.1,
             'range_min': 0.1,
             'range_max': 100.0,
             'use_inf': True,
             'inf_epsilon': 1.0,
             'use_sim_time': use_sim_time,
-            'target_frame': [ns, "/", lio_config['target_frame']],
+            'target_frame': ns_base_footprint_frame,
             'concurrency_level': 1,
         }],
         output='screen',
@@ -360,17 +352,20 @@ def generate_launch_description():
         parameters=[
             {'port': 9090},
             {'default_call_service_timeout': 5.0},
-            {'call_services_in_new_thread': True},
-            {'send_action_goals_in_new_thread': True},
-            {'fragment_timeout': 600},
-            {'max_message_size': 100000000}
+            {'call_services_in_new_thread': False},  # True→False，避免每次调用产生新线程，降低CPU
+            {'send_action_goals_in_new_thread': False},  # True→False，避免每次目标产生新线程
+            {'fragment_timeout': 120},          # 120s，匹配前端120s超时，6000x2000大图传输需30-50s
+            {'max_message_size': 500000000},     # 500MB，支持超大OccupancyGrid地图
+            {'unregister_timeout': 10.0},       # 订阅者注销超时，清理断开连接的积压
+            {'publish_timeout': 2.0},           # 发布超时，超时丢弃不再占用内存
+            {'retry_startup_delay': 5.0},       # 重连间隔
         ],
-        prefix=['taskset -c 0,1,2,3'],
+        prefix=['taskset -c 1,2,3'],
     )
     
     # web控制脚本
     web_script_process = ExecuteProcess(
-        cmd=['taskset', '-c', '0,1,2,3', 'bash', NAV2_DEFAULT_WEB_SCRIPT_PATH],
+        cmd=['taskset', '-c', '1,2,3', 'bash', NAV2_DEFAULT_WEB_SCRIPT_PATH],
         output='screen',
         shell=False
     )
@@ -446,7 +441,7 @@ def generate_launch_description():
             {'yaml_filename': map_file},
             {'frame_id': ns_map_frame}
         ],
-        prefix=['taskset -c 0,1,2,3'],
+        prefix=['taskset -c 1,2,3'],
         remappings=[
             ('/tf', '/tf'),
             ('/tf_static', '/tf_static')
@@ -486,7 +481,7 @@ def generate_launch_description():
             'autostart': True,
             'node_names': ['amcl']
         }],
-        prefix=['taskset -c 0,1,2,3'],
+        prefix=['taskset -c 1,2,3'],
     )
 
     lifecycle_manager_map_server = Node(
@@ -499,9 +494,68 @@ def generate_launch_description():
             'autostart': True,
             'node_names': ['map_server']
         }],
-        prefix=['taskset -c 0,1,2,3'],
+        prefix=['taskset -c 1,2,3'],
     )
     
+    # 4. GPS融合节点
+    # GPS预处理节点 - 处理GPS数据质量问题
+    gps_preprocessor_node = Node(
+        package='nav2_dog_slam',
+        executable='gps_preprocessor.py',
+        name='gps_preprocessor',
+        output='screen',
+        parameters=[{
+            'min_satellites': 4,
+            'max_hdop': 2.0,
+            'min_accuracy': 0.1,
+            'status_threshold': 0
+        }],
+        prefix=['taskset -c 1,2,3'],
+    )
+    
+    # NavSat Transform节点 - GPS坐标转换
+    # navsat_transform_node = Node(
+    #     package='robot_localization',
+    #     executable='navsat_transform_node',
+    #     name='navsat_transform_node',
+    #     output='screen',
+    #     parameters=[os.path.join(bringup_dir, 'config', 'navsat_transform.yaml')],
+    #     remappings=[
+    #         ('/imu/data', '/livox/imu'),  # IMU数据话题
+    #         ('/gps/fix', '/fix'),  # 使用预处理后的GPS数据
+    #         ('/odometry/gps', '/odometry/gps'),  # 转换后的GPS里程计
+    #         ('/odometry/filtered', '/odometry/gps_fused')  # EKF融合后的里程计
+    #     ]
+    # )
+    
+    # # EKF滤波器节点 - 传感器融合
+    # ekf_filter_node = Node(
+    #     package='robot_localization',
+    #     executable='ekf_node',
+    #     name='ekf_filter_node',
+    #     output='screen',
+    #     parameters=[os.path.join(bringup_dir, 'config', 'gps_ekf.yaml')],
+    #     remappings=[
+    #         ('/odometry/filtered', '/odometry/gps_fused'),  # GPS融合后的里程计
+    #         ('/tf', '/tf'),
+    #         ('/tf_static', '/tf_static')
+    #     ]
+    # )
+    
+    # # GPS融合生命周期管理器
+    # lifecycle_manager_gps = Node(
+    #     package='nav2_lifecycle_manager',
+    #     executable='lifecycle_manager',
+    #     name='lifecycle_manager_gps',
+    #     output='screen',
+    #     parameters=[{
+    #         'use_sim_time': use_sim_time,
+    #         'autostart': True,
+    #         # 'node_names': ['gps_preprocessor', 'navsat_transform_node', 'ekf_filter_node']
+    #         'node_names': ['navsat_transform_node']
+    #     }]
+    # )
+
     # 5. 导航栈节点
     navigation_include = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(launch_dir, 'navigation_launch.py')),
@@ -523,64 +577,27 @@ def generate_launch_description():
         }.items()
     )
 
+    # SC-PGO参数文件（统一ROS2参数格式）
+    sc_pgo_config_file = PathJoinSubstitution([
+        get_package_share_directory('sc_pgo_ros2'), 'config', 'btc_config.yaml'
+    ])
+
+    # 注意：2D模式下SC-PGO已禁用，此节点定义保留但未使用
+    # 如需启用2D建图+SC-PGO，请在launch_actions中添加
     sc_pgo_node = Node(
         package="sc_pgo_ros2",
         executable="alaserPGO",
         name="alaserPGO",
         output="screen",
-        parameters=[
-            {"scan_line": 4},
-            {"minimum_range": 0.3},
-            {"mapping_line_resolution": 0.4},
-            {"mapping_plane_resolution": 0.8},
-            {"mapviz_filter_size": 0.05},
-            {"keyframe_meter_gap": 1.0},
-            {"sc_dist_thres": 0.3},
-            {"sc_max_radius": 290.0},
-            {"save_directory": SC_PGO_SAVE_DIRECTORY},
-            {"use_sim_time": use_sim_time}
-        ],
+        parameters=[sc_pgo_config_file],
         remappings=[
-            ("/aft_mapped_to_init", lio_config['odom_topic']),
-            ("/velodyne_cloud_registered_local", lio_config['pointcloud_topic']),
-            ("/cloud_for_scancontext", lio_config['pointcloud_topic']),
-            ("/tf", "tf"),
-            ("/tf_static", "tf_static"),
+            ("aft_mapped_to_init", lio_config['odom_topic']),
+            ("velodyne_cloud_registered_local", lio_config['pointcloud_topic']),
+            ("cloud_for_scancontext", lio_config['pointcloud_topic']),
+            ("tf", "/tf"),
+            ("tf_static", "/tf_static"),
         ],
         prefix=['taskset -c 6'],
-    )
-
-    # ─── 3D LiDAR 初始位姿估计节点 ───
-    # 使用 KISS-Matcher + GICP 做全局匹配，发布 /initialpose 给 AMCL
-    # 仅在导航模式下启用，建图模式下不启动
-    lidar_3d_relocalizer_params = os.path.join(
-        get_package_share_directory('lidar_3d_relocalizer'),
-        'config', 'relocalizer_params.yaml'
-    )
-    lidar_3d_relocalizer_pcd = os.path.join(PCD_MAP_DIRECTORY, 'test.pcd')
-
-    lidar_3d_relocalizer_node = Node(
-        package='lidar_3d_relocalizer',
-        executable='lidar_3d_relocalizer_node',
-        name='lidar_3d_relocalizer_node',
-        namespace=ns if str(ns) != '' else '',
-        output='screen',
-        parameters=[
-            lidar_3d_relocalizer_params,
-            {
-                'use_sim_time': use_sim_time,
-                'pcd_map_path': lidar_3d_relocalizer_pcd,
-                'cloud_topic': lio_config['pointcloud_topic'],
-                'odom_topic': lio_config['odom_topic'],
-                'map_frame': str(ns_map_frame).strip("'") if str(ns) != '' else MAP_FRAME,
-                'odom_frame': str(ns_odom_frame).strip("'") if str(ns) != '' else ODOM_FRAME,
-                'base_frame': str(ns_base_footprint_frame).strip("'") if str(ns) != '' else BASE_LINK_FRAME,
-                'publish_tf': False,
-                'publish_initial_pose': True,
-                'max_retry': 3,
-            }
-        ],
-        prefix=['taskset -c 5,6'],
     )
     
 
@@ -604,7 +621,7 @@ def generate_launch_description():
     web_actions.append(rosbridge_websocket)
     
     # 3. 建图模式配置
-    if MANUAL_BUILD_MAP:
+    if MANUAL_BUILD_MAP or AUTO_BUILD_MAP:
         if BUILD_TOOL == 'slam_toolbox':
             # 建图模式 + slam_toolbox
             # unified_nodes.append(declare_slam_toolbox_params_cmd)
@@ -666,15 +683,6 @@ def generate_launch_description():
             )
         )
 
-        # 3D LiDAR 初始位姿估计（在 AMCL 之前启动，给 AMCL 提供初始位姿）
-        if ENABLE_3D_RELOCALIZATION:
-            nav2_actions.append(
-                TimerAction(
-                    period=3.0,  # 等待 LIO 和 map_server 就绪
-                    actions=[lidar_3d_relocalizer_node]
-                )
-            )
-
     # 4. 导航模式配置
     if BUILD_TOOL != 'slam_toolbox' :
         # 根据localization参数选择AMCL或SLAM Toolbox
@@ -701,6 +709,19 @@ def generate_launch_description():
                 condition=IfCondition(PythonExpression(["'", LaunchConfiguration('localization'), "' == 'slam_toolbox'"]))
             )
         )
+        
+        # # GPS融合节点
+        # nav2_actions.append(
+        #     TimerAction(
+        #         period=2.5,
+        #         actions=[
+        #             gps_preprocessor_node, 
+        #             # navsat_transform_node, 
+        #             # ekf_filter_node, 
+        #             # lifecycle_manager_gps
+        #             ]
+        #     )
+        # )
         
     # 导航栈
     nav2_actions.append(
@@ -737,6 +758,7 @@ def generate_launch_description():
         point_lio_launch,
         lio_sam_launch,
         super_lio_launch,
+        super_lio_zg_launch,
         super_lio_gazebo_launch,
         # 3. 添加统一的节点配置
         *unified_nodes

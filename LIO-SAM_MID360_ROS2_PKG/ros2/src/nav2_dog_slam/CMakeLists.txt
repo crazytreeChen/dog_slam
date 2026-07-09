@@ -68,15 +68,11 @@ install(
   DESTINATION lib/${PROJECT_NAME}
 )
 
-# Install dynamic base footprint script as executable
+# Install gps preprocessor script as executable
 install(
-  PROGRAMS scripts/dynamic_base_footprint.py
+  PROGRAMS src/gps_preprocessor.py
   DESTINATION lib/${PROJECT_NAME}
 )
-
-# GPS/RTK 纠偏功能已迁移至独立包 gps_fusion
-# 不再通过 nav2_dog_slam 安装旧版 gps_preprocessor
-# 如需启用 RTK 纠偏，请构建 gps_fusion 包并设置环境变量 ENABLE_RTK_CORRECTION=true
 
 # Install gps test publisher script as executable
 install(
@@ -108,12 +104,11 @@ install(
   DESTINATION lib/${PROJECT_NAME}
 )
 
-# Install set_initial_pose script as executable
+# Install OctoPlanner Nav2 Adapter script as executable (for 3D navigation)
 install(
-  PROGRAMS scripts/set_initial_pose.py
+  PROGRAMS scripts/octoplanner_nav2_adapter.py
   DESTINATION lib/${PROJECT_NAME}
 )
-
 
 # Install web interface files
 install(

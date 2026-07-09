@@ -87,15 +87,15 @@ def generate_launch_description():
             {'lio.output.world_frame': ns_world_frame},
             {'lio.output.imu_frame': ns_imu_frame},
         ],
-        prefix=['taskset -c 7'],
+        prefix=['taskset -c 4,5,6'],
         arguments=['--ros-args', '--log-level', 'info'],
         remappings=[
-            # ('lio/odom', 'front_lidar/odom'),
-            # ('lio/imu/odom', 'front_lidar/imu/odom'),
-            # ('lio/robo/odom', 'front_lidar/robo/odom'),
-            # ('lio/path', 'front_lidar/path'),
-            # ('lio/cloud_world', 'front_lidar/cloud_world'),
-            # ('lio/body/cloud', 'front_lidar/body/cloud'),
+            ('lio/odom', 'front_lidar/odom'),
+            ('lio/imu/odom', 'front_lidar/imu/odom'),
+            ('lio/robo/odom', 'front_lidar/robo/odom'),
+            ('lio/path', 'front_lidar/path'),
+            ('lio/cloud_world', 'front_lidar/cloud_world'),
+            ('lio/body/cloud', 'front_lidar/body/cloud'),
             ('/tf', '/tf'),
             ('/tf_static', '/tf_static'),
         ]
@@ -111,18 +111,20 @@ def generate_launch_description():
             rear_config_yaml,
             {'use_sim_time': DEFAULT_USE_SIM_TIME},
             {'lio.output.tf_base_footprint_frame': ns_base_footprint_frame},
+            # {'lio.output.world_frame': ns_world_rear_frame},
+            # {'lio.output.imu_frame': ns_imu_rear_frame},
             {'lio.output.world_frame': ns_world_frame},
             {'lio.output.imu_frame': ns_imu_frame},
         ],
-        prefix=['taskset -c 6'],
+        prefix=['taskset -c 7'],
         arguments=['--ros-args', '--log-level', 'info'],
         remappings=[
-            ('lio/odom', 'rear_lidar/odom'),
-            ('lio/imu/odom', 'rear_lidar/imu/odom'),
-            ('lio/robo/odom', 'rear_lidar/robo/odom'),
-            ('lio/path', 'rear_lidar/path'),
-            ('lio/cloud_world', 'rear_lidar/cloud_world'),
-            ('lio/body/cloud', 'rear_lidar/body/cloud'),
+            # ('lio/odom', 'rear_lidar/odom'),
+            # ('lio/imu/odom', 'rear_lidar/imu/odom'),
+            # ('lio/robo/odom', 'rear_lidar/robo/odom'),
+            # ('lio/path', 'rear_lidar/path'),
+            # ('lio/cloud_world', 'rear_lidar/cloud_world'),
+            # ('lio/body/cloud', 'rear_lidar/body/cloud'),
             ('/tf', '/tf'),
             ('/tf_static', '/tf_static'),
         ]
@@ -134,13 +136,13 @@ def generate_launch_description():
         executable='pointcloud_to_laserscan_node',
         name='front_pointcloud_to_laserscan',
         remappings=[
-            ('cloud_in', 'lio/cloud_world'),
+            ('cloud_in', 'front_lidar/cloud_world'),
             ('scan', 'scan_front'),
         ],
         parameters=[
             {'use_sim_time': DEFAULT_USE_SIM_TIME},
             {'target_frame': ns_base_footprint_frame},
-            {'transform_tolerance': 0.1},
+            {'transform_tolerance': 0.5},
             {'min_height': -0.3},
             {'max_height': 1.0},
             {'angle_min': -3.14159},
@@ -152,7 +154,7 @@ def generate_launch_description():
             {'use_inf': True},
             {'inf_epsilon': 1.0},
         ],
-        prefix=['taskset -c 4'],
+        prefix=['taskset -c 4,5,6'],
     )
     ld.add_action(front_pointcloud_to_laserscan)
 
@@ -161,7 +163,7 @@ def generate_launch_description():
         executable='pointcloud_to_laserscan_node',
         name='rear_pointcloud_to_laserscan',
         remappings=[
-            ('cloud_in', 'rear_lidar/cloud_world'),
+            ('cloud_in', 'lio/cloud_world'),
             ('scan', 'scan_rear'),
         ],
         parameters=[
@@ -179,7 +181,7 @@ def generate_launch_description():
             {'use_inf': True},
             {'inf_epsilon': 1.0},
         ],
-        prefix=['taskset -c 5'],
+        prefix=['taskset -c 4,5,6'],
     )
     ld.add_action(rear_pointcloud_to_laserscan)
 
@@ -189,7 +191,7 @@ def generate_launch_description():
         name='scan_merger',
         output='screen',
         parameters=[{'use_sim_time': DEFAULT_USE_SIM_TIME}],
-        prefix=['taskset -c 4,5'],
+        prefix=['taskset -c 4,5,6'],
     )
     ld.add_action(scan_merger)
 
@@ -216,7 +218,7 @@ def generate_launch_description():
         executable='static_transform_publisher',
         name='static_transform_odom_to_world',
         parameters=[{'use_sim_time': DEFAULT_USE_SIM_TIME}],
-        arguments=['0.36615', '0.0', '0.0', '0.0', str(deg_to_rad(90)), '0.0', ns_odom_frame, ns_world_frame],
+        arguments=['0.0', '0.0', '0.0', '0.0', str(deg_to_rad(90)), '0.0', ns_odom_frame, ns_world_frame],
         output='screen'
     )
     ld.add_action(static_transform_odom_to_world)
@@ -226,7 +228,7 @@ def generate_launch_description():
     #     executable='static_transform_publisher',
     #     name='static_transform_odom_to_world_rear',
     #     parameters=[{'use_sim_time': DEFAULT_USE_SIM_TIME}],
-    #     arguments=['-0.36615', '0.0', '0.0', '0.0', str(deg_to_rad(90)), str(deg_to_rad(180)), ns_odom_frame, ns_world_rear_frame],
+    #     arguments=['-0.7323', '0.0', '0.0', '0.0', str(deg_to_rad(90)), str(deg_to_rad(180)), ns_odom_frame, ns_world_rear_frame],
     #     output='screen'
     # )
     # ld.add_action(static_transform_odom_to_world_rear)
@@ -236,7 +238,7 @@ def generate_launch_description():
         executable='static_transform_publisher',
         name='static_transform_world_to_imu',
         parameters=[{'use_sim_time': DEFAULT_USE_SIM_TIME}],
-        arguments=['0.0', '0.0', '-0.36615', '0.0', '0.0', '0.0', ns_world_frame, ns_imu_frame],
+        arguments=['0.0', '0.0', '0.0', '0.0', '0.0', '0.0', ns_world_frame, ns_imu_frame],
         output='screen'
     )
     ld.add_action(static_transform_world_to_imu)
@@ -246,7 +248,8 @@ def generate_launch_description():
         executable='static_transform_publisher',
         name='imu_to_base_link_tf',
         parameters=[{'use_sim_time': DEFAULT_USE_SIM_TIME}],
-        arguments=['0.0', '0', '0.0', '0', str(deg_to_rad(-90)), '0', ns_imu_frame, ns_base_link_frame],
+        # arguments=['0.0', '0', '-0.36', '0', str(deg_to_rad(-90)), '0', ns_imu_frame, ns_base_link_frame],
+        arguments=['0.0', '0', '-0.36',  str(deg_to_rad(180)), str(deg_to_rad(90)), str(deg_to_rad(0)), ns_imu_frame, ns_base_link_frame],
         output='screen'
     )
     ld.add_action(imu_to_base_link_tf)
@@ -257,7 +260,7 @@ def generate_launch_description():
         executable='static_transform_publisher',
         name='base_link_to_rslidar_head_tf',    
         parameters=[{'use_sim_time': DEFAULT_USE_SIM_TIME}],
-        arguments=['0.36615', '0', '0.0', '0.0', str(deg_to_rad(90)), '0', ns_base_link_frame, 'rslidar_head'],
+        arguments=['0.36', '0', '0.0', '0.0', str(deg_to_rad(90)), '0', ns_base_link_frame, 'rslidar_head'],
         output='screen'
     )
     ld.add_action(base_link_to_rslidar_head_tf)
@@ -268,19 +271,19 @@ def generate_launch_description():
         executable='static_transform_publisher',
         name='rslidar_head_to_rslidar_tail_tf',
         parameters=[{'use_sim_time': DEFAULT_USE_SIM_TIME}],
-        arguments=['0', '0', '-1.05', str(deg_to_rad(180)), str(deg_to_rad(180)), str(deg_to_rad(0)), 'rslidar_head', 'rslidar_tail'],
+        arguments=['-0.007', '-0.048000', '-0.7323', str(deg_to_rad(179.77)), str(deg_to_rad(180.57)), str(deg_to_rad(-0.63)), 'rslidar_head', 'rslidar_tail'],
         output='screen'
     )
     ld.add_action(rslidar_head_to_rslidar_tail_tf)
 
-    # # rslidar_head -> rslidar_tail (雷达到雷达的静态变换)
+    # # rslidar_tail -> ns_imu_rear (雷达到雷达的静态变换)
     # rslidar_tail_to_imu_rear_tf = Node(
     #     package='tf2_ros',
     #     executable='static_transform_publisher',
     #     name='rslidar_tail_to_imu_rear_tf',
     #     parameters=[{'use_sim_time': DEFAULT_USE_SIM_TIME}],
     #     arguments=['0', '0', '0', '0', '0', '0', 'rslidar_tail', ns_imu_rear_frame],
-    #     output='screen'
+    #    output='screen'
     # )
     # ld.add_action(rslidar_tail_to_imu_rear_tf)
 

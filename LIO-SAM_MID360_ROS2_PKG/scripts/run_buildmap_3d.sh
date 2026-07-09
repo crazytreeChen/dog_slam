@@ -1,5 +1,5 @@
 #!/bin/bash
-echo "===== ROS2 统一建图模式启动脚本 ====="
+echo "===== ROS2 统一3D建图模式启动脚本 ====="
 WORKSPACE_DIR="/home/ztl/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2"
 
 # 支持的LIO算法列表
@@ -16,7 +16,7 @@ if [ $# -eq 0 ]; then
 fi
 
 SLAM_ALGORITHM=$1
-BUILD_TOOL=${2:-"slam_toolbox"}
+BUILD_TOOL=${2:-"octomap_server"}
 
 # 验证算法是否支持
 if [[ ! " ${SUPPORTED_ALGORITHMS[@]} " =~ " ${SLAM_ALGORITHM} " ]]; then
@@ -69,14 +69,10 @@ if [ "$SLAM_ALGORITHM" = "no_lio" ]; then
     fi
 fi
 
-echo "启动建图模式..."
+echo "启动3D建图模式..."
 echo "SLAM算法: $SLAM_ALGORITHM"
 echo "建图工具: $BUILD_TOOL"
 echo "MANUAL_BUILD_MAP=$MANUAL_BUILD_MAP"
 export SLAM_ALGORITHM=$SLAM_ALGORITHM
 export BUILD_TOOL=$BUILD_TOOL
-ros2 launch nav2_dog_slam lio_nav2_unified.launch.py
-
-
-
-
+ros2 launch nav2_dog_slam lio_nav2_unified_3d.launch.py

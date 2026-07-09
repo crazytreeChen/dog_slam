@@ -3,6 +3,11 @@ cd ~/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/ && source install/setup.bash
 colcon build --symlink-install --parallel-workers 4 --packages-skip livox_gazebo_garden fast_lio_robosense
 
 
+MAKEFLAGS=-j8 colcon build --symlink-install \
+  --packages-skip livox_gazebo_garden fast_lio_robosense \
+  --parallel-workers 4 \
+  --cmake-args -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_C_COMPILER_LAUNCHER=ccache
+
 
 # 机器狗站立：
 ros2 service call /rkbot/setctrlmode robot_interface/srv/SetCtrlMode "{mode: {value: 1}}"
@@ -81,14 +86,8 @@ sudo systemctl stop lio_sam_buildmap.service
 # 启动导航：
 sudo systemctl start lio_sam_nav2.service
 
-sudo systemctl stop lio_sam_nav2.service
-
-sudo systemctl restart lio_sam_nav2.service
-
 # 查看日志（启动后尽快运行，避免错过ERROR）：
 sudo journalctl -u lio_sam_nav2.service -f
-
-sudo systemctl status lio_sam_nav2.service
 
 # 设置初始点：
 rviz2内点击2d pose estimate后点击地图拖动方向
@@ -224,6 +223,42 @@ MANUAL_BUILD_MAP=False SLAM_ALGORITHM=point_lio ros2 launch nav2_dog_slam lio_na
 
 MANUAL_BUILD_MAP=False SLAM_ALGORITHM=super_lio ros2 launch nav2_dog_slam lio_nav2_unified.launch.py
 
+MANUAL_BUILD_MAP=False SLAM_ALGORITHM=super_lio ros2 launch nav2_dog_slam lio_nav2_unified_3d.launch.py
+
+
+# ===== OctoPlanner3D 三维导航 =====
+# 编译OctoPlanner（狗里面）
+colcon build --symlink-install --parallel-workers 4 --packages-select octo_planner3d global_config nav2_dog_slam
+
+# 启动3D导航系统（OctoPlanner + Nav2，默认SLAM算法）
+MANUAL_BUILD_MAP=False SLAM_ALGORITHM=super_lio ros2 launch nav2_dog_slam lio_nav2_unified_3d.launch.py
+
+# 使用其他SLAM算法的3D导航
+MANUAL_BUILD_MAP=False SLAM_ALGORITHM=fast_lio ros2 launch nav2_dog_slam lio_nav2_unified_3d.launch.py
+MANUAL_BUILD_MAP=False SLAM_ALGORITHM=lio_sam ros2 launch nav2_dog_slam lio_nav2_unified_3d.launch.py
+
+# 3D建图模式（OctoPlanner + SLAM建图）
+MANUAL_BUILD_MAP=True SLAM_ALGORITHM=super_lio ros2 launch nav2_dog_slam lio_nav2_unified_3d.launch.py
+
+# OctoPlanner单独测试（无Nav2）
+ros2 launch octo_planner3d octo_planner3d_nav2.launch.py
+
+# 发送3D导航目标
+ros2 topic pub /goal_pose geometry_msgs/msg/PoseStamped "{header: {frame_id: 'map'}, pose: {position: {x: 10.0, y: 5.0, z: 0.3}}}"
+
+# 观察OctoPlanner规划路径
+ros2 topic echo /planned_path
+
+# 测试模式：RViz Publish Point（蓝色路径，不影响导航）
+# 点击第1次：起点
+# 点击第2次：终点
+
+# 检查OctoPlanner配置（验证global_config）
+python3 -c "from global_config.global_config import OCTOPLANNER_PCD_FILE_PATH; print(OCTOPLANNER_PCD_FILE_PATH)"
+
+
+MANUAL_BUILD_MAP=True SLAM_ALGORITHM=super_lio ros2 launch nav2_dog_slam lio_nav2_unified_3d.launch.py
+
 ros2 launch fast_lio mapping.launch.py
 ros2 launch lio_sam lio_sam.launch.py
 ros2 launch point_lio mapping_mid360.launch.py
@@ -308,51 +343,3 @@ sudo systemctl start zg_pointcloud.service
 sudo systemctl stop lio_sam_nav2.service  && sudo systemctl restart rmw_control.service
 
 sudo systemctl start lio_sam_nav2.service && sudo journalctl -u lio_sam_nav2 -f
-
-
-# ════════════════════════════════════════════════════════════
-#  自动初始位姿校准 (auto_initial_pose_calibrator)
-# ════════════════════════════════════════════════════════════
-
-# 编译
-cd ~/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/ && source install/setup.bash
-colcon build --symlink-install --packages-select auto_initial_pose_calibrator
-
-# ── 被动持续定位 (推荐: 不控制机器人, 后台定时匹配) ──
-# 启动
-./scripts/start_passive_calibration.sh           # 小狗
-./scripts/start_passive_calibration.sh rkbot     # 中狗
-
-# 或直接调服务
-ros2 service call /start_passive_calibration std_srvs/srv/Trigger
-ros2 service call /rkbot/start_passive_calibration std_srvs/srv/Trigger
-
-# 停止
-ros2 service call /stop_passive_calibration std_srvs/srv/Trigger
-
-# 查看状态 (含被动最佳估计位姿)
-ros2 service call /auto_calibration_status std_srvs/srv/Trigger
-
-# 可视化被动匹配结果
-ros2 topic echo /debug/auto_initial_pose
-
-# ── 主动校准 (旋转360° + 8方向移动探索 + 避障) ──
-# 启动
-./scripts/start_active_calibration.sh
-ros2 service call /start_active_calibration std_srvs/srv/Trigger
-
-# 查看候选位姿
-ros2 topic echo /debug/candidates
-
-# ── 配置 (auto_initial_pose_calibrator.yaml) ──
-# passive_mode_enabled: true    # 启用被动模式
-# passive_interval: 60.0        # 匹配间隔(秒)
-# passive_frame_count: 30       # 每次匹配用最近N帧
-# passive_buffer_max: 300       # 循环缓冲区
-# auto_publish_initial_pose: false  # 只输出日志+debug, 不发/initialpose
-
-# ── 查看日志 ──
-sudo journalctl -u lio_sam_nav2.service -f | grep -E "被动|主动|偏差|校准|匹配"
-
-
-ros2 launch auto_initial_pose_calibrator auto_initial_pose_calibration.launch.py ns:=rkbot
