@@ -252,3 +252,5 @@ nul
 
 # AtomCode local-scope configs (machine-specific)
 .atomcode/local/
+LIO-SAM_MID360_ROS2_PKG/ros2/src/gps_fusion.zip
+LIO-SAM_MID360_ROS2_PKG/ros2/src/auto_initial_pose_calibrator.zip
