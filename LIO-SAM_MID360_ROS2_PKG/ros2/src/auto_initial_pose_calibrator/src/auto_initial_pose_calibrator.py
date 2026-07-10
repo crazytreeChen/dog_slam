@@ -144,18 +144,23 @@ class AutoInitialPoseCalibrator(Node):
         self.declare_parameter('motion_verification_threshold', 0.3)
         self.declare_parameter('motion_verification_angle_threshold_deg', 15.0)
 
+        # Nav2 安全互斥参数：检测 Nav2 是否在导航，防止抢 /cmd_vel 控制权
+        self.declare_parameter('nav_safety_enabled', True)         # 启用 Nav2 导航互斥检测
+        self.declare_parameter('nav_safety_timeout', 3.0)          # Nav2 非活跃超时 (秒)
+        self.declare_parameter('nav_safety_cmd_vel_threshold', 0.01)  # cmd_vel 幅值阈值 (非零判定)
+
         # 调试对比模式参数
         self.declare_parameter('auto_publish_initial_pose', False)
         self.declare_parameter('debug_comparison_mode', True)
 
         # ────── 开机自动启动与快速模式参数 ──────
-        self.declare_parameter('auto_start', True)           # 开机收到地图+scan后自动触发校准
+        self.declare_parameter('auto_start', False)          # 开机收到地图+scan后自动触发校准 (默认False, 需显式开启)
         self.declare_parameter('auto_start_delay', 3.0)      # 自动启动前的等待延迟 (秒)
         self.declare_parameter('quick_mode', False)           # 快速模式：跳过旋转+运动探索，仅做一次全局匹配
         self.declare_parameter('publish_after_rotation', True) # 旋转采集+多步匹配完成后直接发布初始位姿 (跳过运动探索)
 
         # ────── 被动模式参数 ──────
-        self.declare_parameter('passive_mode_enabled', True)    # 是否启用被动持续定位
+        self.declare_parameter('passive_mode_enabled', False)   # 是否启用被动持续定位 (默认False, 需显式开启)
         self.declare_parameter('passive_interval', 30.0)        # 被动匹配间隔 (秒)
         self.declare_parameter('passive_frame_count', 30)       # 每次被动匹配累积帧数
         self.declare_parameter('passive_buffer_max', 300)       # 循环缓冲区最大帧数
@@ -177,6 +182,9 @@ class AutoInitialPoseCalibrator(Node):
         self.declare_parameter('confidence_threshold_publish', 0.50)      # 允许发布 /initialpose 的置信度阈值
         self.declare_parameter('confidence_threshold_amcl', 0.35)         # 低置信度仍可辅助 AMCL 的阈值（仅监控）
         self.declare_parameter('deviation_monitor_enabled', True)         # 是否启用偏差监控
+
+        # ────── 校准超时控制参数 ──────
+        self.declare_parameter('calibration_timeout', 60.0)               # 校准超时 (秒), 超时后计算结果不再发布 /initialpose
 
         # ────── 运动状态跟踪参数 ──────
         self.declare_parameter('motion_tracking_enabled', True)          # 启用运动状态跟踪
@@ -328,6 +336,14 @@ class AutoInitialPoseCalibrator(Node):
         self.motion_verification_enabled = self.get_parameter('motion_verification_enabled').value
         self.motion_verification_threshold = self.get_parameter('motion_verification_threshold').value
         self.motion_verification_angle_threshold_deg = self.get_parameter('motion_verification_angle_threshold_deg').value
+
+        # Nav2 安全互斥参数读取
+        self.nav_safety_enabled = self.get_parameter('nav_safety_enabled').value
+        self.nav_safety_timeout = self.get_parameter('nav_safety_timeout').value
+        self.nav_safety_cmd_vel_threshold = self.get_parameter('nav_safety_cmd_vel_threshold').value
+
+        # 校准超时控制参数读取
+        self.calibration_timeout = self.get_parameter('calibration_timeout').value
 
         # 调试对比模式参数读取
         self.auto_publish_initial_pose = self.get_parameter('auto_publish_initial_pose').value
@@ -503,6 +519,12 @@ class AutoInitialPoseCalibrator(Node):
         # 使用相对路径让 ROS2 自动添加命名空间前缀（与 rtk_pose_monitor 保持一致）
         self.initialpose_sub = self.create_subscription(PoseWithCovarianceStamped, 'initialpose', self._initialpose_cb, 10)
 
+        # ────── Nav2 安全互斥: 监听 /cmd_vel 检测 Nav2 是否在导航 ──────
+        if self.nav_safety_enabled:
+            self._cmd_vel_safety_sub = self.create_subscription(
+                Twist, self.cmd_vel_topic, self._cmd_vel_safety_cb, 10)
+            self._logger.info(f'[Nav2安全互斥] 已启用，监听 {self.cmd_vel_topic} 检测 Nav2 导航状态')
+
         # ────── 发布器 ──────
         self.initialpose_pub = self.create_publisher(PoseWithCovarianceStamped, '/initialpose', 10)
         self.cmd_vel_pub = self.create_publisher(Twist, self.cmd_vel_topic, 10)
@@ -536,6 +558,14 @@ class AutoInitialPoseCalibrator(Node):
         self._auto_start_map_received = False        # 是否已收到地图
         self._auto_start_scan_received = False       # 是否已收到扫描
         self._auto_start_odom_received = False       # 是否已收到里程计
+
+        # ────── Nav2 导航互斥状态 ──────
+        self._nav2_last_active_time = None           # 最后一次检测到 Nav2 非零 cmd_vel 的时间 (ros2 Time)
+        self._calib_last_cmd_vel_time = 0.0          # 本节点最后一次发布 cmd_vel 的时间戳 (秒)
+        self._cmd_vel_safety_sub = None              # 安全监听 cmd_vel 的订阅器
+
+        # ────── 校准超时控制状态 ──────
+        self._calibration_start_time = None           # 校准服务被调用时的时间 (ros2 Time), None=无进行中的校准
 
         # ────── 定时器主循环 ──────
         self.indoor_timer = self.create_timer(0.1, self._indoor_loop)
@@ -789,7 +819,8 @@ class AutoInitialPoseCalibrator(Node):
 
     def _try_auto_start_indoor(self):
         """在 indoor_loop 的 IDLE 状态中检查是否应该自动启动。
-        逻辑与 _srv_start 对齐：被动模式不需要 odom，主动模式需要。"""
+        逻辑与 _srv_start 对齐：被动模式不需要 odom，主动模式需要。
+        增加 Nav2 导航互斥检测：Nav2 导航中不触发自动启动。"""
         if not self.auto_start or self._auto_start_triggered:
             return
         if self._auto_start_ready_time is None:
@@ -807,11 +838,17 @@ class AutoInitialPoseCalibrator(Node):
                 f'[自动启动] 数据就绪 {elapsed:.1f}s，被动模式已启用，'
                 '自动触发被动持续定位模式...'
             )
+            self._reset_calibration_timeout()
             self._start_passive_mode()
             return
 
         # 主动模式: 需要 odom
         if self.current_odom is None:
+            return
+
+        # ── Nav2 安全互斥: Nav2 导航中不触发自动启动 ──
+        if self._is_nav2_navigating():
+            self._logger.debug('[自动启动] Nav2 正在导航，延迟自动启动...')
             return
 
         elapsed = (self.get_clock().now() - self._auto_start_ready_time).nanoseconds / 1e9
@@ -823,6 +860,7 @@ class AutoInitialPoseCalibrator(Node):
             f'[自动启动] 数据就绪 {elapsed:.1f}s，自动触发室内初始位姿校准...'
         )
 
+        self._reset_calibration_timeout()
         # 直接进入校准流程（模拟 _srv_start 的逻辑，但不检查数据）
         self.indoor_phase = IndoorPhase.BOOT_DELAY
         self.boot_start_time = self.get_clock().now()
@@ -1093,6 +1131,75 @@ class AutoInitialPoseCalibrator(Node):
             qw = math.cos(est_yaw / 2.0)
             est_msg.pose.orientation = Quaternion(x=0.0, y=0.0, z=qz, w=qw)
             self.odom_est_pose_pub.publish(est_msg)
+
+    def _cmd_vel_safety_cb(self, msg):
+        """Nav2 安全互斥回调：监听 /cmd_vel 检测 Nav2 是否在主动导航。
+        
+        原理：如果收到的 cmd_vel 幅值超过阈值，且不是本节点自己发出的
+        （本节点仅在 ROTATING_360 / MOVING 等阶段发出非零 cmd_vel），
+        则标记 Nav2 正在导航。
+        使用指数衰减超时机制：最近 3 秒内有非零 cmd_vel 则判定 Nav2 活跃。
+        """
+        # 计算速度幅值
+        mag = math.sqrt(
+            msg.linear.x ** 2 + msg.linear.y ** 2 + msg.linear.z ** 2 +
+            msg.angular.x ** 2 + msg.angular.y ** 2 + msg.angular.z ** 2
+        )
+        if mag < self.nav_safety_cmd_vel_threshold:
+            return  # 零速度或极小速度，忽略
+
+        # 排除本节点自己在控制运动（旋转/移动探索阶段）
+        controlling_self = self.indoor_phase in (
+            IndoorPhase.ROTATING_360,
+            IndoorPhase.MOVING,
+        )
+        if controlling_self:
+            return  # 本节点正在主动控制，忽略自己发出的 cmd_vel
+
+        # 其他节点（Nav2 controller）在发非零 cmd_vel → 标记活跃
+        self._nav2_last_active_time = self.get_clock().now()
+        self._logger.debug(
+            f'[Nav2安全互斥] 检测到外部 cmd_vel (mag={mag:.3f}), '
+            f'当前校准阶段={self.indoor_phase.name}'
+        )
+
+    def _is_nav2_navigating(self) -> bool:
+        """检查 Nav2 是否处于活跃导航状态。
+        
+        Returns:
+            True: Nav2 正在导航（最近 nav_safety_timeout 秒内有非零 cmd_vel）
+            False: Nav2 未在导航，或安全互斥未启用
+        """
+        if not self.nav_safety_enabled or self._nav2_last_active_time is None:
+            return False
+        elapsed = (self.get_clock().now() - self._nav2_last_active_time).nanoseconds / 1e9
+        return elapsed < self.nav_safety_timeout
+
+    def _is_calibration_timed_out(self) -> bool:
+        """检查校准是否已超时。
+        
+        从服务调用（或自动触发）开始计时，超过 calibration_timeout 秒后返回 True。
+        超时后返回 True 并缓存，直到下次服务调用启动新校准。
+        calibration_timeout <= 0 时永久不超时。
+        
+        Returns:
+            True: 校准已超时
+            False: 未超时或未启动校准
+        """
+        if self._calibration_start_time is None:
+            return False
+        if self.calibration_timeout <= 0.0:
+            return False
+        elapsed = (self.get_clock().now() - self._calibration_start_time).nanoseconds / 1e9
+        return elapsed > self.calibration_timeout
+
+    def _reset_calibration_timeout(self):
+        """重置校准超时计时器（在新校准启动时调用）"""
+        self._calibration_start_time = self.get_clock().now()
+
+    def _clear_calibration_timeout(self):
+        """清除校准超时计时器（在校准完成或放弃后调用）"""
+        self._calibration_start_time = None
 
     def _amcl_cb(self, msg):
         # 记录 AMCL 位姿供偏差监控
@@ -2237,6 +2344,7 @@ class AutoInitialPoseCalibrator(Node):
                 self._debug_compare_all_references(
                     pose_to_publish[0], pose_to_publish[1], pose_to_publish[2],
                     source=f'被动{method}(拒绝)')
+            self._clear_calibration_timeout()  # 计算已完成，清除超时计时器
             self.indoor_phase = IndoorPhase.PASSIVE_COLLECTING
             return
 
@@ -2254,39 +2362,52 @@ class AutoInitialPoseCalibrator(Node):
         qz = math.sin(pose_to_publish[2]/2.0); qw = math.cos(pose_to_publish[2]/2.0)
         msg.pose.pose.orientation = Quaternion(x=0.0, y=0.0, z=qz, w=qw)
 
+        timed_out = self._is_calibration_timed_out()
         if self.auto_publish_initial_pose:
-            msg.pose.covariance = cov
-            self.initialpose_pub.publish(msg)
-            # 设置冷却期: 给 AMCL 时间收敛, 避免立即再次触发完整扫描匹配
-            self._publish_cooldown_until = self.get_clock().now().nanoseconds * 1e-9 + self.passive_publish_cooldown
-            self.passive_bootstrap_failures = 0  # 成功发布后重置引导计数器
-            # 高置信度: 完全更新参考; 中置信度: 只更新 map 位姿 (用于 odom 融合)
-            # 避免使用主动校准的旧参考位姿，导致后续 odom fusion 永远无法通过 wall coverage 检查
-            # bootstrap 模式下即使 conf 低于 th_up 也必须设置 map 位姿, 否则引导永远无法打破死锁
-            high_conf = (confidence >= th_up)
-            published_from_scratch = (self.last_calibrated_pose is None and confidence >= th_pub)
-            if high_conf or published_from_scratch:
+            if timed_out:
+                # 超时: 仅日志，不发布 /initialpose（内部位姿仍更新供后续融合用）
+                self.passive_bootstrap_failures = 0
                 self.last_calibrated_pose = (pose_to_publish[0], pose_to_publish[1], pose_to_publish[2])
                 if self.current_odom is not None:
                     curr_pos = self.current_odom.pose.pose.position
                     curr_yaw = self._quat_to_yaw(self.current_odom.pose.pose.orientation)
                     self.passive_last_odom = (curr_pos.x, curr_pos.y, curr_yaw)
-                    self.passive_odom_accum_dist = 0.0  # 重置累计位移
-                set_reference = True
-            elif confidence >= th_pub:
-                # 中置信度: 更新 map 位姿，同时更新 odom 基准
-                #（避免 passive_last_odom 长期不更新导致 odom fusion 被拦截）
-                self.last_calibrated_pose = (pose_to_publish[0], pose_to_publish[1], pose_to_publish[2])
-                if self.current_odom is not None:
-                    curr_pos = self.current_odom.pose.pose.position
-                    curr_yaw = self._quat_to_yaw(self.current_odom.pose.pose.orientation)
-                    self.passive_last_odom = (curr_pos.x, curr_pos.y, curr_yaw)
-                    self.passive_odom_accum_dist = 0.0  # 重置累计位移
-                set_reference = False
+                    self.passive_odom_accum_dist = 0.0
+                self._update_deviation_ref(pose_to_publish[0], pose_to_publish[1], pose_to_publish[2])
+                status = f'超时({self.calibration_timeout:.0f}s)→仅日志 ' + gate_level + ('[二次验证]' if recheck_passed else '')
             else:
-                set_reference = False
-            self._update_deviation_ref(pose_to_publish[0], pose_to_publish[1], pose_to_publish[2])
-            status = '发布→/initialpose ' + gate_level + ('[二次验证]' if recheck_passed else '')
+                msg.pose.covariance = cov
+                self.initialpose_pub.publish(msg)
+                # 设置冷却期: 给 AMCL 时间收敛, 避免立即再次触发完整扫描匹配
+                self._publish_cooldown_until = self.get_clock().now().nanoseconds * 1e-9 + self.passive_publish_cooldown
+                self.passive_bootstrap_failures = 0  # 成功发布后重置引导计数器
+                # 高置信度: 完全更新参考; 中置信度: 只更新 map 位姿 (用于 odom 融合)
+                # 避免使用主动校准的旧参考位姿，导致后续 odom fusion 永远无法通过 wall coverage 检查
+                # bootstrap 模式下即使 conf 低于 th_up 也必须设置 map 位姿, 否则引导永远无法打破死锁
+                high_conf = (confidence >= th_up)
+                published_from_scratch = (self.last_calibrated_pose is None and confidence >= th_pub)
+                if high_conf or published_from_scratch:
+                    self.last_calibrated_pose = (pose_to_publish[0], pose_to_publish[1], pose_to_publish[2])
+                    if self.current_odom is not None:
+                        curr_pos = self.current_odom.pose.pose.position
+                        curr_yaw = self._quat_to_yaw(self.current_odom.pose.pose.orientation)
+                        self.passive_last_odom = (curr_pos.x, curr_pos.y, curr_yaw)
+                        self.passive_odom_accum_dist = 0.0  # 重置累计位移
+                    set_reference = True
+                elif confidence >= th_pub:
+                    # 中置信度: 更新 map 位姿，同时更新 odom 基准
+                    #（避免 passive_last_odom 长期不更新导致 odom fusion 被拦截）
+                    self.last_calibrated_pose = (pose_to_publish[0], pose_to_publish[1], pose_to_publish[2])
+                    if self.current_odom is not None:
+                        curr_pos = self.current_odom.pose.pose.position
+                        curr_yaw = self._quat_to_yaw(self.current_odom.pose.pose.orientation)
+                        self.passive_last_odom = (curr_pos.x, curr_pos.y, curr_yaw)
+                        self.passive_odom_accum_dist = 0.0  # 重置累计位移
+                    set_reference = False
+                else:
+                    set_reference = False
+                self._update_deviation_ref(pose_to_publish[0], pose_to_publish[1], pose_to_publish[2])
+                status = '发布→/initialpose ' + gate_level + ('[二次验证]' if recheck_passed else '')
         else:
             if hasattr(self, 'debug_auto_pose_pub'):
                 self.debug_auto_pose_pub.publish(msg)
@@ -2306,6 +2427,7 @@ class AutoInitialPoseCalibrator(Node):
             self._debug_compare_all_references(
                 pose_to_publish[0], pose_to_publish[1], pose_to_publish[2],
                 source=f'被动{method}')
+        self._clear_calibration_timeout()  # 计算已完成，清除超时计时器
         self.indoor_phase = IndoorPhase.PASSIVE_COLLECTING
 
     def _try_odom_fusion_verify(self):
@@ -3023,6 +3145,7 @@ class AutoInitialPoseCalibrator(Node):
             if self.debug_comparison_mode:
                 self._debug_compare_all_references(x, y, yaw, source='主动定位(拒绝)')
             self.indoor_phase = IndoorPhase.DONE
+            self._clear_calibration_timeout()
             self.cmd_vel_pub.publish(Twist())
             return
 
@@ -3045,15 +3168,23 @@ class AutoInitialPoseCalibrator(Node):
 
         gate_level = '✓高' if confidence >= th_up else '○中'
 
+        timed_out = self._is_calibration_timed_out()
         if self.auto_publish_initial_pose:
-            self.initialpose_pub.publish(msg)
-            self.passive_bootstrap_failures = 0  # 主动定位成功后重置引导计数器
-            self._logger.info(
-                f'[主动定位{gate_level}] 发布: ({x:.3f},{y:.3f},{math.degrees(yaw):.1f}deg) '
-                f'conf={conf_pct:.0f}% sigma=({pos_sigma:.2f}m,{yaw_sigma:.1f}deg) '
-                f'wall={100*wall_cov:.0f}% cov={100*coverage:.0f}%')
-            if confidence >= th_up and self.deviation_monitor_enabled:
-                self._start_deviation_monitor(x, y, yaw)
+            if timed_out:
+                self._logger.warn(
+                    f'[主动定位{gate_level}] 超时 ({self.calibration_timeout:.0f}s) 已过, '
+                    f'跳过发布: ({x:.3f},{y:.3f},{math.degrees(yaw):.1f}deg) '
+                    f'conf={conf_pct:.0f}% sigma=({pos_sigma:.2f}m,{yaw_sigma:.1f}deg) '
+                    f'wall={100*wall_cov:.0f}% cov={100*coverage:.0f}%')
+            else:
+                self.initialpose_pub.publish(msg)
+                self.passive_bootstrap_failures = 0  # 主动定位成功后重置引导计数器
+                self._logger.info(
+                    f'[主动定位{gate_level}] 发布: ({x:.3f},{y:.3f},{math.degrees(yaw):.1f}deg) '
+                    f'conf={conf_pct:.0f}% sigma=({pos_sigma:.2f}m,{yaw_sigma:.1f}deg) '
+                    f'wall={100*wall_cov:.0f}% cov={100*coverage:.0f}%')
+                if confidence >= th_up and self.deviation_monitor_enabled:
+                    self._start_deviation_monitor(x, y, yaw)
         else:
             if hasattr(self, 'debug_auto_pose_pub'):
                 self.debug_auto_pose_pub.publish(msg)
@@ -3074,6 +3205,7 @@ class AutoInitialPoseCalibrator(Node):
                 f'[置信度门控] conf={conf_pct:.0f}% < {100*th_up:.0f}%, 位姿已保存但不启动偏差监控')
 
         self.indoor_phase = IndoorPhase.DONE
+        self._clear_calibration_timeout()
         self.cmd_vel_pub.publish(Twist())
 
 
@@ -3149,14 +3281,26 @@ class AutoInitialPoseCalibrator(Node):
             resp.message = '里程计未就绪，校准失败'
             return resp
 
+        # ── Nav2 安全互斥: 检测 Nav2 是否在导航 ──
+        if not self.passive_mode_enabled and self._is_nav2_navigating():
+            resp.success = False
+            resp.message = (
+                'Nav2 正在导航中，拒绝启动主动校准以免抢 /cmd_vel 控制权。'
+                '请等待导航完成后再试。'
+            )
+            self._logger.warn(f'[Nav2安全互斥] 拒绝启动主动校准: Nav2 导航进行中')
+            return resp
+
         if self.passive_mode_enabled:
             # 被动模式: 直接启动持续采集, 不控制机器人运动
+            self._reset_calibration_timeout()
             self._start_passive_mode()
             resp.success = True
             resp.message = '被动持续定位已启动, 将在后台定时匹配'
             self._logger.info(f'[开始流程] {resp.message}')
             return resp
 
+        self._reset_calibration_timeout()
         self.indoor_phase = IndoorPhase.BOOT_DELAY
         self.boot_start_time = self.get_clock().now()
         self.scan_buffer.clear()
@@ -3176,6 +3320,16 @@ class AutoInitialPoseCalibrator(Node):
             resp.success = False
             resp.message = '地图/雷达/里程计未就绪'
             return resp
+        # ── Nav2 安全互斥 ──
+        if self._is_nav2_navigating():
+            resp.success = False
+            resp.message = (
+                'Nav2 正在导航中，拒绝启动主动校准以免抢 /cmd_vel 控制权。'
+                '请等待导航完成后再试。'
+            )
+            self._logger.warn(f'[Nav2安全互斥] 拒绝启动主动校准: Nav2 导航进行中')
+            return resp
+        self._reset_calibration_timeout()
         self.indoor_phase = IndoorPhase.BOOT_DELAY
         self.boot_start_time = self.get_clock().now()
         self.scan_buffer.clear(); self.submap_ready = False
@@ -3256,6 +3410,7 @@ class AutoInitialPoseCalibrator(Node):
         self.candidates.clear()
         self.active_retry_count = 0
         self._boot_retry_count = 0
+        self._clear_calibration_timeout()
         self.cmd_vel_pub.publish(Twist())
         self._logger.info('[重置] 室内自动位姿状态机已被重置并置为空闲。')
 

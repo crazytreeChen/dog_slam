@@ -61,6 +61,10 @@
     confidence_threshold_publish: 0.40  # 允许发布 /initialpose 的置信度阈值 (0.0~1.0)
     confidence_threshold_amcl: 0.35     # 低置信度仍可辅助 AMCL 的阈值 (0.0~1.0, 当前仅监控)
 
+    # ────── 校准超时控制 ──────
+    # 从服务调用/自动触发开始计时，超时后即便算完也不再发布 /initialpose，仅日志
+    calibration_timeout: 45.0           # 校准超时 (秒), 设置为 0 可禁用超时控制
+
     # ────── 旋转采集 ──────
     rotation_min_deg: 180.0
     rotation_scan_interval_deg: 15.0
@@ -130,6 +134,12 @@
     motion_verification_enabled: true  # 是否启用运动验证
     motion_verification_threshold: 0.3 # 运动验证距离误差阈值 (m)
     motion_verification_angle_threshold_deg: 15.0  # 运动验证角度误差阈值 (度)
+
+    # ────── Nav2 安全互斥参数 ──────
+    # 监听 /cmd_vel 检测 Nav2 是否在主动导航，防止抢控制权
+    nav_safety_enabled: true           # 启用 Nav2 导航互斥检测 (强烈建议保持开启)
+    nav_safety_timeout: 3.0            # Nav2 cmd_vel 非活跃超时 (秒)，超时后允许校准
+    nav_safety_cmd_vel_threshold: 0.01 # cmd_vel 幅值阈值 (非零判定)
 
     # ────── 调试对比模式参数 ──────
     debug_comparison_mode: true      # 是否启用调试对比模式
