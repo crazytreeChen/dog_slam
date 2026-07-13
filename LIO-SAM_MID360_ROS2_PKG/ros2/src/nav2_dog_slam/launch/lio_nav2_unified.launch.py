@@ -312,6 +312,12 @@ def generate_launch_description():
     else:
         min_height = -0.3
 
+    # pointcloud_to_laserscan: 导航模式下 no_lio 也要启动（ZG双雷达点云需要转scan给AMCL）
+    # 建图模式下 no_lio 才跳过（无点云源）
+    pcl2scan_condition = PythonExpression([
+        "'", SLAM_ALGORITHM, "' != 'no_lio' or (",
+        str(not MANUAL_BUILD_MAP), " and ", str(not AUTO_BUILD_MAP), ")"
+    ])
     pointcloud_to_laserscan_node = Node(
         package='pointcloud_to_laserscan',
         executable='pointcloud_to_laserscan_node',
@@ -340,7 +346,7 @@ def generate_launch_description():
         }],
         output='screen',
         prefix=['taskset -c 5'],
-        condition=IfCondition(PythonExpression(["'", SLAM_ALGORITHM, "' != 'no_lio'"]))
+        condition=IfCondition(pcl2scan_condition)
     )
     
     # rosbridge_websocket节点
@@ -589,7 +595,7 @@ def generate_launch_description():
         executable="alaserPGO",
         name="alaserPGO",
         output="screen",
-        parameters=[sc_pgo_config_file],
+        parameters=[sc_pgo_config_file, {'save_directory': SC_PGO_SAVE_DIRECTORY}],
         remappings=[
             ("aft_mapped_to_init", lio_config['odom_topic']),
             ("velodyne_cloud_registered_local", lio_config['pointcloud_topic']),

@@ -33,10 +33,11 @@ try:
         DEFAULT_RELIABILITY_OVERRIDE as DEFAULT_RELIABILITY_OVERRIDE, 
         LIO_SAM_DEFAULT_LOAM_SAVE_DIR as DEFAULT_LOAM_SAVE_DIR,
         NAV2_BASE_CODE_PATH, NAV2_DEFAULT_MAP_FILE, NAV2_DEFAULT_WEB_SCRIPT_PATH,
-        NAV2_DEFAULT_BT_XML_PATH, NAV2_DEFAULT_PARAMS_FILE,
+        NAV2_DEFAULT_BT_XML_PATH, NAV2_DEFAULT_PARAMS_FILE, NAV2_DEFAULT_PARAMS_3D_FILE,
         DEFAULT_USE_SIM_TIME_STRING, MAP_FRAME, ODOM_FRAME, 
         BASE_LINK_FRAME, LIVOX_FRAME, SLAM_ALGORITHM,
-        SC_PGO_SAVE_DIRECTORY,DEFAULT_NAMESPACE
+        SC_PGO_SAVE_DIRECTORY,DEFAULT_NAMESPACE,
+        OCTOPLANNER_PCD_FILE_PATH, OCTOPLANNER_PARAMS_FILE,
     )
 except Exception as e:
     print(f"导入global_config失败: {e}")
@@ -58,6 +59,7 @@ except Exception as e:
     NAV2_DEFAULT_WEB_SCRIPT_PATH = '/home/ztl/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/nav2_dog_slam/web/run_web.sh'
     NAV2_DEFAULT_BT_XML_PATH = '/opt/ros/humble/share/nav2_bt_navigator/behavior_trees/navigate_to_pose_w_replanning_and_recovery.xml'
     NAV2_DEFAULT_PARAMS_FILE = '/home/ztl/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/nav2_dog_slam/config/nav2_params.yaml'
+    NAV2_DEFAULT_PARAMS_3D_FILE = '/home/ztl/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/nav2_dog_slam/config/nav2_params_3d.yaml'
     MAP_FRAME = 'map'
     ODOM_FRAME = 'odom'
     BASE_LINK_FRAME = 'base_link' 
@@ -65,6 +67,8 @@ except Exception as e:
     SLAM_ALGORITHM = 'super_lio'  # 默认算法
     SC_PGO_SAVE_DIRECTORY = '/home/ztl/save_data/'
     DEFAULT_NAMESPACE = ''
+    OCTOPLANNER_PCD_FILE_PATH = '/home/ywj/slam_data/pcd/octomap.pcd'  # 默认PCD路径
+    OCTOPLANNER_PARAMS_FILE = '/home/ywj/git/dog_slam/LIO-SAM_MID360_ROS2_PKG/ros2/src/OctoPlanner3D-ROS2/config/params.yaml'  # 默认参数文件路径
 
 # 获取当前launch文件所在目录
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -94,7 +98,7 @@ LIO_TOPIC_CONFIGS = {
     },
     'super_lio': {
         'pointcloud_topic': 'lio/body/cloud',
-        'odom_topic': 'lio/robo/odom',
+        'odom_topic': 'lio/odom',
         'octomap_topic': 'lio/cloud_world',
         'target_frame': 'base_footprint',
         'map_frame': 'map'
@@ -136,6 +140,9 @@ def generate_launch_description():
     ns_scan_topic = PythonExpression(["'/scan' if '", ns, "' == '' else str('/", ns, "/scan')"])
     ns_pointcloud_topic = PythonExpression(["'/lio/body/cloud' if '", ns, "' == '' else str('/", ns, "/lio/body/cloud')"])
     ns_map_topic = PythonExpression(["'/map' if '", ns, "' == '' else str('/", ns, "/map')"])
+    # OctoPlanner 话题（支持namespace）
+    ns_planned_path_topic = PythonExpression(["'/planned_path' if '", ns, "' == '' else str('/", ns, "/planned_path')"])
+    ns_test_path_topic = PythonExpression(["'/test_path' if '", ns, "' == '' else str('/", ns, "/test_path')"])
     
     # 定义启动参数
     use_sim_time = LaunchConfiguration('use_sim_time', default=DEFAULT_USE_SIM_TIME)
@@ -157,8 +164,8 @@ def generate_launch_description():
     
     declare_nav2_params_file_cmd = DeclareLaunchArgument(
         'nav2_params_file',
-        default_value=NAV2_DEFAULT_PARAMS_FILE,
-        description='Full path to the Nav2 parameters file')
+        default_value=NAV2_DEFAULT_PARAMS_3D_FILE,
+        description='Full path to the Nav2 3D parameters file')
 
     # declare_localization_cmd = DeclareLaunchArgument(
     #     'localization',
@@ -575,7 +582,7 @@ def generate_launch_description():
     #     }]
     # )
 
-    # 5. 3D导航栈节点（不包含planner_server，使用OctoPlanner替代）
+    # 5. 3D导航栈节点（不含planner_server，octo_planner_rviz_node 提供compute_path_to_pose action）
     navigation_include = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(launch_dir, 'navigation_launch_3d.py')),
         launch_arguments={
@@ -596,17 +603,30 @@ def generate_launch_description():
         }.items()
     )
 
-    # OctoPlanner3D节点（3D规划器，替代nav2 planner_server）
-    # params_file参数可在运行时通过参数覆盖
-    octo_planner_config_file = PathJoinSubstitution([
-        get_package_share_directory('octo_planner3d'), 'config', 'params.yaml'
-    ])
+    # OctoPlanner3D节点（地图可视化 + test mode + ComputePathToPose action server）
+    # bt_navigator 的 ComputePathToPose BT node 直连此节点的 action server，
+    # planner_server 不再需要。
     octo_planner_node = Node(
         package="octo_planner3d",
         executable="octo_planner_rviz_node",
         name="octo_planner_rviz_node",
         output="screen",
-        parameters=[octo_planner_config_file],
+        parameters=[
+            OCTOPLANNER_PARAMS_FILE,
+            {
+                "input_pcd": OCTOPLANNER_PCD_FILE_PATH,
+                "frame_id": ns_map_frame,
+                "robot_base_frame": ns_base_footprint_frame,
+                "map_frame": ns_map_frame,
+            },
+        ],
+        remappings=[
+            # OctoPlanner 通过 ComputePathToPose action 为 Nav2 提供路径，
+            # 并直接发布到 /rkbot/plan 供 RViz 显示。
+            ("initialpose", '/initialpose'),
+            ("clicked_point", "/clicked_point"),
+            ("test_path", ns_test_path_topic),
+        ],
     )
 
     # SC-PGO参数文件（统一ROS2参数格式）
@@ -619,7 +639,7 @@ def generate_launch_description():
         executable="alaserPGO",
         name="alaserPGO",
         output="screen",
-        parameters=[sc_pgo_config_file],
+        parameters=[sc_pgo_config_file, {'save_directory': SC_PGO_SAVE_DIRECTORY}],
         remappings=[
             ("aft_mapped_to_init", lio_config['odom_topic']),
             ("velodyne_cloud_registered_local", lio_config['pointcloud_topic']),
@@ -720,7 +740,7 @@ def generate_launch_description():
             )
         )
 
-        # OctoPlanner3D（3D规划器，替代nav2 planner_server）
+        # OctoPlanner3D（地图可视化 + 测试模式）
         nav2_actions.append(
             TimerAction(
                 period=2.5,
@@ -728,7 +748,7 @@ def generate_launch_description():
             )
         )
 
-        # 导航栈（不包含planner_server）
+        # 导航栈（不含planner_server）
         nav2_actions.append(
             TimerAction(
                 period=3.0,
