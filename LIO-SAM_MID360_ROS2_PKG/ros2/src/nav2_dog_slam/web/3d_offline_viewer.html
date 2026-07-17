@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>离线 PCD 3D 查看器</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#1a1a2e; overflow:hidden; font-family:'Segoe UI',sans-serif; }
+#canvas3d { display:block; width:100vw; height:100vh; }
+
+/* 侧边栏 */
+#panel {
+  position:fixed; top:16px; left:16px; width:260px;
+  background:rgba(20,20,40,0.92); border:1px solid rgba(255,255,255,0.12);
+  border-radius:12px; padding:16px; color:#e0e0e0; z-index:10;
+  backdrop-filter:blur(8px); font-size:13px;
+}
+#panel h3 { font-size:15px; margin-bottom:12px; color:#7ec8e3; letter-spacing:0.5px; }
+#panel label { display:block; margin:8px 0 3px; color:#aaa; font-size:11px; }
+#panel input, #panel select {
+  width:100%; padding:7px 10px; border-radius:6px; border:1px solid rgba(255,255,255,0.15);
+  background:rgba(255,255,255,0.06); color:#e0e0e0; font-size:12px; outline:none;
+}
+#panel input:focus { border-color:#7ec8e3; }
+.btn {
+  width:100%; margin-top:12px; padding:9px; border:none; border-radius:8px;
+  font-size:13px; font-weight:600; cursor:pointer; transition:all 0.2s;
+}
+.btn-primary { background:#7ec8e3; color:#1a1a2e; }
+.btn-primary:hover { background:#5ba8c8; }
+.btn-primary:disabled { opacity:0.4; cursor:not-allowed; }
+.btn-secondary { background:rgba(255,255,255,0.08); color:#ccc; margin-top:6px; }
+.btn-secondary:hover { background:rgba(255,255,255,0.15); }
+.info-row { display:flex; justify-content:space-between; margin:4px 0; font-size:11px; }
+.info-label { color:#888; }
+.info-value { color:#7ec8e3; font-weight:600; }
+hr { border:none; border-top:1px solid rgba(255,255,255,0.1); margin:10px 0; }
+
+/* 进度条 */
+#progress-wrap { display:none; margin-top:10px; }
+#progress-bar {
+  width:100%; height:4px; background:rgba(255,255,255,0.1); border-radius:2px; overflow:hidden;
+}
+#progress-fill { height:100%; width:0%; background:#7ec8e3; transition:width 0.3s; }
+#progress-text { font-size:10px; color:#888; text-align:center; margin-top:3px; }
+
+/* 提示 */
+#tooltip {
+  position:fixed; bottom:20px; right:20px; background:rgba(0,0,0,0.7);
+  color:#aaa; font-size:11px; padding:8px 14px; border-radius:6px; z-index:20;
+  pointer-events:none;
+}
+
+/* 统计叠加 */
+#stats-overlay {
+  position:fixed; top:16px; right:16px; color:#7ec8e3; font-size:12px;
+  background:rgba(20,20,40,0.8); padding:8px 12px; border-radius:8px; z-index:5;
+}
+</style>
+</head>
+<body>
+
+<div id="canvas3d"></div>
+
+<div id="panel">
+  <h3>📦 离线 PCD 查看器</h3>
+
+  <!-- 图层切换 -->
+  <div style="display:flex; gap:12px; align-items:center; margin-bottom:8px; padding:6px 10px; background:rgba(255,255,255,0.04); border-radius:6px;">
+    <label style="display:flex; align-items:center; gap:5px; margin:0; cursor:pointer; font-size:12px; color:#e0e0e0;">
+      <input type="checkbox" id="showTLS" checked style="width:auto; margin:0; accent-color:#ff6b6b;">
+      <span style="color:#ff6b6b;">●</span> TLS
+    </label>
+    <label style="display:flex; align-items:center; gap:5px; margin:0; cursor:pointer; font-size:12px; color:#e0e0e0;">
+      <input type="checkbox" id="showGBL" checked style="width:auto; margin:0; accent-color:#4ecdc4;">
+      <span style="color:#4ecdc4;">●</span> GBL
+    </label>
+  </div>
+
+  <label>数据端点 URL</label>
+  <input type="text" id="dataUrl" value="/points" placeholder="/points">
+
+  <label>点大小</label>
+  <input type="range" id="pointSize" min="0.5" max="20" step="0.5" value="2">
+  <span id="pointSizeLabel" style="font-size:11px;color:#888;">2.0 (自动缩放中...)</span>
+
+  <label>背景色</label>
+  <select id="bgColor">
+    <option value="dark" selected>深色</option>
+    <option value="gray">灰色</option>
+    <option value="white">白色</option>
+  </select>
+
+  <button class="btn btn-primary" id="btnLoad" onclick="loadPointCloud()">加载点云</button>
+
+  <hr>
+  <label style="margin-top:2px;">视角预设 (CC风格)</label>
+  <div style="display:grid; grid-template-columns:1fr 1fr; gap:4px; margin-top:4px;">
+    <button class="btn btn-secondary" onclick="setView('top')"    style="margin:0;font-size:11px;padding:6px;">⬆ 俯视</button>
+    <button class="btn btn-secondary" onclick="setView('front')"  style="margin:0;font-size:11px;padding:6px;">📐 前视</button>
+    <button class="btn btn-secondary" onclick="setView('right')"  style="margin:0;font-size:11px;padding:6px;">📏 右视</button>
+    <button class="btn btn-secondary" onclick="setView('iso')"    style="margin:0;font-size:11px;padding:6px;">🔮 等轴</button>
+  </div>
+
+  <button class="btn btn-secondary" onclick="toggleAutoRotate()" style="margin-top:6px;">🎠 自动旋转</button>
+
+  <div id="progress-wrap">
+    <div id="progress-bar"><div id="progress-fill"></div></div>
+    <div id="progress-text">下载中...</div>
+  </div>
+
+  <hr>
+  <div id="stats">
+    <div class="info-row"><span class="info-label">点数</span><span class="info-value" id="statPoints">-</span></div>
+    <div class="info-row"><span class="info-label">数据大小</span><span class="info-value" id="statSize">-</span></div>
+    <div class="info-row"><span class="info-label">X 范围</span><span class="info-value" id="statRangeX">-</span></div>
+    <div class="info-row"><span class="info-label">Y 范围</span><span class="info-value" id="statRangeY">-</span></div>
+    <div class="info-row"><span class="info-label">Z 范围</span><span class="info-value" id="statRangeZ">-</span></div>
+  </div>
+</div>
+
+<div id="stats-overlay">FPS: <span id="fps">0</span></div>
+<div id="tooltip">🖱 左键旋转 | 滚轮缩放 | 右键平移 | 双击居中</div>
+
+<!-- Three.js + OrbitControls CDN -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { TrackballControls } from 'three/addons/controls/TrackballControls.js';
+
+// ==================== 场景初始化 ====================
+const container = document.getElementById('canvas3d');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1a2e);
+// 雾效先不设，等加载点云后根据场景大小自适应
+
+// 相机
+const camera = new THREE.PerspectiveCamera(60, container.clientWidth / container.clientHeight, 0.1, 2000);
+camera.position.set(15, 15, 20);
+camera.lookAt(0, 0, 0);
+
+// 渲染器
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(container.clientWidth, container.clientHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+container.appendChild(renderer.domElement);
+
+// TrackballControls — 无万向节锁，真正 360° 全方向旋转
+const controls = new TrackballControls(camera, renderer.domElement);
+controls.rotateSpeed = 3.0;
+controls.zoomSpeed = 1.5;
+controls.panSpeed = 1.0;
+controls.staticMoving = false;   // 惯性衰减
+controls.dynamicDampingFactor = 0.15;
+controls.target.set(0, 0, 0);
+controls.noRotate = false;
+controls.noZoom = false;
+controls.noPan = false;
+controls.minDistance = 0.5;
+controls.maxDistance = 5000;
+controls.update();
+
+// 射线拾取（双击居中）
+const raycaster = new THREE.Raycaster();
+raycaster.params.Points.threshold = 0.5; // 点云拾取容差
+const mouse = new THREE.Vector2();
+
+// 光照
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+scene.add(ambientLight);
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.4);
+dirLight.position.set(10, 20, 10);
+scene.add(dirLight);
+
+// 辅助对象（加载点云后动态调整大小）
+let gridHelper = new THREE.GridHelper(50, 50, 0x444466, 0x222244);
+let axesHelper = new THREE.AxesHelper(5);
+scene.add(gridHelper);
+scene.add(axesHelper);
+
+// ==================== 原点醒目标记 ====================
+let originMarkerGroup = new THREE.Group();
+originMarkerGroup.name = 'OriginMarker';
+
+// 发光球体（核心）
+const originSphereGeom = new THREE.SphereGeometry(0.3, 32, 32);
+const originSphereMat = new THREE.MeshBasicMaterial({ color: 0xff4444 });
+const originSphere = new THREE.Mesh(originSphereGeom, originSphereMat);
+originMarkerGroup.add(originSphere);
+
+// 外圈光环（脉冲效果）
+const originRingGeom = new THREE.TorusGeometry(0.5, 0.05, 16, 32);
+const originRingMat = new THREE.MeshBasicMaterial({ color: 0xff4444, transparent: true, opacity: 0.7 });
+const originRing = new THREE.Mesh(originRingGeom, originRingMat);
+originMarkerGroup.add(originRing);
+
+// 十字线（X/Y/Z 方向延伸）
+function createCrossLine(from, to, color) {
+  const geom = new THREE.BufferGeometry().setFromPoints([from, to]);
+  const mat = new THREE.LineBasicMaterial({ color, linewidth: 2, transparent: true, opacity: 0.8 });
+  return new THREE.Line(geom, mat);
+}
+const crossLen = 0.8;
+originMarkerGroup.add(createCrossLine(new THREE.Vector3(-crossLen, 0, 0), new THREE.Vector3(crossLen, 0, 0), 0xff6666));
+originMarkerGroup.add(createCrossLine(new THREE.Vector3(0, -crossLen, 0), new THREE.Vector3(0, crossLen, 0), 0x66ff66));
+originMarkerGroup.add(createCrossLine(new THREE.Vector3(0, 0, -crossLen), new THREE.Vector3(0, 0, crossLen), 0x6666ff));
+
+// 文本标签 "ORIGIN"（使用 Sprite）
+function createLabel(text, colorHex) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = colorHex;
+  ctx.font = 'bold 32px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, 128, 32);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.minFilter = THREE.LinearFilter;
+  const spriteMat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
+  const sprite = new THREE.Sprite(spriteMat);
+  sprite.scale.set(3, 0.75, 1);
+  sprite.position.set(0, 0.9, 0);
+  return sprite;
+}
+originMarkerGroup.add(createLabel('ORIGIN', '#ff4444'));
+
+// 光晕（远处可见的大透明球）
+const glowGeom = new THREE.SphereGeometry(0.2, 16, 16);
+const glowMat = new THREE.MeshBasicMaterial({ color: 0xff4444, transparent: true, opacity: 0.35, depthTest: false });
+const glowSphere = new THREE.Mesh(glowGeom, glowMat);
+glowSphere.scale.set(3, 3, 3);
+glowSphere.name = 'OriginGlow';
+originMarkerGroup.add(glowSphere);
+
+scene.add(originMarkerGroup);
+
+// ==================== 全局状态 ====================
+let pointCloudMesh = null;
+let pointCloudTLS = null;   // TLS 图层
+let pointCloudGBL = null;   // GBL 图层
+let autoRotate = false;
+let sceneMaxDim = 10;
+let sceneCenter = new THREE.Vector3(0, 0, 0);
+let fpsCounter = { frames: 0, lastTime: performance.now() };
+
+// ==================== 图层可见性切换 ====================
+document.getElementById('showTLS').addEventListener('change', function() {
+  if (pointCloudTLS) {
+    pointCloudTLS.visible = this.checked;
+    // 更新全局 mesh 引用（供点大小颜色等操作使用）
+    updateMainMeshRef();
+  }
+});
+document.getElementById('showGBL').addEventListener('change', function() {
+  if (pointCloudGBL) {
+    pointCloudGBL.visible = this.checked;
+    updateMainMeshRef();
+  }
+});
+
+function updateMainMeshRef() {
+  // 优先使用第一个可见的图层作为主引用
+  if (pointCloudTLS && pointCloudTLS.visible) {
+    pointCloudMesh = pointCloudTLS;
+  } else if (pointCloudGBL && pointCloudGBL.visible) {
+    pointCloudMesh = pointCloudGBL;
+  } else {
+    pointCloudMesh = pointCloudTLS || pointCloudGBL;
+  }
+}
+
+// ==================== 加载点云（支持双图层） ====================
+
+/**
+ * 加载单个图层
+ * @param {string} url - 数据端点
+ * @param {string} layerType - 'tls' | 'gbl' | 'default'
+ * @param {THREE.Color} defaultColor - 默认颜色（无原始颜色时使用）
+ * @returns {THREE.Points|null}
+ */
+async function loadLayer(url, layerType, defaultColor) {
+  try {
+    const response = await fetch(url);
+    if (!response.ok) {
+      console.warn(`[${layerType}] 端点不可用 (${response.status})，跳过`);
+      return null;
+    }
+
+    const contentLength = response.headers.get('Content-Length');
+    const totalSize = contentLength ? parseInt(contentLength) : 0;
+
+    // 流式读取
+    const reader = response.body.getReader();
+    const chunks = [];
+    let received = 0;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.length;
+    }
+
+    // 合并
+    const buffer = new ArrayBuffer(received);
+    const view = new Uint8Array(buffer);
+    let offset = 0;
+    for (const chunk of chunks) {
+      view.set(chunk, offset);
+      offset += chunk.length;
+    }
+
+    // 解析 float32: 每点 6 个 (x,y,z,r,g,b)
+    const floats = new Float32Array(buffer);
+    const n = Math.floor(floats.length / 6);
+
+    if (n === 0) {
+      console.warn(`[${layerType}] 数据为空`);
+      return null;
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    const positions = new Float32Array(n * 3);
+    const colors = new Float32Array(n * 3);
+
+    for (let i = 0; i < n; i++) {
+      const off = i * 6;
+      positions[i * 3]     = floats[off];
+      positions[i * 3 + 1] = floats[off + 1];
+      positions[i * 3 + 2] = floats[off + 2];
+      colors[i * 3]     = floats[off + 3];
+      colors[i * 3 + 1] = floats[off + 4];
+      colors[i * 3 + 2] = floats[off + 5];
+    }
+
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geometry.computeBoundingBox();
+
+    // 材质
+    const autoSize = Math.max(0.5, Math.round(sceneMaxDim / 100 * 10) / 10) || 2;
+    const material = new THREE.PointsMaterial({
+      size: autoSize,
+      vertexColors: true,
+      sizeAttenuation: true,
+      blending: THREE.NormalBlending,
+      depthWrite: true,
+      depthTest: true,
+    });
+
+    const mesh = new THREE.Points(geometry, material);
+    mesh.userData = { layerType, bbox: geometry.boundingBox, pointCount: n };
+
+    console.log(`[${layerType}] 加载完成: ${n.toLocaleString()} 点`);
+
+    return mesh;
+  } catch (err) {
+    console.warn(`[${layerType}] 加载失败: ${err.message}`);
+    return null;
+  }
+}
+
+window.loadPointCloud = async function() {
+  const btnLoad = document.getElementById('btnLoad');
+  const progressWrap = document.getElementById('progress-wrap');
+  const progressFill = document.getElementById('progress-fill');
+  const progressText = document.getElementById('progress-text');
+
+  btnLoad.disabled = true;
+  progressWrap.style.display = 'block';
+  progressFill.style.width = '5%';
+  progressText.textContent = '正在加载点云...';
+
+  try {
+    // 先检查是否为双图层模式
+    let dualMode = false;
+    try {
+      const statsRes = await fetch('/stats');
+      if (statsRes.ok) {
+        const stats = await statsRes.json();
+        dualMode = stats.dual_mode || (stats.tls_available && stats.gbl_available);
+      }
+    } catch (e) { /* ignore */ }
+
+    progressFill.style.width = '15%';
+    progressText.textContent = dualMode ? '双图层模式: 加载 TLS + GBL...' : '加载点云...';
+
+    // 并行加载 TLS 和 GBL
+    const tlsPromise = loadLayer('/points/tls', 'tls');
+    const gblPromise = dualMode
+      ? loadLayer('/points/gbl', 'gbl')
+      : Promise.resolve(null);
+
+    // 同时加载默认端点（向后兼容）
+    const defPromise = (!dualMode)
+      ? loadLayer('/points', 'default')
+      : Promise.resolve(null);
+
+    const [tlsMesh, gblMesh, defMesh] = await Promise.all([
+      tlsPromise, gblPromise, defPromise,
+    ]);
+
+    progressFill.style.width = '80%';
+    progressText.textContent = '正在构建场景...';
+
+    // 清理旧点云
+    const oldMeshes = [pointCloudTLS, pointCloudGBL, pointCloudMesh].filter(Boolean);
+    for (const m of new Set(oldMeshes)) {
+      scene.remove(m);
+      m.geometry.dispose();
+      m.material.dispose();
+    }
+
+    pointCloudTLS = null;
+    pointCloudGBL = null;
+    pointCloudMesh = null;
+
+    // 添加图层到场景
+    if (tlsMesh) {
+      tlsMesh.name = 'TLS';
+      scene.add(tlsMesh);
+      pointCloudTLS = tlsMesh;
+    }
+    if (gblMesh) {
+      gblMesh.name = 'GBL';
+      scene.add(gblMesh);
+      pointCloudGBL = gblMesh;
+      dualMode = true; // 确实有GBL数据
+    }
+
+    // 单图层兼容
+    if (!tlsMesh && !gblMesh && defMesh) {
+      defMesh.name = 'Default';
+      scene.add(defMesh);
+      pointCloudMesh = defMesh;
+      pointCloudTLS = defMesh;
+      pointCloudGBL = defMesh;
+    }
+
+    if (!pointCloudTLS && !pointCloudGBL && !pointCloudMesh) {
+      progressText.textContent = '❌ 未能加载任何图层数据';
+      return;
+    }
+
+    // 确定主 mesh（设置场景参数用）
+    const mainMesh = pointCloudTLS || pointCloudGBL || pointCloudMesh;
+    updateMainMeshRef();
+
+    // 计算联合包围盒
+    let unionBBox = null;
+    for (const m of [pointCloudTLS, pointCloudGBL, pointCloudMesh]) {
+      if (!m || !m.userData.bbox) continue;
+      const bb = m.userData.bbox;
+      if (!unionBBox) {
+        unionBBox = new THREE.Box3().copy(bb);
+      } else {
+        unionBBox.union(bb);
+      }
+    }
+
+    if (unionBBox) {
+      const center = new THREE.Vector3();
+      unionBBox.getCenter(center);
+      const maxDim = Math.max(
+        unionBBox.max.x - unionBBox.min.x,
+        unionBBox.max.y - unionBBox.min.y,
+        unionBBox.max.z - unionBBox.min.z,
+      );
+      sceneMaxDim = Math.max(maxDim, 1);
+      sceneCenter.copy(center);
+
+      console.log(`场景尺寸: ${sceneMaxDim.toFixed(1)}m, 中心: (${center.x.toFixed(1)}, ${center.y.toFixed(1)}, ${center.z.toFixed(1)})`);
+
+      // 自适应点大小
+      const autoPointSize = Math.max(0.5, Math.round(sceneMaxDim / 100 * 10) / 10);
+      document.getElementById('pointSize').value = autoPointSize;
+      document.getElementById('pointSizeLabel').textContent = `${autoPointSize.toFixed(1)}m (auto)`;
+
+      // 统一更新所有图层的点大小
+      for (const m of [pointCloudTLS, pointCloudGBL]) {
+        if (m && m.material) m.material.size = autoPointSize;
+      }
+
+      // 自适应雾效
+      scene.fog = new THREE.Fog(0x1a1a2e, sceneMaxDim * 2, sceneMaxDim * 4);
+
+      // 自适应网格和坐标轴
+      scene.remove(gridHelper);
+      scene.remove(axesHelper);
+      const gridSize = Math.pow(10, Math.round(Math.log10(sceneMaxDim)));
+      gridHelper = new THREE.GridHelper(gridSize * 2, 40, 0x444466, 0x222244);
+      axesHelper = new THREE.AxesHelper(gridSize * 0.5);
+      scene.add(gridHelper);
+      scene.add(axesHelper);
+
+      // 自适应原点标记位置和大小 — 放在 TLS 数据底部中心（扫描起始点）
+      let originPos = new THREE.Vector3();
+      if (pointCloudTLS && pointCloudTLS.userData.bbox) {
+        const tlsBB = pointCloudTLS.userData.bbox;
+        originPos.set(
+          (tlsBB.min.x + tlsBB.max.x) / 2,
+          (tlsBB.min.y + tlsBB.max.y) / 2,
+          tlsBB.min.z,   // 底部 = 地面/起始高度
+        );
+      } else if (unionBBox) {
+        unionBBox.getCenter(originPos);
+      }
+      originMarkerGroup.position.copy(originPos);
+
+      const markerScale = Math.max(0.02, Math.min(0.15, sceneMaxDim / 60));
+      originMarkerGroup.scale.setScalar(markerScale);
+      // 光晕保持更大比例以便远距离可见
+      const glowObj = originMarkerGroup.getObjectByName('OriginGlow');
+      if (glowObj) {
+        glowObj.scale.setScalar(3 / markerScale);
+      }
+
+      // 更新统计
+      const tlsN = pointCloudTLS ? pointCloudTLS.userData.pointCount : 0;
+      const gblN = (pointCloudGBL && pointCloudGBL !== pointCloudTLS) ? pointCloudGBL.userData.pointCount : 0;
+      const totalN = dualMode ? (tlsN + gblN) : tlsN;
+      document.getElementById('statPoints').textContent = totalN.toLocaleString()
+        + (dualMode ? ` (TLS:${tlsN.toLocaleString()} + GBL:${gblN.toLocaleString()})` : '');
+      document.getElementById('statSize').textContent = (totalN * 24 / 1024 / 1024).toFixed(1) + ' MB';
+      document.getElementById('statRangeX').textContent = `${unionBBox.min.x.toFixed(1)} ~ ${unionBBox.max.x.toFixed(1)}`;
+      document.getElementById('statRangeY').textContent = `${unionBBox.min.y.toFixed(1)} ~ ${unionBBox.max.y.toFixed(1)}`;
+      document.getElementById('statRangeZ').textContent = `${unionBBox.min.z.toFixed(1)} ~ ${unionBBox.max.z.toFixed(1)}`;
+
+      // 重置视角
+      controls.target.copy(center);
+      const viewDist = sceneMaxDim * 1.2;
+      camera.position.set(center.x + viewDist * 0.7, center.y + viewDist * 0.5, center.z + viewDist * 0.7);
+      controls.update();
+    }
+
+    // 初始化图层复选框状态
+    document.getElementById('showTLS').checked = !!pointCloudTLS;
+    document.getElementById('showGBL').checked = !!pointCloudGBL;
+    if (pointCloudTLS) pointCloudTLS.visible = true;
+    if (pointCloudGBL) pointCloudGBL.visible = true;
+
+    progressFill.style.width = '100%';
+    const totalPts = [pointCloudTLS, pointCloudGBL]
+      .filter(m => m)
+      .reduce((sum, m) => sum + (m.userData.pointCount || 0), 0);
+    progressText.textContent = `✅ 加载完成 (${totalPts.toLocaleString()} 点${dualMode ? ', 双图层' : ''})`;
+
+    setTimeout(() => { progressWrap.style.display = 'none'; }, 2000);
+
+  } catch (err) {
+    progressText.textContent = `❌ 加载失败: ${err.message}`;
+    console.error('加载失败:', err);
+  } finally {
+    btnLoad.disabled = false;
+  }
+};
+
+// ==================== 控件 ====================
+
+// CloudCompare 风格视角预设
+window.setView = function(direction) {
+  if (sceneMaxDim <= 0) return;
+  const c = sceneCenter.clone();
+  const d = sceneMaxDim * 0.9;
+  controls.target.copy(c);
+  switch (direction) {
+    case 'top':
+      camera.position.set(c.x, c.y + d, c.z);
+      break;
+    case 'front':
+      camera.position.set(c.x, c.y, c.z - d);
+      break;
+    case 'right':
+      camera.position.set(c.x + d, c.y, c.z);
+      break;
+    case 'iso':
+      camera.position.set(c.x + d * 0.7, c.y + d * 0.5, c.z + d * 0.7);
+      break;
+  }
+  controls.update();
+};
+
+// 自动旋转
+window.toggleAutoRotate = function() {
+  autoRotate = !autoRotate;
+  controls.autoRotate = autoRotate;
+  controls.autoRotateSpeed = 2.0;
+};
+
+// 双击点云 → 将击中的点设为新的旋转中心（支持多图层）
+container.addEventListener('dblclick', (event) => {
+  const targets = [pointCloudTLS, pointCloudGBL].filter(m => m && m.visible);
+  if (targets.length === 0) return;
+  const rect = container.getBoundingClientRect();
+  mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+  raycaster.params.Points.threshold = sceneMaxDim / 200;
+  const hits = raycaster.intersectObjects(targets);
+  if (hits.length > 0) {
+    const pt = hits[0].point.clone();
+    sceneCenter.copy(pt);
+    controls.target.copy(pt);
+    controls.update();
+    console.log(`新旋转中心: (${pt.x.toFixed(2)}, ${pt.y.toFixed(2)}, ${pt.z.toFixed(2)})`);
+  }
+});
+
+// 点大小滑块（影响所有图层）
+document.getElementById('pointSize').addEventListener('input', function() {
+  const val = parseFloat(this.value);
+  for (const m of [pointCloudTLS, pointCloudGBL]) {
+    if (m && m.material) m.material.size = val;
+  }
+  document.getElementById('pointSizeLabel').textContent = `${val.toFixed(1)}m`;
+});
+
+// 背景色
+document.getElementById('bgColor').addEventListener('change', function() {
+  const colors = {
+    dark: 0x1a1a2e,
+    gray: 0x4a4a5a,
+    white: 0xf0f0f0,
+  };
+  const color = colors[this.value] || 0x1a1a2e;
+  scene.background = new THREE.Color(color);
+  scene.fog = new THREE.Fog(color, sceneMaxDim * 2, sceneMaxDim * 4);
+});
+
+// ==================== 渲染循环 ====================
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+
+  // 原点标记脉冲动画
+  const pulse = 1 + Math.sin(Date.now() * 0.003) * 0.15;
+  if (originMarkerGroup) {
+    const glow = originMarkerGroup.getObjectByName('OriginGlow');
+    if (glow) {
+      glow.material.opacity = 0.25 + Math.sin(Date.now() * 0.003) * 0.12;
+    }
+    // 外环旋转
+    originRing.rotation.x += 0.01;
+    originRing.rotation.y += 0.015;
+  }
+
+  // FPS
+  fpsCounter.frames++;
+  const now = performance.now();
+  if (now - fpsCounter.lastTime >= 1000) {
+    document.getElementById('fps').textContent = fpsCounter.frames;
+    fpsCounter.frames = 0;
+    fpsCounter.lastTime = now;
+  }
+
+  renderer.render(scene, camera);
+}
+
+animate();
+
+// ==================== 窗口大小调整 ====================
+window.addEventListener('resize', () => {
+  camera.aspect = container.clientWidth / container.clientHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(container.clientWidth, container.clientHeight);
+});
+
+// ==================== 页面加载时自动尝试加载 ====================
+window.addEventListener('DOMContentLoaded', () => {
+  // 自动加载（如果服务端已经启动）
+  setTimeout(() => window.loadPointCloud(), 500);
+});
+
+console.log('✅ 离线 PCD 3D 查看器就绪');
+console.log('   加载数据端点: /points');
+console.log('   统计信息端点: /stats');
+</script>
+</body>
+</html>

@@ -1,0 +1,1087 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dog SLAM - 3D 建图导航可视化</title>
+
+<!-- Three.js Import Map -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<!-- roslib (非模块) -->
+<script src="libs/roslib.min.js"></script>
+
+<style>
+/* ===== Reset & Base ===== */
+*, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+html, body { width:100%; height:100%; overflow:hidden; background:#0a0d14; font-family:'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; }
+
+/* ===== 3D Container ===== */
+#viewer { position:absolute; inset:0; z-index:1; }
+
+/* ===== Status Bar (顶部) ===== */
+#statusbar {
+  position:absolute; top:0; left:0; right:0; z-index:100;
+  display:flex; align-items:center; gap:20px;
+  padding:6px 16px; background:rgba(10,13,20,0.85);
+  border-bottom:1px solid rgba(0,180,255,0.2);
+  color:#ccd; font-size:12px; backdrop-filter:blur(6px);
+}
+#statusbar .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:4px; }
+#statusbar .dot.on { background:#00e676; box-shadow:0 0 6px #00e676; }
+#statusbar .dot.off { background:#ff5252; }
+#statusbar .sep { width:1px; height:16px; background:rgba(255,255,255,0.15); }
+
+/* ===== Sidebar (左侧) ===== */
+#sidebar {
+  position:absolute; top:38px; left:8px; bottom:8px; z-index:100;
+  width:280px; background:rgba(15,20,35,0.92);
+  border:1px solid rgba(0,180,255,0.18); border-radius:10px;
+  padding:0; display:flex; flex-direction:column;
+  backdrop-filter:blur(10px); color:#cdd; font-size:13px;
+  overflow:hidden;
+}
+#sidebar .header {
+  padding:12px 14px; border-bottom:1px solid rgba(0,180,255,0.15);
+  font-size:15px; font-weight:600; color:#00b4ff;
+  display:flex; align-items:center; gap:8px;
+}
+#sidebar .header .icon { font-size:20px; }
+
+/* Scrollable content */
+#sidebar .scroll {
+  flex:1; overflow-y:auto; padding:8px 14px;
+  scrollbar-width:thin; scrollbar-color:rgba(0,180,255,0.3) transparent;
+}
+#sidebar .scroll::-webkit-scrollbar { width:4px; }
+#sidebar .scroll::-webkit-scrollbar-thumb { background:rgba(0,180,255,0.3); border-radius:2px; }
+
+/* Section */
+.section { margin-bottom:12px; }
+.section-title {
+  font-size:11px; font-weight:700; text-transform:uppercase;
+  color:#607d9b; margin-bottom:6px; letter-spacing:1px;
+}
+
+/* Inputs & Controls */
+input[type="text"], select {
+  width:100%; padding:6px 8px; background:#121a2b;
+  color:#dde; border:1px solid rgba(0,180,255,0.2); border-radius:5px;
+  font-size:12px; outline:none; transition:border 0.2s;
+}
+input[type="text"]:focus, select:focus { border-color:#00b4ff; }
+input[type="range"] { width:100%; accent-color:#00b4ff; }
+
+label { display:flex; align-items:center; gap:6px; margin:4px 0; font-size:12px; cursor:pointer; color:#bcc; }
+label input[type="checkbox"] { accent-color:#00b4ff; width:14px; height:14px; }
+
+.row { display:flex; gap:8px; align-items:center; }
+.row > * { flex:1; }
+
+/* Buttons */
+.btn {
+  padding:7px 12px; border:1px solid rgba(0,180,255,0.3); border-radius:6px;
+  background:rgba(0,180,255,0.08); color:#00b4ff; cursor:pointer;
+  font-size:12px; font-weight:500; transition:all 0.2s; text-align:center;
+}
+.btn:hover { background:rgba(0,180,255,0.18); }
+.btn.primary { background:#00b4ff; color:#0a0d14; border-color:#00b4ff; }
+.btn.primary:hover { background:#33c8ff; }
+.btn.warn { color:#ff9100; border-color:rgba(255,145,0,0.3); }
+.btn.warn:hover { background:rgba(255,145,0,0.15); }
+.btn.full { width:100%; }
+
+/* Status text */
+.status-text { font-size:11px; padding:2px 0; }
+.status-text.ok { color:#00e676; }
+.status-text.err { color:#ff5252; }
+.status-text.info { color:#78909c; }
+
+/* Mode tabs */
+.mode-tabs { display:flex; gap:4px; }
+.mode-tab {
+  flex:1; padding:6px; text-align:center; font-size:12px; font-weight:600;
+  border:1px solid rgba(0,180,255,0.2); border-radius:6px;
+  cursor:pointer; transition:all 0.2s; color:#78909c;
+  background:rgba(0,180,255,0.03);
+}
+.mode-tab.active { background:rgba(0,180,255,0.18); color:#00b4ff; border-color:#00b4ff; }
+
+/* Slider value */
+.slider-val { font-size:11px; color:#78909c; min-width:36px; text-align:right; }
+
+/* ===== Camera Overlay (右下) ===== */
+#camera-presets {
+  position:absolute; right:12px; bottom:12px; z-index:100;
+  display:flex; flex-direction:column; gap:4px;
+}
+.cam-btn {
+  width:36px; height:36px; border-radius:50%; border:1px solid rgba(0,180,255,0.25);
+  background:rgba(15,20,35,0.85); color:#90a4ae; cursor:pointer;
+  font-size:16px; display:flex; align-items:center; justify-content:center;
+  transition:all 0.2s; backdrop-filter:blur(4px);
+}
+.cam-btn:hover { background:rgba(0,180,255,0.2); color:#00b4ff; }
+</style>
+</head>
+<body>
+
+<div id="viewer"></div>
+
+<!-- 顶栏状态 -->
+<div id="statusbar">
+  <span><span class="dot off" id="rosDot"></span><span id="rosStatusText">未连接</span></span>
+  <span class="sep"></span>
+  <span>FPS: <b id="fpsVal">0</b></span>
+  <span class="sep"></span>
+  <span>点云: <b id="ptsVal">0</b></span>
+  <span class="sep"></span>
+  <span>机器人: <b id="poseVal">-</b></span>
+  <span class="sep"></span>
+  <span id="modeTag" style="color:#00b4ff;">建图模式</span>
+</div>
+
+<!-- 侧边栏 -->
+<div id="sidebar">
+  <div class="header">
+    <span class="icon">🐕</span> Dog SLAM 3D
+  </div>
+
+  <div class="scroll">
+
+    <!-- 连接 -->
+    <div class="section">
+      <div class="section-title">连接</div>
+      <input type="text" id="rosUrl" value="ws://10.0.4.58:9090" placeholder="ws://host:9090">
+      <div class="row" style="margin-top:6px;">
+        <input type="text" id="namespace" value="rkbot" placeholder="命名空间">
+        <button class="btn primary" id="btnConnect" style="flex:0 0 70px;">连接</button>
+      </div>
+    </div>
+
+    <!-- 模式 -->
+    <div class="section">
+      <div class="section-title">模式</div>
+      <div class="mode-tabs">
+        <div class="mode-tab active" data-mode="mapping">🗺️ 建图</div>
+        <div class="mode-tab" data-mode="navigation">🧭 导航</div>
+      </div>
+    </div>
+
+    <!-- 点云 -->
+    <div class="section">
+      <div class="section-title">点云话题</div>
+      <label><input type="checkbox" id="chkMapCloud" checked> 地图点云 (降采样)</label>
+      <input type="text" id="mapCloudTopic" value="/web/map_cloud" style="margin-bottom:4px;">
+      <label><input type="checkbox" id="chkBodyCloud"> 实时机体点云</label>
+      <input type="text" id="bodyCloudTopic" value="/rkbot/lio/body/cloud">
+      <label><input type="checkbox" id="chkWorldCloud"> 原始世界点云</label>
+      <input type="text" id="worldCloudTopic" value="/lio/cloud_world">
+    </div>
+
+    <!-- 路径 & 轨迹 -->
+    <div class="section">
+      <div class="section-title">路径 & 轨迹</div>
+      <label><input type="checkbox" id="chkPath" checked> 导航路径</label>
+      <input type="text" id="pathTopic" value="/planned_path" style="margin-bottom:4px;">
+      <label><input type="checkbox" id="chkTraj" checked> 机器人轨迹</label>
+      <label><input type="checkbox" id="chkRobot" checked> 机器人模型</label>
+    </div>
+
+    <!-- 显示选项 -->
+    <div class="section">
+      <div class="section-title">显示</div>
+      <div class="row">
+        <span style="font-size:11px;color:#78909c;">点大小</span>
+        <span class="slider-val" id="ptSizeVal">2</span>
+      </div>
+      <input type="range" id="pointSize" min="1" max="8" value="2" step="0.5">
+
+      <div class="row" style="margin-top:6px;">
+        <span style="font-size:11px;color:#78909c;">降采样(m)</span>
+        <span class="slider-val" id="voxelVal">0.5</span>
+      </div>
+      <input type="range" id="voxelSize" min="0.1" max="2.0" value="0.5" step="0.05">
+
+      <div class="row" style="margin-top:6px;">
+        <span style="font-size:11px;color:#78909c;">最大点数</span>
+        <span class="slider-val" id="maxPtsVal">200k</span>
+      </div>
+      <input type="range" id="maxPoints" min="10000" max="500000" value="200000" step="10000">
+
+      <label style="margin-top:6px;"><input type="checkbox" id="chkColorHeight" checked> 按高度着色</label>
+      <label><input type="checkbox" id="chkGrid" checked> 网格地面</label>
+      <label><input type="checkbox" id="chkAxes"> 坐标轴</label>
+    </div>
+
+    <!-- 操作 -->
+    <div class="section">
+      <button class="btn warn full" id="btnClear">清除点云 & 轨迹</button>
+    </div>
+
+  </div>
+</div>
+
+<!-- 相机预设按钮 -->
+<div id="camera-presets">
+  <button class="cam-btn" title="俯视" onclick="setCameraView('top')">⬆</button>
+  <button class="cam-btn" title="跟随" onclick="setCameraView('follow')">🎯</button>
+  <button class="cam-btn" title="自由" onclick="setCameraView('free')">🔄</button>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ============================================================
+//  全局引用
+// ============================================================
+const viewerEl = document.getElementById('viewer');
+let scene, camera, renderer, controls;
+let ros = null;
+let tfClient = null;
+let robotModelGroup = null;
+let lastRobotPos = new THREE.Vector3();
+let lastRobotQuat = new THREE.Quaternion();
+
+// 点云相关
+let mapCloudMesh = null;      // 降采样地图点云
+let bodyCloudMesh = null;     // 机体实时点云
+let worldCloudMesh = null;    // 原始世界点云
+let pathLine = null;          // 导航路径线
+let trajLine = null;          // 轨迹线
+let trajPoints = [];          // 累积轨迹点 [{x,y,z}]
+
+// 机器人模型组件引用
+let robotBody, robotArrow;
+
+// 降采样器
+let voxelMaps = { map: new Map(), body: new Map(), world: new Map() };
+
+// 统计
+let frameCount = 0, lastFpsTime = performance.now(), currentFps = 0;
+const COLOR_BLUE = new THREE.Color(0x1a6eff);
+const COLOR_RED = new THREE.Color(0xff3333);
+const COLOR_GREEN = new THREE.Color(0x00ff88);
+
+// ============================================================
+//  工具函数
+// ============================================================
+
+/** PointCloud2 二进制解析 */
+function parsePointCloud2Data(data, fields, point_step, totalPoints, is_bigendian) {
+  const positions = new Float32Array(totalPoints * 3);
+  const intensities = new Float32Array(totalPoints);
+
+  // 查找字段偏移
+  let xOff = -1, yOff = -1, zOff = -1, iOff = -1;
+  for (const f of fields) {
+    if (f.name === 'x') xOff = f.offset;
+    else if (f.name === 'y') yOff = f.offset;
+    else if (f.name === 'z') zOff = f.offset;
+    else if (f.name === 'intensity' || f.name === 'intensities') iOff = f.offset;
+  }
+  if (xOff < 0 || yOff < 0 || zOff < 0) return { positions: new Float32Array(0) };
+
+  const dv = new DataView(data.buffer, data.byteOffset || 0, data.byteLength);
+  const le = !is_bigendian;
+  let validCount = 0;
+
+  for (let i = 0; i < totalPoints; i++) {
+    const off = i * point_step;
+    const x = dv.getFloat32(off + xOff, le);
+    const y = dv.getFloat32(off + yOff, le);
+    const z = dv.getFloat32(off + zOff, le);
+
+    if (isNaN(x) || isNaN(y) || isNaN(z)) continue;
+    if (!isFinite(x) || !isFinite(y) || !isFinite(z)) continue;
+
+    const j = validCount;
+    positions[j * 3] = x;
+    positions[j * 3 + 1] = y;
+    positions[j * 3 + 2] = z;
+
+    if (iOff >= 0) {
+      intensities[j] = dv.getFloat32(off + iOff, le) || 0;
+    }
+    validCount++;
+  }
+
+  return {
+    positions: validCount < totalPoints ? positions.subarray(0, validCount * 3) : positions,
+    intensities: validCount < totalPoints ? intensities.subarray(0, validCount) : intensities,
+    count: validCount
+  };
+}
+
+/** 获取消息的二进制数据（兼容 base64 字符串） */
+function getMsgData(msg) {
+  if (!msg || !msg.data) return null;
+  if (msg.data instanceof Uint8Array) return msg.data;
+  if (msg.data instanceof ArrayBuffer) return new Uint8Array(msg.data);
+  if (typeof msg.data === 'string') {
+    try {
+      const raw = atob(msg.data);
+      const bytes = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+      return bytes;
+    } catch (e) {
+      console.warn('base64 decode failed:', e);
+      return null;
+    }
+  }
+  return null;
+}
+
+/** 体素降采样（空间哈希） */
+function voxelDownsample(positions, resolution) {
+  const map = new Map();
+  const n = positions.length / 3;
+  for (let i = 0; i < n; i++) {
+    const x = positions[i * 3];
+    const y = positions[i * 3 + 1];
+    const z = positions[i * 3 + 2];
+    const ix = Math.floor(x / resolution);
+    const iy = Math.floor(y / resolution);
+    const iz = Math.floor(z / resolution);
+    const key = `${ix},${iy},${iz}`;
+    if (!map.has(key)) {
+      map.set(key, { x, y, z });
+    }
+  }
+  return map;
+}
+
+/** 高度→颜色映射 */
+function heightColor(z, zMin, zMax) {
+  if (zMax <= zMin) return new THREE.Color(0x00ff88);
+  const t = Math.max(0, Math.min(1, (z - zMin) / (zMax - zMin)));
+  // blue(0,0,1) -> cyan(0,1,1) -> green(0,1,0) -> yellow(1,1,0) -> red(1,0,0)
+  if (t < 0.25) return new THREE.Color(0, t * 4, 1);
+  if (t < 0.5)  return new THREE.Color(0, 1, 1 - (t - 0.25) * 4);
+  if (t < 0.75) return new THREE.Color((t - 0.5) * 4, 1, 0);
+  return new THREE.Color(1, 1 - (t - 0.75) * 4, 0);
+}
+
+/** 从 voxel map 创建/更新 Three.js Points */
+function updatePointCloudMesh(mesh, voxelMap, pointSize, useHeightColor) {
+  const points = Array.from(voxelMap.values());
+  const numPoints = points.length;
+
+  if (numPoints === 0) {
+    if (mesh) mesh.visible = false;
+    return mesh;
+  }
+
+  const positionsArr = new Float32Array(numPoints * 3);
+  const colorsArr = new Float32Array(numPoints * 3);
+
+  let zMin = Infinity, zMax = -Infinity;
+  if (useHeightColor) {
+    for (const p of points) {
+      if (p.z < zMin) zMin = p.z;
+      if (p.z > zMax) zMax = p.z;
+    }
+  }
+  if (zMax <= zMin) { zMin = -5; zMax = 5; }
+
+  for (let i = 0; i < numPoints; i++) {
+    const p = points[i];
+    positionsArr[i * 3] = p.x;
+    positionsArr[i * 3 + 1] = p.y;
+    positionsArr[i * 3 + 2] = p.z;
+
+    const col = useHeightColor ? heightColor(p.z, zMin, zMax) : COLOR_GREEN;
+    colorsArr[i * 3] = col.r;
+    colorsArr[i * 3 + 1] = col.g;
+    colorsArr[i * 3 + 2] = col.b;
+  }
+
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.BufferAttribute(positionsArr, 3));
+  geom.setAttribute('color', new THREE.BufferAttribute(colorsArr, 3));
+
+  const mat = new THREE.PointsMaterial({
+    size: pointSize * 0.03,
+    vertexColors: true,
+    sizeAttenuation: true,
+    transparent: true,
+    opacity: 0.85
+  });
+
+  if (mesh) {
+    mesh.geometry.dispose();
+    mesh.material.dispose();
+  }
+
+  const newMesh = new THREE.Points(geom, mat);
+  newMesh.visible = true;
+  return newMesh;
+}
+
+// ============================================================
+//  机器人 3D 模型
+// ============================================================
+function createRobotModel() {
+  const group = new THREE.Group();
+
+  // 主体 (蓝色半透明盒子)
+  const bodyGeom = new THREE.BoxGeometry(0.6, 0.2, 0.35);
+  const bodyMat = new THREE.MeshPhongMaterial({
+    color: 0x1a8aff, emissive: 0x001133,
+    transparent: true, opacity: 0.85
+  });
+  robotBody = new THREE.Mesh(bodyGeom, bodyMat);
+  robotBody.position.y = 0.15;
+  group.add(robotBody);
+
+  // 方向箭头 (红色圆锥)
+  const arrowGeom = new THREE.ConeGeometry(0.08, 0.25, 8);
+  const arrowMat = new THREE.MeshPhongMaterial({
+    color: 0xff3333, emissive: 0x330000
+  });
+  robotArrow = new THREE.Mesh(arrowGeom, arrowMat);
+  robotArrow.position.set(0.35, 0.25, 0);
+  robotArrow.rotation.x = Math.PI / 2;
+  group.add(robotArrow);
+
+  // 四足 (小圆柱)
+  const legGeom = new THREE.CylinderGeometry(0.04, 0.04, 0.15, 8);
+  const legMat = new THREE.MeshPhongMaterial({ color: 0x556677 });
+  const legPositions = [
+    [0.22, 0.08, 0.14], [0.22, 0.08, -0.14],
+    [-0.22, 0.08, 0.14], [-0.22, 0.08, -0.14]
+  ];
+  for (const [lx, ly, lz] of legPositions) {
+    const leg = new THREE.Mesh(legGeom, legMat);
+    leg.position.set(lx, ly, lz);
+    group.add(leg);
+  }
+
+  group.visible = false;
+  return group;
+}
+
+function updateRobotPose(pos, quat) {
+  if (!robotModelGroup) return;
+  robotModelGroup.visible = true;
+  robotModelGroup.position.copy(pos);
+
+  // 将 ROS 四元数 (x,y,z,w) 转为 Three.js (w,x,y,z 顺序不同)
+  const q = new THREE.Quaternion(quat.x, quat.y, quat.z, quat.w);
+  robotModelGroup.quaternion.copy(q);
+
+  lastRobotPos.copy(pos);
+  lastRobotQuat.copy(q);
+}
+
+// ============================================================
+//  Three.js 场景初始化
+// ============================================================
+function initScene() {
+  // 场景
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0a0d1a);
+  scene.fog = new THREE.Fog(0x0a0d1a, 30, 150);
+
+  // 相机
+  const w = viewerEl.clientWidth, h = viewerEl.clientHeight;
+  camera = new THREE.PerspectiveCamera(55, w / h, 0.2, 500);
+  camera.position.set(8, 6, 12);
+  camera.lookAt(0, 0, 0);
+
+  // 渲染器
+  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+  renderer.setSize(w, h);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  viewerEl.appendChild(renderer.domElement);
+
+  // OrbitControls
+  controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+  controls.target.set(0, 0, 0);
+  controls.maxPolarAngle = Math.PI * 0.48;
+  controls.minDistance = 1;
+  controls.maxDistance = 200;
+  controls.update();
+
+  // 光照
+  const ambient = new THREE.AmbientLight(0x334466, 1.2);
+  scene.add(ambient);
+  const hemi = new THREE.HemisphereLight(0x8899cc, 0x223344, 0.6);
+  scene.add(hemi);
+  const dirLight = new THREE.DirectionalLight(0xffffff, 1.5);
+  dirLight.position.set(15, 25, 10);
+  dirLight.castShadow = true;
+  dirLight.shadow.mapSize.set(1024, 1024);
+  dirLight.shadow.camera.near = 0.5;
+  dirLight.shadow.camera.far = 100;
+  dirLight.shadow.camera.left = -30;
+  dirLight.shadow.camera.right = 30;
+  dirLight.shadow.camera.top = 30;
+  dirLight.shadow.camera.bottom = -30;
+  scene.add(dirLight);
+
+  // 网格地面
+  updateGrid();
+
+  // 坐标轴
+  updateAxes();
+
+  // 机器人模型
+  robotModelGroup = createRobotModel();
+  scene.add(robotModelGroup);
+
+  // 接收阴影的地面
+  const groundGeom = new THREE.PlaneGeometry(200, 200);
+  const groundMat = new THREE.MeshStandardMaterial({
+    color: 0x1a1a2e, roughness: 0.8, metalness: 0.1
+  });
+  const ground = new THREE.Mesh(groundGeom, groundMat);
+  ground.rotation.x = -Math.PI / 2;
+  ground.position.y = -0.01;
+  ground.receiveShadow = true;
+  scene.add(ground);
+
+  // 窗口大小
+  window.addEventListener('resize', () => {
+    const w2 = viewerEl.clientWidth, h2 = viewerEl.clientHeight;
+    camera.aspect = w2 / h2;
+    camera.updateProjectionMatrix();
+    renderer.setSize(w2, h2);
+  });
+
+  // 动画循环
+  function animate() {
+    requestAnimationFrame(animate);
+
+    // 跟随模式：相机跟踪机器人
+    if (followMode && robotModelGroup?.visible) {
+      controls.target.lerp(robotModelGroup.position, 0.05);
+    }
+
+    controls.update();
+    renderer.render(scene, camera);
+
+    // FPS
+    frameCount++;
+    const now = performance.now();
+    if (now - lastFpsTime >= 1000) {
+      currentFps = Math.round(frameCount / ((now - lastFpsTime) / 1000));
+      document.getElementById('fpsVal').textContent = currentFps;
+      frameCount = 0;
+      lastFpsTime = now;
+
+      // 更新机器人位姿显示
+      if (robotModelGroup && robotModelGroup.visible) {
+        const p = lastRobotPos;
+        document.getElementById('poseVal').textContent =
+          `${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)}`;
+      }
+    }
+  }
+  animate();
+}
+
+function updateGrid() {
+  // 移除旧网格
+  const oldGrid = scene.getObjectByName('grid');
+  if (oldGrid) scene.remove(oldGrid);
+
+  if (document.getElementById('chkGrid').checked) {
+    const grid = new THREE.GridHelper(100, 50, 0x334466, 0x1a2a3a);
+    grid.name = 'grid';
+    scene.add(grid);
+  }
+}
+
+function updateAxes() {
+  const oldAxes = scene.getObjectByName('axes');
+  if (oldAxes) scene.remove(oldAxes);
+
+  if (document.getElementById('chkAxes').checked) {
+    const axes = new THREE.AxesHelper(5);
+    axes.name = 'axes';
+    scene.add(axes);
+  }
+}
+
+// ============================================================
+//  ROS 连接
+// ============================================================
+function connectROS() {
+  const url = document.getElementById('rosUrl').value.trim();
+  if (!url) return;
+
+  if (ros) {
+    ros.close();
+    ros = null;
+  }
+
+  ros = new ROSLIB.Ros({ url });
+
+  const dot = document.getElementById('rosDot');
+  const txt = document.getElementById('rosStatusText');
+  const btn = document.getElementById('btnConnect');
+
+  ros.on('connection', () => {
+    dot.className = 'dot on';
+    txt.textContent = `已连接 ${url}`;
+    btn.textContent = '断开';
+    btn.classList.add('warn');
+    btn.classList.remove('primary');
+    initROSSubscriptions();
+  });
+
+  ros.on('close', () => {
+    dot.className = 'dot off';
+    txt.textContent = '已断开';
+    btn.textContent = '连接';
+    btn.classList.add('primary');
+    btn.classList.remove('warn');
+  });
+
+  ros.on('error', (err) => {
+    dot.className = 'dot off';
+    txt.textContent = '连接错误';
+    console.error('ROS error:', err);
+  });
+}
+
+function disconnectROS() {
+  if (tfClient) { tfClient.dispose(); tfClient = null; }
+  if (ros) { ros.close(); ros = null; }
+}
+
+// ============================================================
+//  话题订阅
+// ============================================================
+let currentSubs = [];
+
+function unsubscribeAll() {
+  for (const sub of currentSubs) {
+    try { sub.unsubscribe(); } catch (e) {}
+  }
+  currentSubs = [];
+}
+
+function initROSSubscriptions() {
+  if (!ros || !ros.isConnected) return;
+  unsubscribeAll();
+
+  // TF Client
+  if (tfClient) tfClient.dispose();
+  tfClient = new ROSLIB.TFClient({
+    ros,
+    angularThres: 0.05,
+    transThres: 0.05,
+    rate: 10.0,
+    fixedFrame: 'map'
+  });
+
+  // 机器人位姿追踪
+  const ns = document.getElementById('namespace').value.trim();
+  const targetFrame = ns ? `${ns}/base_footprint` : 'base_footprint';
+  subscribeTF(targetFrame);
+
+  // 根据勾选订阅
+  refreshSubscriptions();
+}
+
+let lastTrajTime = 0;
+function subscribeTF(targetFrame) {
+  // 使用 TFClient.subscribe 追踪 map -> base_footprint
+  tfClient.subscribe('map', targetFrame, (tf) => {
+    updateRobotPose(
+      new THREE.Vector3(tf.translation.x, tf.translation.y, tf.translation.z),
+      tf.rotation
+    );
+
+    // 累积轨迹（节流：每200ms最多记录一次，最多保留10000点）
+    if (document.getElementById('chkTraj').checked) {
+      const now = performance.now();
+      if (now - lastTrajTime > 200) {
+        lastTrajTime = now;
+        trajPoints.push({
+          x: tf.translation.x,
+          y: tf.translation.y,
+          z: tf.translation.z
+        });
+        // 限制轨迹点数
+        const MAX_TRAJ = 10000;
+        if (trajPoints.length > MAX_TRAJ) {
+          trajPoints = trajPoints.slice(-MAX_TRAJ);
+        }
+        updateTrajectoryLine();
+      }
+    }
+  });
+}
+
+function refreshSubscriptions() {
+  if (!ros?.isConnected) return;
+  unsubscribeAll();
+
+  // 重新订阅 TF
+  const ns = document.getElementById('namespace').value.trim();
+  const targetFrame = ns ? `${ns}/base_footprint` : 'base_footprint';
+  if (tfClient) tfClient.dispose();
+  tfClient = new ROSLIB.TFClient({
+    ros, angularThres: 0.05, transThres: 0.05, rate: 10.0, fixedFrame: 'map'
+  });
+  subscribeTF(targetFrame);
+
+  const pointSize = parseFloat(document.getElementById('pointSize').value) || 2;
+  const voxelSize = parseFloat(document.getElementById('voxelSize').value) || 0.5;
+  const maxPts = parseInt(document.getElementById('maxPoints').value) || 200000;
+  const useHeightColor = document.getElementById('chkColorHeight').checked;
+
+  // 地图点云
+  if (document.getElementById('chkMapCloud').checked) {
+    const topic = document.getElementById('mapCloudTopic').value.trim();
+    if (topic) subscribeCloud(topic, 'map', pointSize, voxelSize, maxPts, useHeightColor);
+  }
+  // 机体点云
+  if (document.getElementById('chkBodyCloud').checked) {
+    const topic = document.getElementById('bodyCloudTopic').value.trim();
+    if (topic) subscribeCloud(topic, 'body', pointSize, voxelSize, maxPts, useHeightColor);
+  }
+  // 原始世界点云
+  if (document.getElementById('chkWorldCloud').checked) {
+    const topic = document.getElementById('worldCloudTopic').value.trim();
+    if (topic) subscribeCloud(topic, 'world', pointSize, voxelSize, maxPts, useHeightColor);
+  }
+  // 导航路径
+  if (document.getElementById('chkPath').checked) {
+    const topic = document.getElementById('pathTopic').value.trim();
+    if (topic) subscribePath(topic);
+  }
+
+  // 机器人模型可见性
+  if (robotModelGroup) {
+    robotModelGroup.visible = document.getElementById('chkRobot').checked;
+  }
+}
+
+let lastCloudTime = {};
+function subscribeCloud(topic, type, pointSize, voxelSize, maxPts, useHeightColor) {
+  const topicObj = new ROSLIB.Topic({
+    ros,
+    name: topic,
+    messageType: 'sensor_msgs/PointCloud2',
+    throttle_rate: 200  // 最多 5Hz
+  });
+
+  topicObj.subscribe((msg) => {
+    // 节流
+    const now = performance.now();
+    if (lastCloudTime[topic] && now - lastCloudTime[topic] < 200) return;
+    lastCloudTime[topic] = now;
+
+    const data = getMsgData(msg);
+    if (!data) return;
+
+    const totalPoints = msg.width * msg.height;
+    if (totalPoints === 0) return;
+
+    const parsed = parsePointCloud2Data(
+      data, msg.fields, msg.point_step, totalPoints, msg.is_bigendian
+    );
+    if (parsed.count === 0) return;
+
+    // 降采样
+    const voxelMap = voxelDownsample(parsed.positions, voxelSize);
+
+    // 限制最大点数
+    if (voxelMap.size > maxPts) {
+      const entries = Array.from(voxelMap.entries());
+      const toRemove = voxelMap.size - maxPts;
+      for (let i = 0; i < toRemove; i++) {
+        const idx = Math.floor(Math.random() * entries.length);
+        voxelMap.delete(entries[idx][0]);
+        entries.splice(idx, 1);
+      }
+    }
+
+    // 创建/更新 mesh
+    let meshVar, meshName;
+    if (type === 'map') { meshVar = mapCloudMesh; meshName = 'mapCloudMesh'; }
+    else if (type === 'body') { meshVar = bodyCloudMesh; meshName = 'bodyCloudMesh'; }
+    else { meshVar = worldCloudMesh; meshName = 'worldCloudMesh'; }
+
+    const oldMesh = meshVar;
+    const newMesh = updatePointCloudMesh(oldMesh, voxelMap, pointSize, useHeightColor);
+
+    if (oldMesh && oldMesh !== newMesh) {
+      scene.remove(oldMesh);
+      if (oldMesh.geometry) oldMesh.geometry.dispose();
+      if (oldMesh.material) oldMesh.material.dispose();
+    }
+    if (newMesh && newMesh !== oldMesh) {
+      scene.add(newMesh);
+    }
+
+    if (type === 'map') mapCloudMesh = newMesh;
+    else if (type === 'body') bodyCloudMesh = newMesh;
+    else worldCloudMesh = newMesh;
+
+    // 更新点数显示
+    let totalPts = 0;
+    if (mapCloudMesh?.visible) totalPts += mapCloudMesh.geometry.attributes.position.count;
+    if (bodyCloudMesh?.visible) totalPts += bodyCloudMesh.geometry.attributes.position.count;
+    if (worldCloudMesh?.visible) totalPts += worldCloudMesh.geometry.attributes.position.count;
+    document.getElementById('ptsVal').textContent = totalPts.toLocaleString();
+  });
+
+  currentSubs.push(topicObj);
+}
+
+function subscribePath(topic) {
+  const topicObj = new ROSLIB.Topic({
+    ros,
+    name: topic,
+    messageType: 'nav_msgs/Path'
+  });
+
+  topicObj.subscribe((msg) => {
+    if (!msg.poses || msg.poses.length === 0) return;
+    updatePathLine(msg.poses);
+  });
+
+  currentSubs.push(topicObj);
+}
+
+// ============================================================
+//  路径与轨迹渲染
+// ============================================================
+function updatePathLine(poses) {
+  if (pathLine) {
+    scene.remove(pathLine);
+    pathLine.geometry.dispose();
+    pathLine.material.dispose();
+    pathLine = null;
+  }
+
+  const points3D = poses.map(p => new THREE.Vector3(
+    p.pose.position.x,
+    p.pose.position.y,
+    p.pose.position.z + 0.05
+  ));
+
+  const geom = new THREE.BufferGeometry().setFromPoints(points3D);
+  const mat = new THREE.LineBasicMaterial({
+    color: 0xff6600,
+    linewidth: 1,
+    transparent: true,
+    opacity: 0.9
+  });
+
+  pathLine = new THREE.Line(geom, mat);
+  scene.add(pathLine);
+}
+
+function updateTrajectoryLine() {
+  if (trajLine) {
+    scene.remove(trajLine);
+    trajLine.geometry.dispose();
+    trajLine.material.dispose();
+    trajLine = null;
+  }
+
+  if (trajPoints.length < 2) return;
+
+  const points3D = trajPoints.map(p => new THREE.Vector3(p.x, p.y, p.z + 0.02));
+  const geom = new THREE.BufferGeometry().setFromPoints(points3D);
+
+  // 渐变色
+  const colors = [];
+  const n = trajPoints.length;
+  for (let i = 0; i < n; i++) {
+    const t = i / (n - 1);
+    // blue -> cyan -> yellow
+    const c = new THREE.Color();
+    if (t < 0.5) c.setRGB(0, t * 2, 1 - t * 2);
+    else c.setRGB((t - 0.5) * 2, 1, 0);
+    colors.push(c.r, c.g, c.b);
+  }
+  geom.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+
+  const mat = new THREE.LineBasicMaterial({
+    vertexColors: true,
+    linewidth: 1,
+    transparent: true,
+    opacity: 0.8
+  });
+
+  trajLine = new THREE.Line(geom, mat);
+  scene.add(trajLine);
+}
+
+// ============================================================
+//  相机控制
+// ============================================================
+let followMode = false;
+
+function setCameraView(view) {
+  followMode = false;
+
+  if (view === 'top') {
+    const target = controls.target.clone();
+    camera.position.set(target.x, target.y + 30, target.z + 0.1);
+    controls.target.copy(target);
+    controls.update();
+  } else if (view === 'follow') {
+    followMode = true;
+  } else if (view === 'free') {
+    followMode = false;
+    // 重置到较好视角
+    const center = new THREE.Vector3(0, 0, 0);
+    if (mapCloudMesh?.visible && mapCloudMesh.geometry) {
+      try {
+        mapCloudMesh.geometry.computeBoundingBox();
+        const box = mapCloudMesh.geometry.boundingBox;
+        if (box) box.getCenter(center);
+      } catch (e) {}
+    }
+    camera.position.set(center.x + 10, center.y + 5, center.z + 15);
+    controls.target.copy(center);
+    controls.update();
+  }
+}
+
+// 暴露到全局 (HTML onclick 调用)
+window.setCameraView = setCameraView;
+
+// ============================================================
+//  UI 事件绑定
+// ============================================================
+document.getElementById('btnConnect').addEventListener('click', () => {
+  if (ros?.isConnected) {
+    disconnectROS();
+  } else {
+    connectROS();
+  }
+});
+
+// 模式切换
+document.querySelectorAll('.mode-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.mode-tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+
+    const mode = tab.dataset.mode;
+    document.getElementById('modeTag').textContent = mode === 'mapping' ? '建图模式' : '导航模式';
+
+    // 建图模式：默认开启地图点云
+    if (mode === 'mapping') {
+      document.getElementById('chkMapCloud').checked = true;
+      document.getElementById('chkWorldCloud').checked = true;
+      document.getElementById('chkBodyCloud').checked = false;
+      document.getElementById('chkPath').checked = false;
+    } else {
+      // 导航模式：开启机体点云和路径
+      document.getElementById('chkMapCloud').checked = true;
+      document.getElementById('chkWorldCloud').checked = false;
+      document.getElementById('chkBodyCloud').checked = true;
+      document.getElementById('chkPath').checked = true;
+    }
+    refreshSubscriptions();
+  });
+});
+
+// 复选框变化
+['chkMapCloud','chkBodyCloud','chkWorldCloud','chkPath','chkTraj','chkRobot',
+ 'chkColorHeight','chkGrid','chkAxes'].forEach(id => {
+  document.getElementById(id)?.addEventListener('change', () => {
+    if (id === 'chkGrid') updateGrid();
+    if (id === 'chkAxes') updateAxes();
+    if (id === 'chkRobot') {
+      if (robotModelGroup) robotModelGroup.visible = document.getElementById('chkRobot').checked;
+    }
+    if (['chkMapCloud','chkBodyCloud','chkWorldCloud','chkPath','chkTraj'].includes(id)) {
+      refreshSubscriptions();
+    }
+  });
+});
+
+// 滑块
+document.getElementById('pointSize').addEventListener('input', function() {
+  document.getElementById('ptSizeVal').textContent = this.value;
+  const sz = parseFloat(this.value) * 0.03;
+  [mapCloudMesh, bodyCloudMesh, worldCloudMesh].forEach(m => {
+    if (m?.material) m.material.size = sz;
+  });
+});
+
+document.getElementById('voxelSize').addEventListener('input', function() {
+  document.getElementById('voxelVal').textContent = this.value;
+  refreshSubscriptions();
+});
+
+document.getElementById('maxPoints').addEventListener('input', function() {
+  const v = parseInt(this.value);
+  document.getElementById('maxPtsVal').textContent = v >= 1000 ? `${(v/1000).toFixed(0)}k` : v;
+  refreshSubscriptions();
+});
+
+// 清除按钮
+document.getElementById('btnClear').addEventListener('click', () => {
+  // 清除点云
+  [mapCloudMesh, bodyCloudMesh, worldCloudMesh].forEach(m => {
+    if (m) {
+      scene.remove(m);
+      if (m.geometry) m.geometry.dispose();
+      if (m.material) m.material.dispose();
+    }
+  });
+  mapCloudMesh = null;
+  bodyCloudMesh = null;
+  worldCloudMesh = null;
+
+  // 清除路径
+  if (pathLine) {
+    scene.remove(pathLine);
+    pathLine.geometry.dispose();
+    pathLine.material.dispose();
+    pathLine = null;
+  }
+
+  // 清除轨迹
+  if (trajLine) {
+    scene.remove(trajLine);
+    trajLine.geometry.dispose();
+    trajLine.material.dispose();
+    trajLine = null;
+  }
+  trajPoints = [];
+
+  document.getElementById('ptsVal').textContent = '0';
+});
+
+// ============================================================
+//  启动
+// ============================================================
+initScene();
+// 自动连接（如果已有 rosbridge）
+setTimeout(() => {
+  const url = document.getElementById('rosUrl').value;
+  if (url) connectROS();
+}, 1000);
+
+console.log('Dog SLAM 3D Viewer ready');
+console.log('  - 建图模式: 显示世界坐标系累积点云 (降采样)');
+console.log('  - 导航模式: 显示机体点云 + 导航路径 + 机器人轨迹');
+console.log('  - 按高度着色: 蓝->绿->黄->红 (低->高)');
+console.log('  - 右侧按钮: 俯视/跟随/自由视角');
+</script>
+</body>
+</html>
